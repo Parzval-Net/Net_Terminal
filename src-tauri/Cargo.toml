@@ -34,7 +34,7 @@ sha2 = "0.10"
 if-addrs = "0.13"
 tauri-plugin-dialog = "2"
 zip = { version = "9", default-features = false, features = ["deflate"] }
-md-5 = "0.10"
+md-5 = "0.11"
 tauri-plugin-updater = "2"
 # Contraseñas guardadas: bóveda cifrada (XChaCha20-Poly1305 + Argon2id) y llave en el
 # llavero del sistema cuando está disponible.
