@@ -1,4 +1,4 @@
-Required Notice: Copyright (c) 2026 Nicolás Rivera (https://github.com/Parzval-Net/Net_Terminal)
+Required Notice: Copyright (c) 2026 Nicolás Rivera (https://github.com/Parzval-Net)
 
 # PolyForm Noncommercial License 1.0.0
 

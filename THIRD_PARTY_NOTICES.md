@@ -1,6 +1,6 @@
 # Avisos de terceros
 
-NetTerminal incluye las bibliotecas de terceros listadas abajo. Cada una se distribuye bajo su propia licencia, que no cambia por la licencia de NetTerminal ([LICENSE](LICENSE)).
+NetTerminal incluye las bibliotecas de terceros listadas abajo. Cada una se distribuye bajo su propia licencia, que no cambia por la licencia de NetTerminal ([LICENSE.md](LICENSE.md)).
 
 Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-lock.json` (dependencias de producción) y de `src-tauri/Cargo.lock` (crates enlazados en la app, todas las plataformas). 130 paquetes de npm y 607 crates de Rust.
 
