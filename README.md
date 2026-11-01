@@ -56,6 +56,6 @@ NetTerminal se distribuye bajo la [PolyForm Noncommercial License 1.0.0](LICENSE
 - **Permitido:** uso personal (estudio, aficiones, investigación privada) y uso en organizaciones sin fines de lucro, como instituciones educativas, de investigación pública o entidades de gobierno.
 - **Requiere autorización previa del autor:** cualquier uso comercial, incluido el uso dentro de una empresa (aunque sea interno o gratuito), su venta, redistribución o inclusión en productos o servicios.
 
-Para solicitar autorización, abre un [issue](https://github.com/Parzval-Net/Net_Terminal/issues) indicando la organización y el uso previsto. Las bibliotecas de terceros incluidas mantienen sus propias licencias.
+Para solicitar autorización, abre un [issue](https://github.com/Parzval-Net/Net_Terminal/issues) indicando la organización y el uso previsto. Las bibliotecas de terceros incluidas mantienen sus propias licencias: el detalle está en [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Creado por Nicolás Rivera · Desarrollado en conjunto con Claude.
