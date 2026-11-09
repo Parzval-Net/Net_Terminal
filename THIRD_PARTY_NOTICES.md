@@ -2,14 +2,14 @@
 
 NetTerminal incluye las bibliotecas de terceros listadas abajo. Cada una se distribuye bajo su propia licencia, que no cambia por la licencia de NetTerminal ([LICENSE.md](LICENSE.md)).
 
-Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-lock.json` (dependencias de producción) y de `src-tauri/Cargo.lock` (crates enlazados en la app, todas las plataformas). 130 paquetes de npm y 607 crates de Rust.
+Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-lock.json` (dependencias de producción) y de `src-tauri/Cargo.lock` (crates enlazados en la app, todas las plataformas). 129 paquetes de npm y 607 crates de Rust.
 
 ## Resumen por licencia
 
 | Licencia | Paquetes |
 | --- | --- |
 | MIT OR Apache-2.0 | 292 |
-| MIT | 215 |
+| MIT | 214 |
 | Apache-2.0 OR MIT | 57 |
 | ISC | 37 |
 | Unicode-3.0 | 18 |
@@ -43,7 +43,7 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | BSD-3-Clause/MIT | 1 |
 | CC0-1.0 OR MIT-0 OR Apache-2.0 | 1 |
 | CDLA-Permissive-2.0 | 1 |
-| EPL-2.0 | 1 |
+| EPL-2.0 OR GPL-3.0-or-later | 1 |
 | MIT (según su archivo de licencia) | 1 |
 | MIT / Apache-2.0 | 1 |
 | MIT OR BSD-3-Clause | 1 |
@@ -72,7 +72,7 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | @mermaid-js/parser | 2.0.1 | MIT | https://github.com/mermaid-js/mermaid |
 | @tauri-apps/api | 2.12.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | @tauri-apps/plugin-clipboard-manager | 2.5.0 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
-| @tauri-apps/plugin-dialog | 2.8.3 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
+| @tauri-apps/plugin-dialog | 2.8.4 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
 | @tauri-apps/plugin-opener | 2.7.2 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
 | @types/d3 | 7.4.3 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/d3-array | 3.2.2 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
@@ -160,7 +160,7 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | dayjs | 1.11.23 | MIT | https://github.com/iamkun/dayjs |
 | delaunator | 5.1.0 | ISC | https://github.com/mapbox/delaunator |
 | dompurify | 3.4.17 | (MPL-2.0 OR Apache-2.0) | https://github.com/cure53/DOMPurify |
-| elkjs | 0.9.3 | EPL-2.0 | https://github.com/kieler/elkjs |
+| elkjs | 0.12.1 | EPL-2.0 OR GPL-3.0-or-later | https://github.com/kieler/elkjs |
 | es-toolkit | 1.53.0 | MIT | https://github.com/toss/es-toolkit |
 | hachure-fill | 0.5.2 | MIT | https://github.com/pshihn/hachure-fill |
 | iconv-lite | 0.6.3 | MIT | https://github.com/ashtuchkin/iconv-lite |
@@ -172,9 +172,9 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | layout-base | 1.0.2 | MIT | https://github.com/iVis-at-Bilkent/layout-base |
 | layout-base | 2.0.1 | MIT | https://github.com/iVis-at-Bilkent/layout-base |
 | lodash-es | 4.18.1 | MIT | https://github.com/lodash/lodash |
-| lucide-react | 1.61.0 | ISC | https://github.com/lucide-icons/lucide |
+| lucide-react | 1.69.0 | ISC | https://github.com/lucide-icons/lucide |
 | marked | 16.4.2 | MIT | https://github.com/markedjs/marked |
-| mermaid | 12.2.0 | MIT | https://github.com/mermaid-js/mermaid |
+| mermaid | 12.3.0 | MIT | https://github.com/mermaid-js/mermaid |
 | package-manager-detector | 1.9.0 | MIT | https://github.com/antfu-collective/package-manager-detector |
 | path-data-parser | 0.1.0 | MIT | https://github.com/pshihn/path-data-parser |
 | points-on-curve | 0.2.0 | MIT | https://github.com/pshihn/bezier-points |
@@ -189,7 +189,6 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | stylis | 4.4.0 | MIT | https://github.com/thysultan/stylis.js |
 | tinyexec | 1.3.1 | MIT | https://github.com/tinylibs/tinyexec |
 | ts-dedent | 2.3.0 | MIT | https://github.com/tamino-martinius/node-ts-dedent |
-| uuid | 14.0.3 | MIT | https://github.com/uuidjs/uuid |
 
 ## Aplicación (Rust)
 
@@ -198,7 +197,7 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | https://github.com/oyvindln/adler2 |
 | aead | 0.6.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | aes | 0.8.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
-| aes | 0.9.3 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
+| aes | 0.9.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
 | aho-corasick | 1.1.5 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
 | alloc-no-stdlib | 3.0.0 | BSD-3-Clause | https://github.com/dropbox/rust-alloc-no-stdlib |
 | alloc-stdlib | 0.3.0 | BSD-3-Clause | https://github.com/dropbox/rust-alloc-no-stdlib |
@@ -552,7 +551,7 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | reqwest | 0.13.5 | MIT OR Apache-2.0 | https://github.com/seanmonstar/reqwest |
-| rfd | 0.16.1 | MIT | https://github.com/PolyMeilex/rfd |
+| rfd | 0.17.2 | MIT | https://github.com/PolyMeilex/rfd |
 | ring | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
@@ -630,7 +629,7 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | tauri-codegen | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-macros | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-plugin-clipboard-manager | 2.5.0 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
-| tauri-plugin-dialog | 2.8.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
+| tauri-plugin-dialog | 2.8.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-fs | 2.7.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-opener | 2.7.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-updater | 2.14.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
@@ -790,7 +789,7 @@ Generado con `node scripts/licenses/generar-avisos.mjs` a partir de `package-loc
 | zerotrie | 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec | 0.11.9 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec-derive | 0.11.7 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| zip | 9.1.2 | MIT | https://github.com/zip-rs/zip2 |
+| zip | 9.4.0 | MIT | https://github.com/zip-rs/zip2 |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zopfli | 0.8.4 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |
@@ -904,7 +903,7 @@ Líneas de copyright tomadas del archivo de licencia de cada paquete. Los paquet
 - **dayjs 1.11.23:** Copyright (c) 2018-present, iamkun
 - **delaunator 5.1.0:** Copyright (c) 2026, Mapbox
 - **dompurify 3.4.17:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; (c) under Patent Claims infringed by Covered Software in the absence of
-- **elkjs 0.9.3:** copyright rights in its Contribution, if any, to grant the copyright
+- **elkjs 0.12.1:** copyright rights in its Contribution, if any, to grant the copyright
 - **es-toolkit 1.53.0:** Copyright (c) 2024 Viva Republica, Inc.
 - **hachure-fill 0.5.2:** Copyright (c) 2023 Preet Shihn
 - **iconv-lite 0.6.3:** Copyright (c) 2011 Alexander Shtuchkin
@@ -916,9 +915,9 @@ Líneas de copyright tomadas del archivo de licencia de cada paquete. Los paquet
 - **layout-base 1.0.2:** Copyright (c) 2019 iVis@Bilkent
 - **layout-base 2.0.1:** Copyright (c) 2019 iVis@Bilkent
 - **lodash-es 4.18.1:** Copyright OpenJS Foundation and other contributors <https://openjsf.org/>; Copyright and related rights for sample code are waived via CC0. Sample
-- **lucide-react 1.61.0:** Copyright (c) 2026 Lucide Icons and Contributors; copyright notice and this permission notice appear in all copies.; Copyright (c) 2013-present Cole Bemis
+- **lucide-react 1.69.0:** Copyright (c) 2026 Lucide Icons and Contributors; copyright notice and this permission notice appear in all copies.; Copyright (c) 2013-present Cole Bemis
 - **marked 16.4.2:** Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/); Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/); Copyright © 2004, John Gruber
-- **mermaid 12.2.0:** Copyright (c) 2014 - 2022 Knut Sveidqvist
+- **mermaid 12.3.0:** Copyright (c) 2014 - 2022 Knut Sveidqvist
 - **package-manager-detector 1.9.0:** Copyright (c) 2020-PRESENT Anthony Fu <https://github.com/antfu>
 - **path-data-parser 0.1.0:** Copyright (c) 2020 Preet Shihn
 - **points-on-curve 0.2.0:** Copyright (c) 2020 Preet Shihn
@@ -932,11 +931,10 @@ Líneas de copyright tomadas del archivo de licencia de cada paquete. Los paquet
 - **stylis 4.4.0:** Copyright (c) 2016-present Sultan Tarimo
 - **tinyexec 1.3.1:** Copyright (c) 2024 Tinylibs
 - **ts-dedent 2.3.0:** Copyright (c) 2018 Tamino Martinius
-- **uuid 14.0.3:** Copyright (c) 2010-2020 Robert Kieffer and other contributors
 - **adler2 2.0.1:** Copyright (C) Jonas Schievink <jonasschievink@gmail.com>; copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works
 - **aead 0.6.1:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2019-2026 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
 - **aes 0.8.4:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2018 Artyom Pavlov
-- **aes 0.9.3:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2018-2024 The RustCrypto Project Developers; Copyright (c) 2018 Artyom Pavlov
+- **aes 0.9.4:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2018-2024 The RustCrypto Project Developers; Copyright (c) 2018 Artyom Pavlov
 - **aho-corasick 1.1.5:** Copyright (c) 2015 Andrew Gallant
 - **alloc-no-stdlib 3.0.0:** Copyright (c) 2016 Dropbox, Inc.
 - **android_system_properties 0.1.6:** Copyright 2016 Nicolas Silva; Copyright (c) 2013 Nicolas Silva; COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
@@ -1227,7 +1225,7 @@ Líneas de copyright tomadas del archivo de licencia de cada paquete. Los paquet
 - **regex-automata 0.4.18:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2014 The Rust Project Developers
 - **regex-syntax 0.8.11:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2014 The Rust Project Developers
 - **reqwest 0.13.5:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright 2016 Sean McArthur; Copyright (c) 2016-2026 Sean McArthur
-- **rfd 0.16.1:** Copyright (c) 2022 Bartłomiej Maryńczak
+- **rfd 0.17.2:** Copyright (c) 2022 Bartłomiej Maryńczak
 - **ring 0.17.14:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2009 The Go Authors. All rights reserved.; copyright notice, this list of conditions and the following disclaimer
 - **rustc-hash 2.1.3:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works
 - **rustix 1.1.5:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works
@@ -1301,7 +1299,7 @@ Líneas de copyright tomadas del archivo de licencia de cada paquete. Los paquet
 - **tauri-codegen 2.7.4:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-macros 2.7.4:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-plugin-clipboard-manager 2.5.0:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2017 - Present Tauri Apps Contributors
-- **tauri-plugin-dialog 2.8.3:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2017 - Present Tauri Apps Contributors
+- **tauri-plugin-dialog 2.8.4:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-plugin-fs 2.7.1:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-plugin-opener 2.7.2:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-plugin-updater 2.14.1:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) 2017 - Present Tauri Apps Contributors
@@ -1448,7 +1446,7 @@ Líneas de copyright tomadas del archivo de licencia de cada paquete. Los paquet
 - **zerotrie 0.2.5:** COPYRIGHT AND PERMISSION NOTICE; Copyright © 2020-2024 Unicode, Inc.
 - **zerovec 0.11.9:** COPYRIGHT AND PERMISSION NOTICE; Copyright © 2020-2024 Unicode, Inc.
 - **zerovec-derive 0.11.7:** COPYRIGHT AND PERMISSION NOTICE; Copyright © 2020-2024 Unicode, Inc.
-- **zip 9.1.2:** Copyright (c) 2014 Mathijs van de Nes
+- **zip 9.4.0:** Copyright (c) 2014 Mathijs van de Nes
 - **zlib-rs 0.6.8:** (C) 2024 Trifecta Tech Foundation
 - **zopfli 0.8.4:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright 2011 Google Inc.
 - **zune-core 0.5.3:** copyright notice that is included in or attached to the work; copyright license to reproduce, prepare Derivative Works of,; (c) You must retain, in the Source form of any Derivative Works; Copyright (c) zune-image developers; (C) zune-image developers
@@ -4465,9 +4463,9 @@ of Data, including for example machine learning models and models'
 insights.
 ```
 
-### EPL-2.0
+### EPL-2.0 OR GPL-3.0-or-later
 
-Texto tomado de elkjs 0.9.3 (LICENSE.md).
+Texto tomado de elkjs 0.12.1 (LICENSE.md).
 
 ```text
 # Eclipse Public License - v 2.0
@@ -4722,8 +4720,7 @@ No third-party beneficiary rights are created under this Agreement.
 
 “This Source Code may also be made available under the following
 Secondary Licenses when the conditions for such availability set forth
-in the Eclipse Public License, v. 2.0 are satisfied: {name license(s),
-version(s), and exceptions or additional permissions here}.”
+in the Eclipse Public License, v. 2.0 are satisfied: GNU General Public License v3.0 or later”
 
 > Simply including a copy of this Agreement, including this Exhibit A is
 > not sufficient to license the Source Code under Secondary Licenses.
