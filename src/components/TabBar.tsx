@@ -210,6 +210,10 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                   e.preventDefault();
                   onClose(t.id);
                 } else {
+                  // El clic no enfoca la pestaña: el foco sigue en la terminal (si quedara en la
+                  // pestaña, Supr la cerraría y lo tecleado no llegaría al equipo). El foco por
+                  // teclado (Tab y flechas) no cambia.
+                  if (editing !== t.id) e.preventDefault();
                   onSelect(t.id);
                   if (editing !== t.id) drag.begin(e, t.id);
                 }

@@ -191,7 +191,10 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                 if (e.button === 1) {
                   e.preventDefault();
                   onClose(t.id);
-                } else if (e.button === 0) {
+                } else {
+                  // El clic no enfoca la pestaña: el foco sigue en la terminal (ver TabBar).
+                  e.preventDefault();
+                  if (e.button !== 0) return;
                   onSelect(t.id);
                   drag.begin(e, t.id);
                 }
