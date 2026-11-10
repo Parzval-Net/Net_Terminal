@@ -20,7 +20,8 @@ registerHooks({
 });
 
 const W = await import("../../src/lib/mcpWindow.ts");
-const { computeRisk } = await import("../../src/lib/packs.ts");
+const { computeRisk, contactsNetwork, opensInteractive } = await import("../../src/lib/packs.ts");
+const E = { risk: computeRisk, contacts: contactsNetwork, interactive: opensInteractive };
 const B = await import("../../src/lib/mcpBridge.ts");
 
 const T0 = 1_700_000_000_000;
@@ -59,7 +60,7 @@ const req = (detail, over = {}) => ({ tool: "run_command", detail, connection: "
 // ---------- Solo `read`, una línea, sin control, dentro del tope ----------
 {
   const list = W.grantWindow([], who, 15, T0);
-  const ok = (d, r = req(d), now = T0 + MIN) => W.autoApprove(list, r, now, computeRisk);
+  const ok = (d, r = req(d), now = T0 + MIN) => W.autoApprove(list, r, now, E);
   assert.deepEqual(ok("show clock"), { auto: true, risk: "read" });
   assert.equal(ok("display interface brief").auto, true);
   assert.equal(ok("show interfaces GigabitEthernet1/0/1").auto, true);
@@ -87,14 +88,57 @@ const req = (detail, over = {}) => ({ tool: "run_command", detail, connection: "
   for (const c of ["ping 192.0.2.10", "ping secreto.example.test", "traceroute 192.0.2.10", "nslookup secreto.example.test", "curl http://192.0.2.10/?d=x",
     "execute ping secreto.example.test", "do ping 192.0.2.10", "show clock | ping x", "ssh 192.0.2.10", "telnet 192.0.2.10 23", "/usr/bin/curl http://192.0.2.10/", "PING.EXE 192.0.2.10"])
     assert.equal(ok(c).auto, false, c);
-  for (const c of ["show ip ssh", "show hosts", "show ping-stats", "show running-config", "get system status", "display ip routing-table"]) assert.equal(W.contactsHost(c), false, c);
-  // La app decide con ese mismo motor, no con una copia: useMcp pasa el computeRisk de packs.ts a autoApprove.
+  // Auditoría: el cliente de red escondido tras un prefijo, comillas o una subexpresión lo ve el mismo motor
+  // (contactsNetwork normaliza igual que computeRisk). Todos son consulta: los frena solo esa anotación.
+  for (const c of ["time ping x.example.test", "nohup ping x.example.test", "busybox ping x.example.test", "env ping x.example.test", "timeout 5 ping x.example.test",
+    "sudo -n ping x.example.test", "'ping' x.example.test", '"ping" x.example.test', "p''ing x.example.test", "Write-Output (Resolve-DnsName x.example.test)",
+    "watch ping 192.0.2.10", "exe ping 192.0.2.10", "show host secreto.example.test", "nbtstat -a equipo", "nltest /dsgetdc:example.test", "w32tm /stripchart /computer:192.0.2.10",
+    "execute ssh admin@192.0.2.10", "dns-sd -Q secreto.example.test", "resolvectl query secreto.example.test"]) {
+    assert.equal(contactsNetwork(c), true, c);
+    assert.equal(ok(c).auto, false, c);
+  }
+  for (const c of ["time ping x.example.test", "'ping' x.example.test", "Write-Output (Resolve-DnsName x.example.test)", "show host secreto.example.test"]) {
+    assert.equal(computeRisk(c), "read", c);
+    assert.deepEqual(ok(c), { auto: false, reason: "contacta a otro equipo" }, c);
+  }
+  // Credenciales hacia otro equipo (WMI, CIM, RPC, LDAP, UNC): ya no son consulta.
+  for (const c of ["Get-WmiObject Win32_OperatingSystem -ComputerName equipo", "Get-CimInstance Win32_Service -CimSession equipo", "Get-Service -ComputerName equipo",
+    "Get-ADUser usuario -Server dc.example.test", "Test-WSMan equipo", "systeminfo /s equipo", "tasklist /s equipo", "getmac /s equipo", "typeperf -s equipo \"\\Processor(_Total)\\% Processor Time\"",
+    "netsh -r equipo interface show interface", "Get-ChildItem //equipo/recurso", "dir //equipo/recurso", "Get-Content FileSystem::\\\\equipo\\recurso\\x.txt"]) {
+    assert.equal(ok(c).auto, false, c);
+    assert.equal(computeRisk(c), "change", c);
+  }
+  for (const c of ["show ip ssh", "show hosts", "show ping-stats", "show running-config", "get system status", "display ip routing-table", "Get-Service", "systeminfo",
+    "execute ping-options view-settings", "top -b -n1", "ssh server enable"]) assert.equal(contactsNetwork(c), false, c);
+  // Programas interactivos: consulta para quien escribe, pero las líneas siguientes del agente las leería el programa.
+  for (const c of ["less /etc/hosts", "more /etc/hosts", "cat /etc/hosts | more", "top", "cpview", "diagnose sys top", "journalctl -u ssh", "systemctl status ssh",
+    "get system performance top", "monitor interface ge-0/0/0", "nettop", "mtr 192.0.2.10"]) {
+    assert.equal(computeRisk(c), "read", c);
+    assert.equal(opensInteractive(c), true, c);
+    assert.equal(ok(c).auto, false, c);
+  }
+  assert.deepEqual(ok("less /etc/hosts"), { auto: false, reason: "programa interactivo" });
+  for (const c of ["ssh 192.0.2.10", "telnet 192.0.2.10", "watch ping 192.0.2.10", "vi x.txt", "view x.txt", "man ls", "execute ssh admin@192.0.2.10"]) assert.equal(opensInteractive(c), true, c);
+  // Lecturas legítimas que siguen pasando por la ventana.
+  for (const c of ["top -b -n1", "show hosts", "show ip ssh", "Get-Service", "systeminfo", "more flash:config.text", "journalctl --no-pager -u ssh", "journalctl -f",
+    "systemctl is-active ssh", "diagnose sys session list", "diagnose test application dnsproxy 2", "free -m", "uptime"]) {
+    assert.equal(opensInteractive(c), false, c);
+    assert.deepEqual(ok(c), { auto: true, risk: "read" }, c);
+  }
+  // Auditoría: "top <comando>" de Junos y "diagnose test application" de FortiOS ya no son consulta.
+  for (const c of ["top delete", "top set system host-name x", "top rollback 1", "top load override terminal", "top commit and-quit", "top run request system reboot",
+    "diagnose test application ipsmonitor 98", "diagnose test application ipsmonitor 5", "diagnose test application ipsmonitor 2", "diagnose test application dnsproxy 1"])
+    assert.equal(ok(c).auto, false, c);
+  // La app decide con ese mismo motor, no con una copia: useMcp pasa computeRisk, contactsNetwork y opensInteractive de packs.ts.
   const hook = readFileSync(new URL("../../src/lib/useMcp.ts", import.meta.url), "utf8");
-  assert.ok(/import \{[^}]*\bcomputeRisk\b[^}]*\} from "\.\/packs"/.test(hook), "useMcp.ts debe importar computeRisk de ./packs");
-  assert.ok(/autoApprove\(.*,\s*computeRisk\)/.test(hook), "useMcp.ts debe pasar computeRisk a autoApprove");
-  // mcpWindow.ts no clasifica por su cuenta: solo recibe la función de riesgo.
+  for (const f of ["computeRisk", "contactsNetwork", "opensInteractive"])
+    assert.ok(new RegExp(`import \\{[^}]*\\b${f}\\b[^}]*\\} from "\\./packs"`).test(hook), `useMcp.ts debe importar ${f} de ./packs`);
+  assert.ok(/autoApprove\(.*\{\s*risk:\s*computeRisk,\s*contacts:\s*contactsNetwork,\s*interactive:\s*opensInteractive\s*\}\)/.test(hook), "useMcp.ts debe pasar el motor de packs.ts a autoApprove");
+  // mcpWindow.ts no clasifica por su cuenta: solo recibe las funciones del motor.
   const win = readFileSync(new URL("../../src/lib/mcpWindow.ts", import.meta.url), "utf8");
   assert.ok(!/\bcomputeRisk\s*[(=]|function computeRisk/.test(win), "mcpWindow.ts no debe tener su propio motor de riesgo");
+  assert.ok(!/\b(ping|nslookup|traceroute|curl)\b.*\b(ping|nslookup|traceroute|curl)\b/.test(win.replace(/\/\*[\s\S]*?\*\//g, "")), "mcpWindow.ts no debe tener su propia lista de clientes de red");
+  assert.equal(W.contactsHost, undefined, "contactsHost se reemplazó por contactsNetwork del motor");
   // Varias líneas, caracteres de control, de dirección o ancho cero, tabuladores.
   for (const cmd of ["show clock\nreload", "show clock\rreload", "show clock\r\n", "show\tclock", "show clock\u0015reload", "show\u001b[2Kclock", "show ‮kcolc", "show​clock", "show clock\u007f", "﻿show clock", "show\u0085clock"]) {
     assert.equal(ok(cmd).auto, false, JSON.stringify(cmd));
@@ -114,15 +158,18 @@ const req = (detail, over = {}) => ({ tool: "run_command", detail, connection: "
   assert.equal(ok("show clock", req("show clock", { tool: "open_session" })).auto, false);
   assert.equal(ok("show clock", req("show clock", { tool: "send_command" })).auto, true);
   // Sin ventana: nunca.
-  assert.equal(W.autoApprove([], req("show clock"), T0, computeRisk).auto, false);
-  // La decisión depende solo del resultado de `risk`: un motor que diga change/disruptive la niega.
-  assert.equal(W.autoApprove(list, req("show clock"), T0, () => "change").auto, false);
-  assert.equal(W.autoApprove(list, req("show clock"), T0, () => "disruptive").auto, false);
-  assert.equal(W.autoApprove(list, req("reload"), T0, () => "read").auto, true);
+  assert.equal(W.autoApprove([], req("show clock"), T0, E).auto, false);
+  // La decisión depende solo del resultado del motor recibido: change/disruptive, cliente de red o programa interactivo la niegan.
+  const eng = (risk, contacts = false, interactive = false) => ({ risk: () => risk, contacts: () => contacts, interactive: () => interactive });
+  assert.equal(W.autoApprove(list, req("show clock"), T0, eng("change")).auto, false);
+  assert.equal(W.autoApprove(list, req("show clock"), T0, eng("disruptive")).auto, false);
+  assert.equal(W.autoApprove(list, req("reload"), T0, eng("read")).auto, true);
+  assert.deepEqual(W.autoApprove(list, req("show clock"), T0, eng("read", true)), { auto: false, reason: "contacta a otro equipo" });
+  assert.deepEqual(W.autoApprove(list, req("show clock"), T0, eng("read", false, true)), { auto: false, reason: "programa interactivo" });
   // Agente sin Mcp-Session-Id: su ventana es la de clave vacía, distinta de las demás.
   const anon = W.grantWindow([], { ...who, clientKey: "" }, 5, T0);
-  assert.equal(W.autoApprove(anon, req("show clock", { client_key: "" }), T0, computeRisk).auto, true);
-  assert.equal(W.autoApprove(anon, req("show clock"), T0, computeRisk).auto, false);
+  assert.equal(W.autoApprove(anon, req("show clock", { client_key: "" }), T0, E).auto, true);
+  assert.equal(W.autoApprove(anon, req("show clock"), T0, E).auto, false);
 }
 
 // ---------- Riesgo por línea y oferta de la ventana ----------
