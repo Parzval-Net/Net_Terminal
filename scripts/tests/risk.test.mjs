@@ -575,6 +575,50 @@ for (const c of ["show hosts", "show ip ssh", "show ping-stats", "show running-c
   "ssh server enable", "telnet 10.0.0.0 255.0.0.0", "diagnose sys top", "Get-Service", "systeminfo", "nbtstat -n", "top", "cat /etc/hosts", "show ssh", "display ssh server status"])
   assert.equal(contactsNetwork(c), false, c);
 
+// ---------- Re-auditoría: sockets como rutas y recursos montados desde otro equipo ----------
+// /dev/tcp|udp (bash, ksh) y /inet/… (gawk) abren una conexión: al menos cambio, en redirección o como argumento,
+// también con comillas o escapes en medio. Una entrada desde una ruta que arma el shell puede ser /dev/tcp: cambio.
+for (const c of ["cat </dev/tcp/x.example.test/80", "wc -c </dev/tcp/x.example.test/80", "bash -c 'head </dev/udp/x.example.test/53'", "cat </dev/t''cp/x.example.test/80",
+  'cat </dev/tc\\p/x.example.test/80', 'cat <"/dev/tcp/x.example.test/80"', "grep x /dev/tcp/x.example.test/1", "tail -f /dev/udp/x.example.test/53", "cat /dev/tcp/x.example.test/80",
+  "head -c 10 0</dev/tcp/192.0.2.1/22", "sudo cat </dev/tcp/192.0.2.1/80", "awk 'BEGIN{print |& \"/inet/tcp/0/x.example.test/80\"}'", "gawk 'BEGIN{print \"x\" > \"/inet/udp/0/x.example.test/53\"}'",
+  "awk 'BEGIN{while ((\"/inet/tcp/0/x.example.test/80\" |& getline l) > 0) print l}'", "p=/dev/tcp; cat <$p/x.example.test/80", 'cat <"$f"', "cat <`echo x`", "type < %ARCHIVO%",
+  "exec 3<>/dev/tcp/x.example.test/80"]) {
+  atLeast(c, "change");
+  if (!/\$p|\$f|`|%/.test(c)) assert.equal(contactsNetwork(c), true, c);
+}
+for (const c of ["cat /dev/null", "cat x 2>/dev/null", "sort < datos.txt", "cat <<<$x", "awk '$1 < $2' datos.txt", "ls /etc", "cat /proc/net/tcp", "cat /proc/net/udp", "ls /dev/", "ls -l /dev/tty"]) {
+  is(c, "read");
+  assert.equal(contactsNetwork(c), false, c);
+}
+// autofs y automount montan y resuelven el equipo al recorrer la ruta: siguen consulta, pero cuentan como red.
+for (const c of ["ls /net/x.example.test", "ls /nfs/x.example.test/datos", "ls /afs/example.test/x", "ls /Volumes/recurso", "ls /Network/Servers/x.example.test", "ls smb://x.example.test/recurso",
+  "cat nfs://x.example.test/x", "find /net/x.example.test", "du -sh /nfs/x.example.test", "cat </net/x.example.test/x", "ls -la '/net/x.example.test'", "head afp://x.example.test/x"]) {
+  is(c, "read");
+  assert.equal(contactsNetwork(c), true, c);
+}
+for (const c of ["ls /network-scripts", "ls /etc/sysconfig/network-scripts/", "cat /etc/auto.net", "ls /Volumes", "ls /System/Volumes/Data", "ls /netx/y", "cat net/x", "cat /proc/net/dev", "ls /mnt"])
+  assert.equal(contactsNetwork(c), false, c);
+// Consultas locales que resuelven un nombre escrito: filtros de captura, ss, lsof -i @, route get, ping por WMI.
+for (const c of ["tcpdump -i eth0 host secreto.example.test", "tcpdump -i eth0 src x.example.test and port 53", "tshark -i eth0 -f \"host x.example.test\"", "ss -tn dst x.example.test",
+  "lsof -i @x.example.test", "lsof -iTCP@x.example.test:443", "route get x.example.test", "route -n get x.example.test", "Get-WmiObject Win32_PingStatus -Filter \"Address='x.example.test'\"",
+  "Get-CimInstance -Query \"select * from Win32_PingStatus where Address='x.example.test'\"", "networkQuality -C https://x.example.test/config"]) {
+  is(c, "read");
+  assert.equal(contactsNetwork(c), true, c);
+}
+for (const c of ["tcpdump -nn -i eth0 dst port 443", "tcpdump -i eth0 host 192.0.2.1 and port 53", "ss -tn dst :443", "ss -tunap", "lsof -i :22", "lsof -i @192.0.2.1", "route -n get default",
+  "route get 192.0.2.1", "networkQuality", "Get-WmiObject Win32_OperatingSystem"]) assert.equal(contactsNetwork(c), false, c);
+// La clase completa: estas formas ya no eran consulta (intérpretes y clientes que no están en ninguna lista) o ya contaban como red.
+for (const c of ["python -c 'import socket'", "python3 -c \"__import__('socket').create_connection(('x.example.test', 80))\"", "perl -e 'use IO::Socket'", "ldapsearch -H ldap://x.example.test -x",
+  "smbclient -L x.example.test -N", "showmount -e x.example.test", "rpcinfo -p x.example.test", "snmpget -v2c -c public x.example.test sysName.0", "snmpwalk -v2c -c public x.example.test",
+  "ntpdate -q x.example.test", "ntpq -p x.example.test", "chronyc -h x.example.test sources", "nmap x.example.test", "whois example.test", "finger usuario@x.example.test",
+  "Test-Path \\\\x.example.test\\recurso", "net view \\\\x.example.test", "[System.Net.Dns]::GetHostAddresses('x.example.test')", "(New-Object Net.WebClient).DownloadString('http://x.example.test/')",
+  "systemd-resolve x.example.test", "avahi-resolve -n x.example.test", "nmblookup x.example.test", "drill x.example.test", "kdig x.example.test", "smbutil view //x.example.test"]) atLeast(c, "change");
+for (const c of ["getent hosts x.example.test", "host x.example.test", "dscacheutil -q host -a name x.example.test", "openssl s_client -connect x.example.test:443", "mtr -r x.example.test",
+  "nslookup x.example.test 192.0.2.53", "ping -S 192.0.2.1 x.example.test", "dig @192.0.2.53 x.example.test", "nc -z x.example.test 443", "wget --spider http://x.example.test/"]) {
+  is(c, "read");
+  assert.equal(contactsNetwork(c), true, c);
+}
+
 // ---------- opensInteractive: lecturas que toman la terminal ----------
 for (const c of ["less /etc/hosts", "more /etc/hosts", "cat /etc/hosts | less", "cat /etc/hosts | more", "top", "top -d 2", "sudo top", "htop", "cpview", "vi /etc/hosts", "view /etc/hosts", "man ip",
   "watch -n 1 date", "ssh 192.0.2.1", "telnet 192.0.2.1", "execute ssh admin@192.0.2.1", "execute ha manage 1 admin", "journalctl -u ssh", "systemctl status ssh", "systemctl",
@@ -617,6 +661,9 @@ for (const c of ["less /etc/hosts", "top", "cpview", "journalctl -u ssh", "ssh 1
     ["w32tm", "w32tm ", "/query ", "/computer"], ["typeperf", "typeperf ", "-s", "x"], ["UNC //", "dir ", "//a", "/"], ["UNC ::", "gc ", "::\\\\a"],
     ["nbtstat", "nbtstat ", "-x ", "-ab"], ["show host", "show host ", "x "], ["diagnose test application", "diagnose test application ", "ipsmonitor "],
     ["more", "more ", "a "], ["mtr", "mtr ", "-n "], ["journalctl", "journalctl ", "-u x "], ["execute", "execute ", "ha "], ["monitor", "monitor ", "interface "],
+    ["/dev/tcp con comillas", "cat ", "</dev/t''"], ["entrada dinámica", "cat ", "<a$"], ["entrada sin variable", "cat ", "<aaaa "], ["autofs", "ls ", "/net/a "],
+    ["autofs sin equipo", "ls ", "/net/"], ["filtro de captura", "tcpdump ", "host port "], ["filtro con nombre", "tcpdump ", "host aaaaaaaa"], ["lsof -i", "lsof ", "-i a"],
+    ["route get", "route get ", "-a "], ["smb://", "ls ", "smb:/"], ["gawk /inet/", "awk '", "/inet/"],
     ["UNC larga", "ls ", "//aaaaaaaaaaaaaaaa"], ["top con opciones", "top ", "-bbbbbbbbbbbbbbbbbbbbb"], ["sh host", "sh hos ", "x "],
   ];
   for (const [label, prefix, filler, suffix] of families) fastEnough(`computeRisk 100 KB adversos: ${label}`, 50, fresh(block(prefix, filler, suffix)));

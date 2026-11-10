@@ -1629,16 +1629,48 @@ function abbrevCuts(cmd: string, c: Ctx): boolean {
  * prefijos (normalize), el comando. `out` recibe el comando normalizado (para saber si es un show). `expr`: una
  * sentencia de un bloque de PowerShell que no empieza con un comando (solo valen sus grupos y métodos).
  */
+/**
+ * Rutas que abren una conexión sin un cliente de red: bash y ksh conectan al redirigir a "/dev/tcp|udp/<equipo>/<puerto>"
+ * (también con comillas o escapes en medio: "/dev/t''cp") y gawk lee y escribe en "/inet/tcp|udp/…". Son al menos
+ * cambio en cualquier parte del tramo (redirección o argumento).
+ */
+const SOCKET_PATH = /\/dev\/(tcp|udp)\/|\/inet[46]?\/(tcp|udp|raw)\//i;
+/**
+ * Entrada desde una ruta que arma el shell ("<$p/x/80", "<`…`", "<%X%"): puede ser "/dev/tcp/…". Se mira sin el texto
+ * entre comillas simples (literal: "awk '$1 < $2'") y sin las comillas dobles (expanden: "<\"$f\""); "\<" no redirige.
+ */
+const DYNAMIC_STDIN = /(?:^|[^<\\])\d*<\s*[^\s<>(|;&]*[$`%]/;
+/**
+ * Rutas que el sistema monta desde otro equipo al recorrerlas (autofs y automount: /net/<equipo>, /nfs/…, /afs/…,
+ * /Network/Servers/<equipo> y /Volumes/<recurso> de macOS) y URL de recursos compartidos (smb://, nfs://, afp://,
+ * cifs://): resuelven y contactan el equipo que se escribe. Cuentan para contactsNetwork aunque sigan consulta.
+ * /Volumes/<x> también cubre discos locales: ante la duda, se marca.
+ */
+const NET_PATH = /(?:^|[\s=:,(<>])\/(?:(?:net|nfs|afs)\/|Volumes\/|Network\/Servers\/)[^\s/]|(?:smb|nfs|afp|cifs)s?:\/\/\S/i;
+
+/** Sockets y recursos de red escritos como rutas en un tramo (ver SOCKET_PATH, DYNAMIC_STDIN y NET_PATH). */
+function socketRisk(seg: string): Risk {
+  const plain = /['"\\]/.test(seg) ? seg.replace(/['"\\]/g, "") : seg;
+  let risk: Risk = "read";
+  if (plain.includes("/") && SOCKET_PATH.test(plain)) {
+    seen |= NET;
+    risk = "change";
+  }
+  if (seg.includes("<") && DYNAMIC_STDIN.test(seg.replace(SINGLE_QUOTED, "''").replace(/"/g, ""))) risk = "change";
+  if (plain.includes("/") && NET_PATH.test(plain)) seen |= NET;
+  return risk;
+}
+
 function segRisk(seg0: string, c: Ctx, afterPipe: boolean, vars: Vars, expr: boolean, out?: { word: string; cmd: string }): Risk {
   const seg = seg0.trim();
   if (!seg) return "read";
   if (c.depth > MAX_DEPTH) return "disruptive";
   if ((seg.includes("/dev/") || seg.includes("/proc/")) && (SPECIAL_PATH.test(seg) || BLOCK_WRITE.test(seg))) return "disruptive";
-  let risk: Risk = "read";
+  let risk: Risk = seg.includes("/") || seg.includes("<") ? socketRisk(seg) : "read";
   // Las variables de plantilla del catálogo ("{{interfaz}}") no son bloques de código.
   const g = seg.includes("{{") ? seg.replace(TEMPLATE_VAR, "X") : seg;
   if (NESTED.test(g)) {
-    risk = groupsRisk(g, c, expr || PS_LIKE.test(g));
+    risk = maxRisk(risk, groupsRisk(g, c, expr || PS_LIKE.test(g)));
     if (risk === "disruptive") return risk;
   }
   // Un ">" entre comillas es texto ("awk '$3 > 100'", "grep '->'"), no una redirección.
@@ -1695,7 +1727,8 @@ function awkRisk(cmd: string, c: Ctx): Risk {
     risk = "change";
     for (const m of cmd.matchAll(/\bsystem\s*\(\s*"((?:[^"\\]|\\.)*)"/g)) risk = maxRisk(risk, evalRisk(m[1].replace(/\\(.)/g, "$1"), c.depth + 1));
   }
-  if (/\|\s*"|"\s*\||\bprintf?\b[^;}]*>|\s-i\s*inplace|--inplace/.test(cmd)) risk = maxRisk(risk, "change");
+  // "|&" es el coproceso de gawk: un comando o un socket "/inet/…" (SOCKET_PATH) que lee y escribe.
+  if (/\|&|\|\s*"|"\s*\||\bprintf?\b[^;}]*>|\s-i\s*inplace|--inplace/.test(cmd)) risk = maxRisk(risk, "change");
   return risk;
 }
 
@@ -1796,6 +1829,28 @@ const EXEC_PREFIX = /^(?:exe(?:c(?:u(?:te?)?)?)?|admin)\s+(\S+)/i;
  */
 const NET_FORMS = /^(sh(ow?)?\s+host?\s+\S|nbtstat\b.*\s-a(\s|$)|w32tm\b.*\/(stripchart|monitor)\b|nltest\b|dns-sd\s+-[GQ]\b|dscacheutil\s+-q\s+host\b|resolvectl\s+query\b|scutil\s+-r\b)/i;
 const NET_FORM_WORDS = new Set(["sh", "sho", "show", "nbtstat", "w32tm", "nltest", "dns-sd", "dscacheutil", "resolvectl", "scutil"]);
+/**
+ * Consultas locales que resuelven un nombre que se les escribe: filtros de captura de tcpdump, tshark y ethanalyzer y
+ * de ss ("host|src|dst <nombre>", "gateway <nombre>"), "lsof -i @<nombre>", "route get <nombre>" de macOS y BSD,
+ * Win32_PingStatus (ping por WMI o CIM) y "networkQuality -C <URL>". Un nombre lleva una letra que no es hexadecimal.
+ */
+const NAME_FILTER = /\b(?:host|src|dst|gateway)\s+(?!(?:port|portrange|net|host|and|or|not|proto|ip6?|tcp|udp|icmp6?|arp|ether|less|greater|broadcast|multicast|gateway)\b)[^\s()'"]*[g-z]/i;
+function resolvesName(cmd: string, word: string): boolean {
+  switch (word) {
+    case "tcpdump":
+    case "tshark":
+    case "ethanalyzer":
+    case "ss":
+      return NAME_FILTER.test(cmd);
+    case "lsof":
+      return /\s-i(?:\S*@|\s+\S*@)[^\s:\]]*[g-z]/i.test(cmd);
+    case "route":
+      return /\sget\s+(?:-\S+\s+)*(?!default(?:\s|$))\S*[g-z]/i.test(cmd);
+    case "networkquality":
+      return /\s-C\b/.test(cmd);
+  }
+  return PS_CMDLET.test(word) && /pingstatus/i.test(cmd);
+}
 
 /** Programas que toman la terminal (paginadores, editores, monitores de pantalla completa). */
 const FULLSCREEN = new Set(["less", "most", "pg", "man", "info", "htop", "atop", "btop", "nload", "bmon", "cpview", "nano", "pico", "emacs", "screen", "tmux", "nmtui"]);
@@ -1844,7 +1899,7 @@ function noteUse(cmd: string, word: string, afterPipe: boolean): void {
     if (w === "ssh" || w === "telnet" || /^\S+\s+ha\s+manage\b/i.test(cmd)) seen |= INTERACTIVE;
     return;
   }
-  if ((NET_TOOLS.has(word) && word !== "ssh" && word !== "telnet" && word !== "stelnet") || (NET_FORM_WORDS.has(word) && NET_FORMS.test(cmd)) || remoteAuth(cmd, word)) seen |= NET;
+  if ((NET_TOOLS.has(word) && word !== "ssh" && word !== "telnet" && word !== "stelnet") || (NET_FORM_WORDS.has(word) && NET_FORMS.test(cmd)) || remoteAuth(cmd, word) || resolvesName(cmd, word)) seen |= NET;
   if (interactive(cmd, word, afterPipe)) seen |= INTERACTIVE;
 }
 

@@ -119,6 +119,18 @@ const req = (detail, over = {}) => ({ tool: "run_command", detail, connection: "
   }
   assert.deepEqual(ok("less /etc/hosts"), { auto: false, reason: "programa interactivo" });
   for (const c of ["ssh 192.0.2.10", "telnet 192.0.2.10", "watch ping 192.0.2.10", "vi x.txt", "view x.txt", "man ls", "execute ssh admin@192.0.2.10"]) assert.equal(opensInteractive(c), true, c);
+  // Re-auditoría: sockets como rutas (/dev/tcp, /inet/), recursos montados desde otro equipo y nombres que se resuelven.
+  for (const c of ["cat </dev/tcp/x.example.test/80", "wc -c </dev/tcp/x.example.test/80", "bash -c 'head </dev/udp/x.example.test/53'", "cat </dev/t''cp/x.example.test/80",
+    "awk 'BEGIN{print |& \"/inet/tcp/0/x.example.test/80\"}'", "p=/dev/tcp; cat <$p/x.example.test/80", "ls /net/x.example.test", "ls /nfs/x.example.test", "ls /afs/example.test",
+    "ls /Volumes/recurso", "ls smb://x.example.test/recurso", "find /net/x.example.test", "tcpdump -i eth0 host secreto.example.test", "ss -tn dst x.example.test", "lsof -i @x.example.test",
+    "route get secreto.example.test", "Get-WmiObject Win32_PingStatus -Filter \"Address='x.example.test'\"", "getent hosts x.example.test", "host x.example.test", "dscacheutil -q host -a name x.example.test",
+    "python -c 'import socket'", "perl -e 'use IO::Socket'", "exec 3<>/dev/tcp/x.example.test/80", "ldapsearch -H ldap://x.example.test", "smbclient -L x.example.test", "showmount -e x.example.test",
+    "rpcinfo -p x.example.test", "snmpget -v2c -c public x.example.test sysName.0", "snmpwalk -v2c -c public x.example.test", "ntpdate -q x.example.test", "ntpq -p x.example.test",
+    "chronyc -h x.example.test sources", "openssl s_client -connect x.example.test:443", "nmap x.example.test", "mtr -r x.example.test", "whois example.test", "finger usuario@x.example.test",
+    "Test-Path \\\\x.example.test\\recurso", "net view \\\\x.example.test", "nslookup x.example.test 192.0.2.53", "ping -S 192.0.2.1 x.example.test"])
+    assert.equal(ok(c).auto, false, c);
+  for (const c of ["ls /etc", "cat /dev/null", "ls /network-scripts", "cat /proc/net/tcp", "tcpdump -nn -i eth0 dst port 443 -c 10", "lsof -i :22", "chronyc sources", "ls /Volumes"])
+    assert.deepEqual(ok(c), { auto: true, risk: "read" }, c);
   // Lecturas legítimas que siguen pasando por la ventana.
   for (const c of ["top -b -n1", "show hosts", "show ip ssh", "Get-Service", "systeminfo", "more flash:config.text", "journalctl --no-pager -u ssh", "journalctl -f",
     "systemctl is-active ssh", "diagnose sys session list", "diagnose test application dnsproxy 2", "free -m", "uptime"]) {
