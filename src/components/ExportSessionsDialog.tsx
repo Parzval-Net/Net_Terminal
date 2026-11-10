@@ -1,14 +1,16 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { FileDown, Folder, X } from "lucide-react";
+import { FileDown, Folder, Lock, X } from "lucide-react";
 import { Session, sessionTarget } from "../types";
 import { SessionIcon } from "./SessionIcon";
 import { isWithin, normPath } from "../lib/folders";
 import { sessionsToXml } from "../lib/sessionXml";
 import { plural } from "../lib/plural";
+import { Segmented } from "./controls";
+import { BundleExportPanel } from "./BundleExport";
 
 interface Props {
   sessions: Session[];
@@ -17,7 +19,7 @@ interface Props {
   onClose: () => void;
 }
 
-/** Elige qué sesiones exportar: XML compatible con SecureCRT o JSON al portapapeles. */
+/** Elige qué sesiones exportar: XML compatible con SecureCRT, JSON al portapapeles o archivo cifrado (.ntx). */
 export function ExportSessionsDialog({ sessions, folder, onClose }: Props) {
   const list = useMemo(
     () =>
@@ -32,6 +34,14 @@ export function ExportSessionsDialog({ sessions, folder, onClose }: Props) {
   );
   const [q, setQ] = useState("");
   const [msg, setMsg] = useState("");
+  const [msgError, setMsgError] = useState(false);
+  const [mode, setMode] = useState<"xml" | "ntx">("xml");
+  const [busy, setBusy] = useState(false);
+  const formId = useId();
+  const say = (text: string, error = false) => {
+    setMsg(text);
+    setMsgError(error);
+  };
 
   const modal = useModal({ onClose: onClose });
 
@@ -66,15 +76,15 @@ export function ExportSessionsDialog({ sessions, folder, onClose }: Props) {
     const dest = await save({ defaultPath: "sesiones.xml", filters: [{ name: "XML", extensions: ["xml"] }] }).catch(() => null);
     if (!dest) return;
     await invoke("save_text", { dest, content: sessionsToXml(items) })
-      .then(() => setMsg(`${plural(items.length, "sesión exportada", "sesiones exportadas")}: ${dest}`))
-      .catch((e) => setMsg(String(e)));
+      .then(() => say(`${plural(items.length, "sesión exportada", "sesiones exportadas")}: ${dest}`))
+      .catch((e) => say(String(e), true));
   };
 
   const copyJson = async () => {
     const items = picked().map(({ id: _id, created_at: _c, save_password: _pw, ...rest }) => rest);
     await writeText(JSON.stringify(items, null, 2))
-      .then(() => setMsg(`${plural(items.length, "sesión copiada", "sesiones copiadas")} al portapapeles`))
-      .catch((e) => setMsg(String(e)));
+      .then(() => say(`${plural(items.length, "sesión copiada", "sesiones copiadas")} al portapapeles`))
+      .catch((e) => say(String(e), true));
   };
 
   return (
@@ -92,6 +102,21 @@ export function ExportSessionsDialog({ sessions, folder, onClose }: Props) {
         </header>
 
         <div className="shrink-0 px-5 pt-4 pb-2 space-y-2">
+          <div className="flex items-center justify-between gap-3 text-[12px]">
+            <span id={`${formId}-fmt`} className="text-muted">Formato</span>
+            <Segmented
+              value={mode}
+              label="Formato de exportación"
+              options={[
+                ["xml", "XML o JSON"],
+                ["ntx", "Archivo cifrado (.ntx)"],
+              ]}
+              onChange={(v) => {
+                setMode(v);
+                say("");
+              }}
+            />
+          </div>
           <div className="flex items-center gap-2">
             <input className="field flex-1" placeholder="Filtrar sesiones por nombre, host o carpeta" aria-label="Filtrar sesiones por nombre, host o carpeta" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
             <label className="flex items-center gap-2 text-[12.5px] shrink-0">
@@ -125,26 +150,52 @@ export function ExportSessionsDialog({ sessions, folder, onClose }: Props) {
               </div>
             );
           })}
+          {mode === "ntx" && (
+            <BundleExportPanel
+              formId={formId}
+              sessionIds={picked().map((s) => s.id)}
+              allSessions={selected.size === list.length && list.length > 0}
+              onBusy={setBusy}
+              onMessage={say}
+            />
+          )}
         </div>
 
         <footer className="shrink-0 border-t border-line px-5 py-3 space-y-2">
           <p className="text-[11.5px] text-muted">
-            El XML usa el formato de SecureCRT: se abre ahí y se reimporta aquí con Importar › Desde archivo. Solo datos de
-            conexión, nunca contraseñas ni comandos al conectar.
+            {mode === "xml"
+              ? "El XML usa el formato de SecureCRT: se abre ahí y se reimporta aquí con Importar › Desde archivo. Solo datos de conexión, nunca contraseñas ni comandos al conectar."
+              : "Un solo archivo cifrado (XChaCha20-Poly1305, llave Argon2id) con lo elegido, para respaldar o llevar a otro equipo. Se abre en NetTerminal con Importar › Archivo cifrado de NetTerminal (.ntx)."}
           </p>
-          <div className="flex items-center justify-end gap-2">
-            {msg && <span className="mr-auto text-[11.5px] text-accent truncate" title={msg}>{msg}</span>}
+          {/* Región viva siempre presente: el lector anuncia el resultado aunque el texto cambie. */}
+          <p role={msgError ? "alert" : "status"} className={`text-[11.5px] break-words ${msgError ? "text-danger" : "text-accent"} ${msg ? "" : "sr-only"}`}>
+            {msg}
+          </p>
+          <div className="flex items-center justify-end gap-2 whitespace-nowrap">
             <span className="text-[11.5px] text-muted">{plural(selected.size, "sesión", "sesiones")}</span>
-            <button onClick={copyJson} disabled={!selected.size} className="px-3 h-8 rounded-md border border-line hover:bg-hover disabled:opacity-40">
-              Copiar JSON
-            </button>
-            <button
-              onClick={saveXml}
-              disabled={!selected.size}
-              className="flex items-center gap-1.5 px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90 disabled:opacity-40"
-            >
-              <FileDown size={14} /> Guardar XML…
-            </button>
+            {mode === "xml" ? (
+              <>
+                <button onClick={copyJson} disabled={!selected.size} className="px-3 h-8 rounded-md border border-line hover:bg-hover disabled:opacity-40">
+                  Copiar JSON
+                </button>
+                <button
+                  onClick={saveXml}
+                  disabled={!selected.size}
+                  className="flex items-center gap-1.5 px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90 disabled:opacity-40"
+                >
+                  <FileDown size={14} /> Guardar XML…
+                </button>
+              </>
+            ) : (
+              <button
+                type="submit"
+                form={formId}
+                disabled={!selected.size || busy}
+                className="flex items-center gap-1.5 px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90 disabled:opacity-40"
+              >
+                <Lock size={14} /> {busy ? "Cifrando…" : "Guardar archivo cifrado…"}
+              </button>
+            )}
           </div>
         </footer>
       </div>

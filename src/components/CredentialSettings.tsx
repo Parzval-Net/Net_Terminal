@@ -5,11 +5,20 @@ import { CredStatus, credStatus, masterStrength, needsUnlock, strengthText } fro
 import { HopCredInfo, lastUsedText } from "../lib/hopCred";
 import { VaultUnlock } from "./VaultUnlock";
 import { HopPasswordDialog } from "./tools/HopPasswordDialog";
+import type { Settings } from "../lib/settings";
+import { AUTOLOCK_CHOICES, autolockMinutes } from "../lib/vaultLock";
+import { Item, Switch } from "./controls";
 
 const KEYCHAIN = "llavero del sistema operativo";
 
-/** Ajustes › Credenciales: estado de la bóveda y contraseña maestra. */
-export function CredentialSettings() {
+interface Props {
+  /** Ajustes del bloqueo automático (opcionales: sin ellos no se muestra esa sección). */
+  settings?: Settings;
+  onChange?: (patch: Partial<Settings>) => void;
+}
+
+/** Ajustes › Credenciales: estado de la bóveda, contraseña maestra y bloqueo automático. */
+export function CredentialSettings({ settings, onChange }: Props = {}) {
   const [st, setSt] = useState<CredStatus | null>(null);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -46,7 +55,7 @@ export function CredentialSettings() {
           </p>
           <p className="text-[11.5px] text-muted">
             Las contraseñas de sesión se guardan cifradas (XChaCha20-Poly1305) en <code>credentials.vault</code> dentro de
-            la carpeta de datos. Nunca se muestran, no van en logs, exportaciones ni respaldos de sesiones, y solo se usan
+            la carpeta de datos. Nunca se muestran ni van en logs o respaldos; solo viajan en una exportación si lo pides en el archivo cifrado (.ntx). Se usan solo
             para completar el login al conectar.{" "}
             {keychain
               ? "La llave vive en el llavero del sistema: el archivo copiado a otro equipo no sirve."
@@ -100,6 +109,8 @@ export function CredentialSettings() {
         </>
       )}
 
+      {settings && onChange && <AutoLock keychain={keychain} exists={st.exists} settings={settings} onChange={onChange} />}
+
       {msg && (
         <p role={msg.error ? "alert" : "status"} className={`text-[11.5px] ${msg.error ? "text-danger" : "text-accent"}`}>
           {msg.text}
@@ -150,6 +161,40 @@ export function CredentialSettings() {
   );
 }
 
+/**
+ * Bloqueo automático. Solo aplica con contraseña maestra: con el llavero del sistema la llave se
+ * vuelve a leer sola del llavero en cada uso (no hay nada que pedir), así que bloquear la app no
+ * agrega protección; lo que la protege es bloquear la sesión del equipo.
+ */
+function AutoLock({ keychain, exists, settings, onChange }: { keychain: boolean; exists: boolean; settings: Settings; onChange: (p: Partial<Settings>) => void }) {
+  if (keychain)
+    return (
+      <p className="text-[11.5px] text-muted">
+        Bloqueo automático: con el llavero del sistema la bóveda se abre con tu sesión del sistema operativo, así que no aplica. Bloquea
+        el equipo al ausentarte.
+      </p>
+    );
+  if (!exists) return null;
+  const min = autolockMinutes(settings.vaultAutoLockMin);
+  const choices = AUTOLOCK_CHOICES.some(([v]) => v === min) ? AUTOLOCK_CHOICES : [...AUTOLOCK_CHOICES, [min, `${min} minutos`] as [number, string]];
+  return (
+    <div className="space-y-2 pt-3 border-t border-line">
+      <Item label="Bloquear tras inactividad" hint="Minutos sin usar la bóveda (autocompletar, guardar o consultar contraseñas)">
+        <select className="field !w-auto" aria-label="Bloquear tras inactividad" value={min} onChange={(e) => onChange({ vaultAutoLockMin: Number(e.target.value) })}>
+          {choices.map(([v, l]) => (
+            <option key={v} value={v}>
+              {l}
+            </option>
+          ))}
+        </select>
+      </Item>
+      <Item label="Bloquear al suspender el equipo" hint="Se nota al despertar: la app no ve el bloqueo de pantalla sin suspensión">
+        <Switch checked={settings.vaultLockOnSleep} onChange={(v) => onChange({ vaultLockOnSleep: v })} />
+      </Item>
+    </div>
+  );
+}
+
 function Label({ children }: { children: React.ReactNode }) {
   return <div className="text-[11.5px] font-medium text-muted">{children}</div>;
 }
@@ -170,7 +215,7 @@ function Strength({ pw }: { pw: string }) {
   );
 }
 
-function CreateVault({ onCreate }: { onCreate: (master: string) => Promise<boolean> }) {
+export function CreateVault({ onCreate }: { onCreate: (master: string) => Promise<boolean> }) {
   const [a, setA] = useState("");
   const [b, setB] = useState("");
   const ok = a.length >= 8 && a === b;

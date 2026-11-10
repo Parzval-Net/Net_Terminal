@@ -72,6 +72,7 @@ import { SplitPanes } from "./components/SplitPanes";
 import { SplitLayout, SplitState, fillPanes, paneRect } from "./lib/split";
 import logo from "./assets/logo.svg";
 import { plural } from "./lib/plural";
+import { useVaultAutoLock } from "./lib/vaultLock";
 import { isQuickSession } from "./components/SessionIcon";
 import "./App.css";
 
@@ -144,6 +145,7 @@ let tabSeq = 0;
 
 export default function App() {
   const [settings, update, dataNotices] = useSettings();
+  useVaultAutoLock(settings?.vaultAutoLockMin, settings?.vaultLockOnSleep);
   // Espera los ajustes para no mostrar un tema y luego cambiarlo.
   if (!settings) return null;
   return <Workspace settings={settings} update={update} dataNotices={dataNotices} />;
@@ -1698,7 +1700,7 @@ function Workspace({
       )}
       {importOpen && (
         <Suspense fallback={null}>
-          <ImportDialog folders={folders} sessions={sessions} onImport={importSessions} onClose={() => setImportOpen(false)} />
+          <ImportDialog folders={folders} sessions={sessions} onImport={importSessions} onClose={() => setImportOpen(false)} settings={settings} onSettings={update} onPacks={loadPacks} />
         </Suspense>
       )}
       {paletteOpen && (

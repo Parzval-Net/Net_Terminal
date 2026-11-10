@@ -14,6 +14,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAGIC: &[u8; 7] = b"NTVAULT";
@@ -171,6 +172,86 @@ pub struct Status {
 struct Inner {
     key: Option<Zeroizing<[u8; 32]>>,
     throttle: Throttle,
+    /// La llave en memoria salió de la contraseña maestra (el bloqueo automático solo aplica ahí).
+    master: bool,
+    /// Último uso de la llave: instante monótono y hora del sistema (para notar una suspensión).
+    last_use: Option<(Instant, SystemTime)>,
+    auto: AutoLock,
+    /// Temporizador del bloqueo automático: generación vigente y si hay uno corriendo.
+    timer_gen: u64,
+    timer_running: bool,
+    /// Último tic del temporizador: hora del sistema y espera pedida (para notar una suspensión).
+    last_tick: Option<(SystemTime, Duration)>,
+}
+
+/// Bloqueo automático de la bóveda con contraseña maestra.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AutoLock {
+    /// Minutos sin usar la bóveda antes de bloquearla (None: apagado).
+    pub idle: Option<Duration>,
+    /// Bloquear al notar que el equipo estuvo suspendido.
+    pub on_sleep: bool,
+}
+
+impl AutoLock {
+    fn active(&self) -> bool {
+        self.idle.is_some() || self.on_sleep
+    }
+}
+
+/// Tope de la espera del temporizador: un cambio de configuración o un bloqueo manual se notan
+/// en a lo más este tiempo, y un hilo de una generación anterior termina en ese plazo.
+const TICK_MAX: Duration = Duration::from_secs(30);
+/// Diferencia entre la hora del sistema y el reloj monótono (o la espera pedida) que delata una
+/// suspensión. Un ajuste del reloj hacia adelante bloquea también (lado seguro).
+const SLEEP_SLACK: Duration = Duration::from_secs(60);
+pub const AUTOLOCK_MAX_MIN: u32 = 24 * 60;
+
+/// Resultado de un tic del temporizador del bloqueo automático.
+#[derive(Debug, PartialEq)]
+pub enum Tick {
+    /// Volver a evaluar tras esta espera.
+    Wait(Duration),
+    /// Se bloqueó: avisar a la interfaz (`creds-changed`) y terminar.
+    Locked,
+    /// Ya no hace falta (bloqueada, opción apagada o hay otro temporizador): terminar.
+    Stop,
+}
+
+fn since(later: SystemTime, earlier: SystemTime) -> Duration {
+    later.duration_since(earlier).unwrap_or(Duration::ZERO)
+}
+
+impl Inner {
+    /// La llave venció por inactividad o por una suspensión del equipo.
+    fn expired(&self, now: Instant, wall: SystemTime) -> bool {
+        if self.key.is_none() || !self.master {
+            return false;
+        }
+        let Some((at, at_wall)) = self.last_use else { return false };
+        let mono = now.saturating_duration_since(at);
+        let real = since(wall, at_wall);
+        if let Some(idle) = self.auto.idle {
+            // La hora del sistema cuenta el tiempo suspendido aunque el reloj monótono no lo haga.
+            if mono.max(real) >= idle {
+                return true;
+            }
+        }
+        self.auto.on_sleep && real > mono + SLEEP_SLACK
+    }
+
+    /// Borra la llave si venció (la borra `Zeroizing` al soltarla). true si la borró.
+    fn expire(&mut self, now: Instant, wall: SystemTime) -> bool {
+        if self.expired(now, wall) {
+            self.key = None;
+            return true;
+        }
+        false
+    }
+
+    fn touch(&mut self) {
+        self.last_use = Some((Instant::now(), SystemTime::now()));
+    }
 }
 
 pub struct Credentials {
@@ -282,8 +363,12 @@ impl Credentials {
     /// Asegura la llave en memoria. En modo llavero la lee (o la crea con la bóveda si
     /// `create`); en modo maestra exige haber desbloqueado antes.
     fn ensure_key(&self, inner: &mut Inner, create: bool) -> Result<Option<(Header, Vec<u8>)>, String> {
+        // Bloqueo automático evaluado también al usarla: una llave vencida no se usa aunque el
+        // temporizador todavía no haya pasado.
+        inner.expire(Instant::now(), SystemTime::now());
         let file = self.read()?;
         if inner.key.is_some() {
+            inner.touch();
             return Ok(file);
         }
         match &file {
@@ -298,6 +383,8 @@ impl Credentials {
                 let mut key = Zeroizing::new([0u8; 32]);
                 key.copy_from_slice(&raw);
                 inner.key = Some(key);
+                inner.master = false;
+                inner.touch();
                 Ok(file)
             }
             None if !create => Ok(None),
@@ -306,6 +393,8 @@ impl Credentials {
                 self.keys.set(key.as_ref())?;
                 self.encrypt_write(&key, Mode::Keyring, Kdf { m: 0, t: 0, p: 0 }, random(), &Entries::default())?;
                 inner.key = Some(key);
+                inner.master = false;
+                inner.touch();
                 self.read()
             }
             None => Err("Primero crea la bóveda con una contraseña maestra en Ajustes › Credenciales".into()),
@@ -317,7 +406,12 @@ impl Credentials {
         Status {
             backend: if self.mode() == Mode::Keyring { "keychain" } else { "vault" },
             exists,
-            unlocked: exists && lock(&self.inner).key.is_some(),
+            unlocked: exists && {
+                // Una llave vencida por el bloqueo automático ya no cuenta como desbloqueada.
+                let mut inner = lock(&self.inner);
+                inner.expire(Instant::now(), SystemTime::now());
+                inner.key.is_some()
+            },
             portable: self.portable,
         }
     }
@@ -333,7 +427,10 @@ impl Credentials {
         let salt = random::<16>();
         let key = derive(master, &salt, self.kdf)?;
         self.encrypt_write(&key, Mode::Master, self.kdf, salt, &Entries::default())?;
-        lock(&self.inner).key = Some(key);
+        let mut inner = lock(&self.inner);
+        inner.key = Some(key);
+        inner.master = true;
+        inner.touch();
         Ok(())
     }
 
@@ -351,6 +448,8 @@ impl Credentials {
         match Self::decrypt(&key, &bytes) {
             Ok(_) => {
                 inner.key = Some(key);
+                inner.master = true;
+                inner.touch();
                 inner.throttle.reset();
                 Ok(())
             }
@@ -385,6 +484,8 @@ impl Credentials {
         let key = derive(new, &salt, self.kdf)?;
         self.encrypt_write(&key, Mode::Master, self.kdf, salt, &entries)?;
         inner.key = Some(key);
+        inner.master = true;
+        inner.touch();
         inner.throttle.reset();
         Ok(())
     }
@@ -558,6 +659,227 @@ impl Credentials {
             }
         });
     }
+}
+
+impl Credentials {
+    // ---------- Exportación e importación cifrada (bundle.rs) ----------
+
+    /// La bóveda se puede usar ahora sin pedir nada: con llavero (se crea sola si falta) o con
+    /// contraseña maestra ya desbloqueada.
+    pub fn usable(&self) -> bool {
+        match self.read() {
+            Ok(Some((h, _))) if h.mode == Mode::Master => {
+                let mut inner = lock(&self.inner);
+                inner.expire(Instant::now(), SystemTime::now());
+                inner.key.is_some()
+            }
+            Ok(Some(_)) => self.keys.get().is_ok_and(|k| k.is_some_and(|k| k.len() == 32)),
+            Ok(None) => self.keyring_available(),
+            Err(_) => false,
+        }
+    }
+
+    /// true si la bóveda usa contraseña maestra (para pedirla de nuevo antes de exportar).
+    pub fn is_master(&self) -> bool {
+        self.mode() == Mode::Master
+    }
+
+    /// Vuelve a verificar la contraseña maestra (exportar contraseñas la exige en ese momento,
+    /// aunque la bóveda ya esté desbloqueada). Misma espera creciente que al desbloquear. Con
+    /// llavero no hay contraseña: Ok.
+    pub fn verify_master(&self, master: &str) -> Result<(), String> {
+        if master.len() > MAX_PASSWORD {
+            return Err("Contraseña demasiado larga".into());
+        }
+        let mut inner = lock(&self.inner);
+        let Some((h, bytes)) = self.read()? else { return Err("No hay bóveda creada".into()) };
+        if h.mode != Mode::Master {
+            return Ok(());
+        }
+        inner.throttle.check()?;
+        let key = derive(master, &h.salt, h.kdf)?;
+        match Self::decrypt(&key, &bytes) {
+            Ok(_) => {
+                inner.throttle.reset();
+                Ok(())
+            }
+            Err(_) => {
+                inner.throttle.fail();
+                Err("Contraseña maestra incorrecta".into())
+            }
+        }
+    }
+
+    /// Copia de las contraseñas pedidas, para cifrarlas directo en un archivo de exportación.
+    /// Solo las que existen; nunca pasa por la interfaz. Error si la bóveda está bloqueada.
+    pub(crate) fn export_secrets(&self, sessions: &[String], hops: &[(String, String)], snmp: &[String]) -> Result<ExportedSecrets, String> {
+        let mut inner = lock(&self.inner);
+        let Some((_, bytes)) = self.ensure_key(&mut inner, false)? else {
+            return Ok(ExportedSecrets::default());
+        };
+        let key = inner.key.as_ref().ok_or(LOCKED)?;
+        let entries = Self::decrypt(key, &bytes)?;
+        let mut out = ExportedSecrets::default();
+        for id in sessions {
+            if check_id(id).is_ok() && !reserved_id(id) {
+                if let Some(pw) = entries.0.get(id) {
+                    out.sessions.push((id.clone(), Zeroizing::new(pw.clone())));
+                }
+            }
+        }
+        for (ip, user) in hops {
+            let Ok(k) = hop_key(ip, user) else { continue };
+            if let Some(rec) = entries.0.get(&k).and_then(|v| HopRec::parse(v)) {
+                let (ip, user) = k.strip_prefix(NS_HOP).and_then(|r| r.split_once('|')).unwrap_or_default();
+                out.hops.push((ip.to_string(), user.to_string(), Zeroizing::new(rec.pw.clone())));
+            }
+        }
+        for id in snmp {
+            let k = format!("{NS_SNMP}{id}");
+            if let Some(v) = entries.0.get(&k) {
+                out.snmp.push((id.clone(), Zeroizing::new(v.clone())));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Guarda en una sola escritura las contraseñas de una importación: de sesiones (ids ya
+    /// existentes), secretos SNMP por perfil y vecinos. Valores inválidos o sobre el tope de
+    /// vecinos se omiten y se cuentan. `valid`: ids de sesiones existentes (limpieza de huérfanas).
+    pub(crate) fn import_entries(
+        &self,
+        sessions: &[(String, Zeroizing<String>)],
+        snmp: &[(String, Zeroizing<String>)],
+        hops: &[(String, String, Zeroizing<String>)],
+        valid: &[String],
+    ) -> Result<ImportCounts, String> {
+        let ok_pw = |p: &str| !p.is_empty() && p.len() <= MAX_PASSWORD && !p.chars().any(|c| matches!(c, '\r' | '\n' | '\0'));
+        let mut counts = ImportCounts::default();
+        let any = !sessions.is_empty() || !snmp.is_empty() || !hops.is_empty();
+        if !any {
+            return Ok(counts);
+        }
+        self.update(true, |e| {
+            let mut put = |k: String, v: String| {
+                if let Some(mut old) = e.0.insert(k, v) {
+                    old.zeroize();
+                }
+            };
+            for (id, pw) in sessions {
+                if check_id(id).is_ok() && !reserved_id(id) && ok_pw(pw) {
+                    put(id.clone(), pw.to_string());
+                    counts.sessions += 1;
+                } else {
+                    counts.skipped += 1;
+                }
+            }
+            for (profile, json) in snmp {
+                let k = format!("{NS_SNMP}{profile}");
+                if check_id(&k).is_ok() && !json.is_empty() && json.len() <= 4096 && serde_json::from_str::<serde_json::Value>(json).is_ok_and(|v| v.is_object()) {
+                    put(k, json.to_string());
+                    counts.snmp += 1;
+                } else {
+                    counts.skipped += 1;
+                }
+            }
+            for (ip, user, pw) in hops {
+                let Ok(k) = hop_key(ip, user) else {
+                    counts.skipped += 1;
+                    continue;
+                };
+                let n = e.0.keys().filter(|x| x.starts_with(NS_HOP)).count();
+                if !ok_pw(pw) || (!e.0.contains_key(&k) && n >= MAX_HOP_ENTRIES) {
+                    counts.skipped += 1;
+                    continue;
+                }
+                let prior = e.0.get(&k).and_then(|v| HopRec::parse(v)).and_then(|r| r.used);
+                let rec = Zeroizing::new(HopRec { pw: pw.to_string(), used: prior }.encode());
+                if let Some(mut old) = e.0.insert(k, rec.to_string()) {
+                    old.zeroize();
+                }
+                counts.hops += 1;
+            }
+            let stale: Vec<String> = e.0.keys().filter(|k| !k.starts_with(NS_SNMP) && !k.starts_with(NS_HOP) && !valid.contains(k)).cloned().collect();
+            for k in stale {
+                if let Some(mut v) = e.0.remove(&k) {
+                    v.zeroize();
+                }
+            }
+        })?;
+        Ok(counts)
+    }
+
+    // ---------- Bloqueo automático (solo con contraseña maestra) ----------
+
+    /// Configura el bloqueo automático: `minutes` 0 lo apaga (máx. 24 h). Cuenta desde ahora.
+    pub fn set_autolock(&self, minutes: u32, on_sleep: bool) -> Result<(), String> {
+        if minutes > AUTOLOCK_MAX_MIN {
+            return Err(format!("El bloqueo automático admite hasta {AUTOLOCK_MAX_MIN} minutos"));
+        }
+        let mut inner = lock(&self.inner);
+        inner.auto = AutoLock { idle: (minutes > 0).then(|| Duration::from_secs(u64::from(minutes) * 60)), on_sleep };
+        if inner.key.is_some() {
+            inner.touch();
+        }
+        Ok(())
+    }
+
+    /// Pide un temporizador si hace falta (desbloqueada con contraseña maestra, opción activa y
+    /// ninguno corriendo). Devuelve su generación; quien llama crea el hilo y llama a `autolock_tick`.
+    pub fn autolock_arm(&self) -> Option<u64> {
+        let mut inner = lock(&self.inner);
+        if inner.key.is_none() || !inner.master || !inner.auto.active() || inner.timer_running {
+            return None;
+        }
+        inner.timer_running = true;
+        inner.timer_gen += 1;
+        inner.last_tick = None;
+        Some(inner.timer_gen)
+    }
+
+    /// Un paso del temporizador. Al vencer borra la llave de memoria y devuelve `Locked`.
+    pub fn autolock_tick(&self, gen: u64, now: Instant, wall: SystemTime) -> Tick {
+        let mut inner = lock(&self.inner);
+        if inner.timer_gen != gen {
+            return Tick::Stop;
+        }
+        if inner.key.is_none() || !inner.master || !inner.auto.active() {
+            inner.timer_running = false;
+            return Tick::Stop;
+        }
+        // Suspensión: el hilo no corrió durante bastante más que la espera pedida (vale aunque el
+        // reloj monótono del sistema siga contando mientras el equipo duerme).
+        let slept = inner.auto.on_sleep && inner.last_tick.is_some_and(|(at, wait)| since(wall, at) > wait + SLEEP_SLACK);
+        if slept || inner.expire(now, wall) {
+            inner.key = None;
+            inner.timer_running = false;
+            return Tick::Locked;
+        }
+        let wait = match (inner.auto.idle, inner.last_use) {
+            (Some(idle), Some((at, at_wall))) => idle.saturating_sub(now.saturating_duration_since(at).max(since(wall, at_wall))),
+            _ => TICK_MAX,
+        }
+        .clamp(Duration::from_secs(1), TICK_MAX);
+        inner.last_tick = Some((wall, wait));
+        Tick::Wait(wait)
+    }
+}
+
+/// Contraseñas copiadas para una exportación. Se borran de memoria al soltarse.
+#[derive(Default)]
+pub(crate) struct ExportedSecrets {
+    pub sessions: Vec<(String, Zeroizing<String>)>,
+    pub hops: Vec<(String, String, Zeroizing<String>)>,
+    pub snmp: Vec<(String, Zeroizing<String>)>,
+}
+
+/// Cuántas contraseñas guardó una importación.
+#[derive(Default, Serialize, Debug, PartialEq, Clone, Copy)]
+pub struct ImportCounts {
+    pub sessions: usize,
+    pub snmp: usize,
+    pub hops: usize,
+    pub skipped: usize,
 }
 
 /// Un vecino con contraseña guardada (para Ajustes › Credenciales). Sin la contraseña.
@@ -1058,6 +1380,128 @@ mod tests {
             assert!(bytes.len() > before.len());
             std::fs::remove_dir_all(&d).unwrap();
         }
+    }
+
+    // ---------- Bloqueo automático ----------
+
+    #[test]
+    fn autolock_by_idle_time_wipes_key() {
+        let d = dir();
+        let c = Credentials::with(&d, true, Box::new(MemKeys::default()), FAST);
+        c.create("maestra-larga").unwrap();
+        c.set("s1", "x", &["s1".into()]).unwrap();
+        // Apagado: sin temporizador.
+        assert!(c.autolock_arm().is_none());
+        assert!(c.set_autolock(AUTOLOCK_MAX_MIN + 1, false).is_err());
+        c.set_autolock(5, false).unwrap();
+        let gen = c.autolock_arm().expect("temporizador");
+        assert!(c.autolock_arm().is_none(), "uno a la vez");
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        // Antes de vencer espera (como mucho 30 s); un uso reinicia la cuenta.
+        assert!(matches!(c.autolock_tick(gen, now + Duration::from_secs(60), wall + Duration::from_secs(60)), Tick::Wait(w) if w <= TICK_MAX));
+        assert!(c.has("s1").unwrap());
+        assert_eq!(c.autolock_tick(gen, Instant::now() + Duration::from_secs(301), SystemTime::now() + Duration::from_secs(301)), Tick::Locked);
+        assert!(lock(&c.inner).key.is_none(), "llave borrada de memoria");
+        assert_eq!(c.has("s1").unwrap_err(), LOCKED);
+        assert!(!c.status().unlocked);
+        // Bloqueada: el temporizador termina y no se arma otro hasta desbloquear.
+        assert_eq!(c.autolock_tick(gen, Instant::now(), SystemTime::now()), Tick::Stop);
+        assert!(c.autolock_arm().is_none());
+        lock(&c.inner).throttle.retry_at = None;
+        c.unlock("maestra-larga").unwrap();
+        let gen2 = c.autolock_arm().unwrap();
+        assert!(gen2 > gen);
+        assert_eq!(c.autolock_tick(gen, Instant::now(), SystemTime::now()), Tick::Stop, "un hilo de otra generación termina");
+        // Apagar la opción detiene el temporizador sin bloquear.
+        c.set_autolock(0, false).unwrap();
+        assert_eq!(c.autolock_tick(gen2, Instant::now(), SystemTime::now()), Tick::Stop);
+        assert!(c.status().unlocked);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn autolock_on_use_and_on_sleep() {
+        let d = dir();
+        let c = Credentials::with(&d, true, Box::new(MemKeys::default()), FAST);
+        c.create("maestra-larga").unwrap();
+        c.set("s1", "x", &["s1".into()]).unwrap();
+        c.set_autolock(1, false).unwrap();
+        // Al usarla también se evalúa: con el último uso hace 2 minutos ya no se lee.
+        lock(&c.inner).last_use = Some((Instant::now() - Duration::from_secs(120), SystemTime::now() - Duration::from_secs(120)));
+        assert!(c.get("s1").is_none());
+        assert!(lock(&c.inner).key.is_none());
+        // Suspensión: la hora del sistema avanzó mucho más que el reloj monótono.
+        lock(&c.inner).throttle.retry_at = None;
+        c.unlock("maestra-larga").unwrap();
+        c.set_autolock(0, true).unwrap();
+        assert!(c.has("s1").unwrap(), "sin suspensión sigue abierta");
+        lock(&c.inner).last_use = Some((Instant::now(), SystemTime::now() - Duration::from_secs(3600)));
+        assert_eq!(c.has("s1").unwrap_err(), LOCKED);
+        // El temporizador nota la suspensión porque no corrió durante mucho más que su espera.
+        lock(&c.inner).throttle.retry_at = None;
+        c.unlock("maestra-larga").unwrap();
+        let gen = c.autolock_arm().unwrap();
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        assert!(matches!(c.autolock_tick(gen, now, wall), Tick::Wait(_)));
+        assert!(matches!(c.autolock_tick(gen, now + TICK_MAX, wall + TICK_MAX), Tick::Wait(_)), "un tic a tiempo no bloquea");
+        assert_eq!(c.autolock_tick(gen, now + TICK_MAX * 2, wall + Duration::from_secs(4 * 3600)), Tick::Locked);
+        // Un reloj del sistema que retrocede no bloquea por sí solo.
+        lock(&c.inner).throttle.retry_at = None;
+        c.unlock("maestra-larga").unwrap();
+        lock(&c.inner).last_use = Some((Instant::now(), SystemTime::now() + Duration::from_secs(3600)));
+        assert!(c.has("s1").unwrap());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Con el llavero no hay contraseña que pedir: el bloqueo automático no aplica (la llave se
+    /// relee sola del llavero, que protege la sesión del sistema).
+    #[test]
+    fn autolock_does_not_apply_to_keyring() {
+        let d = dir();
+        let c = Credentials::with(&d, false, Box::new(MemKeys::default()), FAST);
+        c.set("s1", "x", &["s1".into()]).unwrap();
+        c.set_autolock(1, true).unwrap();
+        assert!(c.autolock_arm().is_none());
+        lock(&c.inner).last_use = Some((Instant::now() - Duration::from_secs(600), SystemTime::now() - Duration::from_secs(7200)));
+        assert!(c.has("s1").unwrap());
+        assert!(c.usable());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn verify_master_export_and_import_entries() {
+        let d = dir();
+        let c = Credentials::with(&d, true, Box::new(MemKeys::default()), FAST);
+        assert!(!c.usable(), "sin bóveda");
+        c.create("maestra-larga").unwrap();
+        assert!(c.usable() && c.is_master());
+        c.set("s1", "uno", &["s1".into(), "s2".into()]).unwrap();
+        c.set("s2", "dos", &["s1".into(), "s2".into()]).unwrap();
+        c.hop_set("192.0.2.12", "noc", "vecino").unwrap();
+        assert!(c.verify_master("otra-maestra").is_err());
+        lock(&c.inner).throttle.retry_at = None;
+        c.verify_master("maestra-larga").unwrap();
+        let e = c.export_secrets(&["s1".into(), "no-existe".into(), "hop:192.0.2.12|noc".into()], &[("192.0.2.12".into(), "noc".into())], &["p9".into()]).unwrap();
+        assert_eq!(e.sessions.len(), 1, "solo lo pedido y existente; nunca un id reservado");
+        assert_eq!(e.sessions[0].1.as_str(), "uno");
+        assert_eq!(e.hops[0].2.as_str(), "vecino");
+        assert!(e.snmp.is_empty());
+        let r = c
+            .import_entries(
+                &[("s3".into(), Zeroizing::new("tres".into())), ("s4".into(), Zeroizing::new("a\nb".into()))],
+                &[("p1".into(), Zeroizing::new("{\"community\":\"x\"}".into())), ("p2".into(), Zeroizing::new("no-json".into()))],
+                &[("192.0.2.40".into(), "admin".into(), Zeroizing::new("v".into()))],
+                &["s1".into(), "s2".into(), "s3".into()],
+            )
+            .unwrap();
+        assert_eq!(r, ImportCounts { sessions: 1, snmp: 1, hops: 1, skipped: 2 });
+        assert_eq!(c.get("s3").as_deref().map(|s| s.as_str()), Some("tres"));
+        assert!(c.has("snmp:p1").unwrap() && !c.has("snmp:p2").unwrap());
+        assert!(c.has("s1").unwrap(), "las existentes se conservan");
+        c.lock();
+        assert_eq!(c.export_secrets(&["s1".into()], &[], &[]).err().as_deref(), Some(LOCKED));
+        assert!(!c.usable());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

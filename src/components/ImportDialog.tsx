@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -8,6 +8,8 @@ import { Session, sessionTarget } from "../types";
 import { SessionIcon, typeLabel } from "./SessionIcon";
 import { joinPath, normPath } from "../lib/folders";
 import { mergeImported, planImport } from "../lib/importMerge";
+import type { Settings } from "../lib/settings";
+import { BundleImport } from "./BundleImport";
 
 import { plural } from "../lib/plural";
 interface Preview {
@@ -23,10 +25,15 @@ interface Props {
   /** Agrega `list` (con la deduplicación existente) y guarda `updates`; devuelve cuántas se agregaron. */
   onImport: (list: Session[], updates: Session[]) => Promise<number>;
   onClose: () => void;
+  /** Para el archivo cifrado (.ntx): ajustes actuales, cómo aplicarlos y releer los packs. */
+  settings?: Settings;
+  onSettings?: (patch: (s: Settings) => Partial<Settings>) => void;
+  onPacks?: () => void;
 }
 
 const FORMATS: { id: string; label: string; ext: string[] }[] = [
   { id: "auto", label: "Detectar automáticamente", ext: [] },
+  { id: "ntx", label: "Archivo cifrado de NetTerminal (.ntx)", ext: ["ntx"] },
   { id: "openssh", label: "OpenSSH (~/.ssh/config)", ext: [] },
   { id: "putty", label: "PuTTY (.reg exportado)", ext: ["reg"] },
   { id: "securecrt", label: "SecureCRT (XML exportado)", ext: ["xml"] },
@@ -36,7 +43,7 @@ const FORMATS: { id: string; label: string; ext: string[] }[] = [
 const NAMES: Record<string, string> = { openssh: "OpenSSH", putty: "PuTTY", securecrt: "SecureCRT", mobaxterm: "MobaXterm", csv: "CSV" };
 
 /** Importación desde otros clientes con vista previa, selección y carpeta de destino. */
-export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
+export function ImportDialog({ folders, sessions, onImport, onClose, settings, onSettings, onPacks }: Props) {
   const [format, setFormat] = useState("auto");
   const [preview, setPreview] = useState<Preview | null>(null);
   const [file, setFile] = useState("");
@@ -46,6 +53,15 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
   const [msg, setMsg] = useState("");
   // Sesiones que ya existen (misma carpeta y nombre) con datos de conexión distintos.
   const [overwrite, setOverwrite] = useState(true);
+  // Archivo cifrado de NetTerminal elegido: lo atiende BundleImport (contraseña y vista previa propias).
+  const [bundle, setBundle] = useState<string | null>(null);
+  const pickRef = useRef<HTMLButtonElement>(null);
+  // Al volver del archivo cifrado el foco queda en "Elegir archivo…" (el panel anterior ya no existe).
+  const leaveBundle = (m?: string) => {
+    setBundle(null);
+    if (m !== undefined) setMsg(m);
+    requestAnimationFrame(() => pickRef.current?.focus());
+  };
 
   const modal = useModal({ onClose: onClose });
 
@@ -75,7 +91,12 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
       title: "Archivo de sesiones para importar",
       filters: f?.ext.length ? [{ name: f.label, extensions: f.ext }] : undefined,
     }).catch(() => null);
-    if (typeof path === "string") load(path, format);
+    if (typeof path !== "string") return;
+    if (format === "ntx" || (format === "auto" && /\.ntx$/i.test(path))) {
+      setPreview(null);
+      setMsg("");
+      setBundle(path);
+    } else load(path, format);
   };
 
   const sshConfig = async () => {
@@ -147,15 +168,29 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
         onMouseDown={(e) => e.stopPropagation()}
       >
         <header className="shrink-0 flex items-center justify-between px-5 h-12 border-b border-line">
-          <h2 id={modal.titleId} className="text-[14px] font-semibold">Importar sesiones desde otro cliente</h2>
+          <h2 id={modal.titleId} className="text-[14px] font-semibold">{bundle !== null ? "Importar archivo cifrado de NetTerminal" : "Importar sesiones desde otro cliente"}</h2>
           <button onClick={onClose} aria-label="Cerrar" className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover">
             <X size={16} />
           </button>
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-3">
+          {bundle !== null ? (
+            <BundleImport
+              path={bundle}
+              folders={folders}
+              sessions={sessions}
+              settings={settings}
+              onImport={onImport}
+              onSettings={onSettings}
+              onPacks={onPacks}
+              onBack={() => leaveBundle()}
+              onDone={(m) => leaveBundle(m)}
+            />
+          ) : (
+          <>
           <div className="flex items-center gap-2">
-            <select className="field !w-auto flex-1" value={format} onChange={(e) => setFormat(e.target.value)}>
+            <select className="field !w-auto flex-1" aria-label="Formato del archivo" value={format} onChange={(e) => setFormat(e.target.value)}>
               {FORMATS.map((f) => (
                 <option key={f.id} value={f.id}>
                   {f.label}
@@ -163,6 +198,7 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
               ))}
             </select>
             <button
+              ref={pickRef}
               onClick={pick}
               disabled={busy}
               className="flex items-center gap-1.5 px-3 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90 disabled:opacity-50"
@@ -181,6 +217,10 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
                 Nunca contraseñas, comandos al conectar, argumentos extra, ProxyCommand, proxies ni túneles.
               </p>
               <p>
+                Archivo cifrado de NetTerminal (.ntx): el que genera Exportar sesiones › Archivo cifrado. Pide su contraseña y muestra
+                una vista previa antes de importar sesiones, ajustes, extras y, si el archivo las trae, contraseñas.
+              </p>
+              <p>
                 PuTTY: en regedit exporta <code>HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions</code>. SecureCRT: el
                 XML de Tools › Export Settings. MobaXterm: un .mxtsessions exportado, la configuración .mobaconf o el
                 MobaXterm.ini de la versión portable.
@@ -193,7 +233,7 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
             </div>
           )}
 
-          {msg && <p className="text-[12px] text-accent">{msg}</p>}
+          {msg && <p role="status" className="text-[12px] text-accent">{msg}</p>}
 
           {preview && preview.sessions.length > 0 && (
             <>
@@ -298,13 +338,15 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
               </ul>
             </details>
           )}
+          </>
+          )}
         </div>
 
         <footer className="shrink-0 flex justify-end gap-2 px-5 py-3 border-t border-line">
           <button onClick={onClose} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover">
-            {preview ? "Cancelar" : "Cerrar"}
+            {preview || bundle !== null ? "Cancelar" : "Cerrar"}
           </button>
-          {preview && preview.sessions.length > 0 && (
+          {bundle === null && preview && preview.sessions.length > 0 && (
             <button
               onClick={doImport}
               disabled={busy || count === 0}

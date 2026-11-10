@@ -145,7 +145,7 @@ fn detect(file_name: &str, text: &str) -> Option<String> {
 // ---------- Validación común ----------
 
 /// Host seguro: sin espacios ni control, sin "-" inicial, caracteres de nombre o IP.
-fn clean_host(v: &str) -> Option<String> {
+pub(crate) fn clean_host(v: &str) -> Option<String> {
     let v = v.trim();
     let v = v.strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or(v);
     let ok = !v.is_empty()
@@ -155,7 +155,7 @@ fn clean_host(v: &str) -> Option<String> {
     ok.then(|| v.to_string())
 }
 
-fn clean_user(v: &str) -> Option<String> {
+pub(crate) fn clean_user(v: &str) -> Option<String> {
     let v = v.trim();
     let ok = !v.is_empty()
         && v.len() <= 64
@@ -165,7 +165,7 @@ fn clean_user(v: &str) -> Option<String> {
 }
 
 /// Jump host: [usuario@]host[:puerto], varios separados por coma.
-fn clean_jump(v: &str) -> Option<String> {
+pub(crate) fn clean_jump(v: &str) -> Option<String> {
     let port_ok = |p: &str| p.parse::<u16>().is_ok_and(|p| p > 0);
     let hop_ok = |hop: &str| {
         let (user, hp) = match hop.rsplit_once('@') {
@@ -190,12 +190,12 @@ fn clean_jump(v: &str) -> Option<String> {
     (!v.is_empty() && v.len() <= 512 && v.split(',').all(hop_ok)).then(|| v.to_string())
 }
 
-fn clean_path(v: &str) -> Option<String> {
+pub(crate) fn clean_path(v: &str) -> Option<String> {
     let v = v.trim().trim_matches('"');
     (!v.is_empty() && v.len() <= 1024 && !v.starts_with('-') && !v.chars().any(|c| c.is_control())).then(|| v.to_string())
 }
 
-fn clean_serial(v: &str) -> Option<String> {
+pub(crate) fn clean_serial(v: &str) -> Option<String> {
     let v = v.trim();
     let ok = !v.is_empty()
         && v.len() <= 100
@@ -204,7 +204,7 @@ fn clean_serial(v: &str) -> Option<String> {
     ok.then(|| v.to_string())
 }
 
-fn clean_text(v: &str, max: usize) -> String {
+pub(crate) fn clean_text(v: &str, max: usize) -> String {
     let collapsed = v.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().filter(|c| !c.is_control()).take(max).collect()
 }
@@ -220,7 +220,7 @@ fn clean_folder<'a>(parts: impl IntoIterator<Item = &'a str>) -> Option<String> 
     (!segs.is_empty()).then(|| segs.join("/"))
 }
 
-fn folder_from_path(path: &str) -> Option<String> {
+pub(crate) fn folder_from_path(path: &str) -> Option<String> {
     clean_folder(path.split(['/', '\\']))
 }
 

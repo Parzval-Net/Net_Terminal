@@ -66,8 +66,8 @@ const sections: { id: Section; label: string; Icon: typeof Palette; group: strin
   { id: "terminal", label: "Terminal", Icon: SquareTerminal, group: "General", keywords: "historial scrollback copiar al seleccionar pegar clic derecho confirmar al cerrar legacy ssh algoritmos antiguos ssh-rsa compatibilidad sugerencias de comandos autocompletar abreviaturas historial de sugerencias tecla de lista confirmar envío varias líneas barra de botones pausa entre líneas notas" },
   { id: "highlight", label: "Resaltado", Icon: Highlighter, group: "General", keywords: "resaltado sintaxis reglas regex esquemas fabricante cisco juniper huawei fortinet colores exportar importar" },
   { id: "data", label: "Logs", Icon: ScrollText, group: "Sesiones y datos", keywords: "logs grabar automáticamente hora en cada línea nombre del archivo patrón anexar rotación diaria ocultar secretos carpeta de logs" },
-  { id: "credentials", label: "Credenciales", Icon: KeyRound, group: "Sesiones y datos", keywords: "contraseñas guardadas bóveda llavero contraseña maestra portable credenciales vecinos saltos topología" },
-  { id: "sessions", label: "Importar y exportar", Icon: ArrowLeftRight, group: "Sesiones y datos", keywords: "sesiones importar exportar portapapeles json putty securecrt mobaxterm ssh config csv carpeta de datos portable" },
+  { id: "credentials", label: "Credenciales", Icon: KeyRound, group: "Sesiones y datos", keywords: "contraseñas guardadas bóveda llavero contraseña maestra portable credenciales vecinos saltos topología bloqueo automático inactividad suspender" },
+  { id: "sessions", label: "Importar y exportar", Icon: ArrowLeftRight, group: "Sesiones y datos", keywords: "sesiones importar exportar portapapeles json putty securecrt mobaxterm ssh config csv carpeta de datos portable archivo cifrado ntx respaldo" },
   { id: "modules", label: "Módulos", Icon: Blocks, group: "Herramientas", keywords: "módulos monitoreo diagnóstico topología subredes velocidad tftp http syslog plugins respaldos herramientas" },
   { id: "alerts", label: "Alertas", Icon: BellRing, group: "Herramientas", keywords: "alertas palabra clave reglas sonido aviso pestaña expresión regular" },
   { id: "ai", label: "Agentes IA", Icon: Bot, group: "Integraciones", keywords: "agentes ia mcp claude gemini codex puerto token aprobación solo lectura servidor" },
@@ -476,6 +476,9 @@ export function SettingsModal({
                 <Item label="Confirmar envío de varias líneas" hint="Muestra un resumen antes de enviar o pegar un bloque en un equipo remoto">
                   <Switch checked={s.confirmSend} onChange={(v) => onChange({ confirmSend: v })} />
                 </Item>
+                <Item label="Marcar cada comando al enviarlo" hint="Deja un marcador en la terminal al ejecutar cada comando, para saltar entre ellos">
+                  <Switch checked={s.autoMarkCommands} onChange={(v) => onChange({ autoMarkCommands: v })} />
+                </Item>
                 <Item label="Barra de botones" hint="Comandos rápidos y scripts sobre la barra de estado. Se oculta sola si no hay botones; «Nuevo botón» y los scripts siguen en la paleta (⌘K)">
                   <Switch checked={s.showButtonBar} onChange={(v) => onChange({ showButtonBar: v })} />
                 </Item>
@@ -497,7 +500,7 @@ export function SettingsModal({
 
             {section === "about" && <About settings={s} onChange={onChange} />}
 
-            {section === "credentials" && <CredentialSettings />}
+            {section === "credentials" && <CredentialSettings settings={s} onChange={onChange} />}
 
             {section === "alerts" && (
               <AlertSettings settings={s} folders={allFolders(sessions, s.extraFolders)} onChange={onChange} />
@@ -534,7 +537,7 @@ export function SettingsModal({
 
             {section === "sessions" && (
               <>
-                <Item label="Sesiones" hint="Comparte tu lista de equipos en XML o JSON, o importa desde otros clientes">
+                <Item label="Sesiones" hint="Comparte tu lista de equipos en XML o JSON, respalda todo en un archivo cifrado (.ntx) o importa desde otros clientes">
                   <div className="flex gap-1.5">
                     <button
                       onClick={importSessions}
@@ -545,7 +548,7 @@ export function SettingsModal({
                     {onImportFile && (
                       <button
                         onClick={onImportFile}
-                        title="PuTTY, SecureCRT, MobaXterm, ~/.ssh/config o CSV"
+                        title="PuTTY, SecureCRT, MobaXterm, ~/.ssh/config, CSV o archivo cifrado de NetTerminal (.ntx)"
                         className="px-3 h-7 rounded-md border border-line hover:bg-hover"
                       >
                         Desde archivo…
@@ -553,7 +556,7 @@ export function SettingsModal({
                     )}
                     <button
                       onClick={onExportFile}
-                      title="Elige qué sesiones: XML (compatible con SecureCRT) o JSON"
+                      title="Elige qué sesiones: XML (compatible con SecureCRT), JSON o archivo cifrado (.ntx)"
                       className="px-3 h-7 rounded-md border border-line hover:bg-hover"
                     >
                       Exportar…

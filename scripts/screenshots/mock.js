@@ -809,6 +809,67 @@ const handlers = {
   vault_lock: () => ((vault.unlocked = false), emit("creds-changed", null), null),
   vault_change: () => null,
   vault_reset: () => ((vault.exists = vault.unlocked = false), vaultIds.clear(), emit("creds-changed", null), null),
+  // Bloqueo automático (window.__autolock: última configuración recibida).
+  vault_autolock_set: ({ minutes, onSleep }) => ((window.__autolock = { minutes, onSleep }), null),
+  // Diálogos del sistema: guardar siempre propone un archivo; abrir devuelve un .ntx si el filtro lo pide (o con ?ntx).
+  "plugin:dialog|save": ({ options }) => `/Users/demo/Documentos/${options?.defaultPath ?? "archivo"}`,
+  "plugin:dialog|open": ({ options }) =>
+    options?.filters?.some((f) => f.extensions?.includes("ntx")) || location.search.includes("ntx") ? "/Users/demo/Documentos/respaldo.ntx" : null,
+  // Archivo cifrado (.ntx), como el backend: la contraseña del archivo y la maestra solo entran; nunca vuelven
+  // contraseñas. window.__bundleExport guarda las opciones recibidas (sin contraseñas) para revisarlas.
+  bundle_export: ({ password, master, opts }) => {
+    if ([...(password ?? "")].length < 12) throw "La contraseña del archivo debe tener al menos 12 caracteres";
+    const pw = opts.passwords;
+    if (pw && (pw.sessions || pw.snmp || pw.hops.length)) {
+      if (pw.confirm !== "EXPORTAR") throw "Para incluir contraseñas escribe EXPORTAR en la confirmación";
+      if (vault.backend === "vault" && !vault.unlocked) throw "La bóveda está bloqueada. Desbloquéala en Ajustes › Credenciales";
+      if (vault.backend === "vault" && (master ?? "").length < 8) throw "Contraseña maestra incorrecta";
+    }
+    window.__bundleExport = { ...opts, master: master ? "(recibida)" : null };
+    const chosen = sessions.filter((s) => s.type !== "local" && (opts.all_sessions || opts.session_ids.includes(s.id)));
+    const withPw = pw?.sessions ? chosen.filter((s) => vaultIds.has(s.id)).length : 0;
+    return {
+      sessions: chosen.length, folders: opts.all_sessions ? 1 : 0, settings: opts.settings ? 42 : 0, macros: opts.macros ? 2 : 0,
+      packs: 0, notes: opts.notes ? Object.keys(notes).length : 0, rules: 0,
+      passwords: { sessions: withPw, hops: pw?.hops.length ?? 0, snmp: 0 }, bytes: 18234,
+    };
+  },
+  bundle_inspect: ({ password }) => {
+    if (password !== "respaldo-de-prueba") throw "Contraseña incorrecta, o el archivo está dañado o fue modificado";
+    return {
+      token: "tok1", app: "0.9.21", created: "2026-11-02T10:00:00Z",
+      sessions: [
+        { id: "b1", name: "core-sw03", type: "ssh", host: "192.0.2.3", username: "admin", folder: "Sitio Central/Core", created_at: "" },
+        { id: "b2", name: "sw-acceso-norte", type: "telnet", host: "203.0.113.99", folder: "Sucursales/Norte", created_at: "" },
+        { id: "b3", name: "consola-lab", type: "serial", serial_port: "COM3", baud_rate: 9600, folder: "Laboratorio", created_at: "" },
+      ],
+      advanced: [0], with_password: [0, 1], folders: ["Sucursales/Centro"],
+      settings: { fontSize: 15, appTheme: "dark", logMask: true, snmpProfiles: [{ id: "p1", name: "core", host: "192.0.2.1", port: 161, version: "3", saved: true }] },
+      ignored_settings: ["mcpToken", "mcpEnabled", "autoLegacySsh", "logsDir"],
+      macros: [{ id: "m9", label: "Versión", kind: "send", text: "show version" }], packs: null,
+      notes: [{ name: "Checklist", content: "1. Respaldar\n2. Cambiar" }],
+      highlight: [{ id: "r1", name: "Errores", pattern: "error", style: { fg: "red" } }],
+      passwords: { sessions: 2, hops: 1, snmp: 1 }, hops: [["192.0.2.21", "admin"]], snmp_profiles: ["p1"],
+      warnings: ["router-x: argumentos extra de SSH omitidos (Opción no permitida en argumentos extra: proxycommand.)"],
+    };
+  },
+  bundle_import_apply: ({ token, fresh, updates, opts }) => {
+    if (token !== "tok1") throw "La vista previa venció: vuelve a abrir el archivo";
+    const wantsVault = opts.passwords || opts.hops || opts.snmp_profiles.length;
+    if (wantsVault && vault.backend === "vault" && (!vault.exists || !vault.unlocked))
+      throw "Para importar las contraseñas, la bóveda debe existir y estar desbloqueada (Ajustes › Credenciales), o importa sin contraseñas";
+    window.__bundleApply = { fresh, updates, opts };
+    const base = handlers.bundle_inspect({ password: "respaldo-de-prueba" }).sessions;
+    for (const f of fresh) sessions.push({ ...base[f.index], id: `ntx${Date.now()}${f.index}`, folder: f.folder ?? undefined, save_password: opts.passwords && f.index < 2 ? true : undefined });
+    for (const u of updates) {
+      const i = sessions.findIndex((x) => x.id === u.session.id);
+      if (i >= 0) sessions[i] = u.session;
+    }
+    const pw = opts.passwords ? fresh.filter((f) => f.index < 2).length : 0;
+    if (pw || opts.hops) emit("creds-changed", null);
+    return { sessions: [...sessions], added: fresh.length, updated: updates.length, passwords: { sessions: pw, snmp: opts.snmp_profiles.length, hops: opts.hops ? 1 : 0, skipped: 0 }, warnings: [] };
+  },
+  bundle_import_cancel: () => null,
   // Desarme del autocompletado antes de un salto (window.__disarms: conexiones desarmadas, en orden).
   disarm_autofill: ({ conn }) => ((window.__disarms ??= []).push(conn), true),
   set_logging: ({ enabled }) => (enabled ? "~/NetTerminal/data/logs/core-sw01_20261021-101500.log" : null),
