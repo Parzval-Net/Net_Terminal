@@ -168,8 +168,17 @@ fn origin_allowed(origin: Option<&str>) -> bool {
     match origin {
         None => true,
         Some(o) => {
-            let host = o.split("://").nth(1).unwrap_or("").split([':', '/']).next().unwrap_or("");
-            matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+            let rest = o.split("://").nth(1).unwrap_or("");
+            // IPv6 entre corchetes: el host termina en "]" (sus ":" no separan el puerto). Solo
+            // se acepta el loopback exacto, sin nada más que un puerto numérico detrás.
+            if let Some(v6) = rest.strip_prefix('[') {
+                let Some((ip, tail)) = v6.split_once(']') else { return false };
+                let tail = tail.split(['/', '?', '#']).next().unwrap_or("");
+                let port_ok = tail.is_empty() || tail.strip_prefix(':').is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+                return ip == "::1" && port_ok;
+            }
+            let host = rest.split([':', '/']).next().unwrap_or("");
+            matches!(host, "127.0.0.1" | "localhost")
         }
     }
 }
@@ -633,13 +642,29 @@ mod tests {
         assert_eq!(http(cfg(), post("/mcp", &[("Origin", "https://evil.example")], INIT)).0, 403);
     }
 
-    /// BUG conocido: `origin_allowed` corta el host en el primer ':', así que "[::1]" nunca
-    /// coincide con el brazo "[::1]" y el origen IPv6 de loopback se rechaza (falla cerrada,
-    /// sin riesgo de seguridad; el servidor solo escucha en 127.0.0.1).
+    /// El loopback IPv6 entre corchetes se acepta (con o sin puerto); cualquier otra dirección
+    /// IPv6, una forma equivalente o algo pegado tras el corchete se rechaza.
     #[test]
-    #[ignore = "bug: origin IPv6 [::1] se rechaza porque el host se corta en el primer ':'"]
     fn origin_allowed_accepts_ipv6_loopback() {
-        assert!(origin_allowed(Some("http://[::1]:8080")));
+        for ok in ["http://[::1]:8080", "http://[::1]", "https://[::1]/mcp", "http://[::1]:47821/x?y"] {
+            assert!(origin_allowed(Some(ok)), "{ok}");
+        }
+        // Header Host de un cliente que se conecta por IPv6.
+        assert!(origin_allowed(Some(&format!("http://{}", "[::1]:47821"))));
+        for bad in [
+            "http://[::2]:8080",
+            "http://[::]:8080",
+            "http://[0:0:0:0:0:0:0:1]:8080",
+            "http://[::ffff:127.0.0.1]",
+            "http://[::1].evil.example",
+            "http://[::1]evil.example",
+            "http://[::1]:80@evil.example",
+            "http://[::1]:",
+            "http://[::1",
+            "http://[fe80::1%25lo0]",
+        ] {
+            assert!(!origin_allowed(Some(bad)), "{bad}");
+        }
     }
 
     #[test]
