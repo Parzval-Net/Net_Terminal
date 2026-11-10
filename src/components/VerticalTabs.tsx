@@ -4,7 +4,7 @@ import { Columns2, LayoutGrid, Maximize2, Minimize2, PanelLeftClose, PanelLeftOp
 import { tabTitle } from "../types";
 import { ContextMenu } from "./Sidebar";
 import { SessionIcon, isQuickSession } from "./SessionIcon";
-import { TabBarProps, closeBtnClass, dotColor, dropMark, tabLabel } from "./TabBar";
+import { StatusDot, TabBarProps, closeBtnClass, dropMark, tabLabel } from "./TabBar";
 import { useTabDrag } from "../lib/tabDrag";
 import { useTabKeys } from "../lib/useTabKeys";
 import { MenuItem, layoutItem, newTabMenuItems, splitMenuItems, tabMenuItems } from "./tabMenu";
@@ -211,9 +211,10 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
               {collapsed ? (
                 <>
                   {/* Abajo a la izquierda: abajo a la derecha tapaba el rayo de conexión rápida. */}
-                  <span
-                    className={`absolute bottom-0.5 left-0.5 w-1.5 h-1.5 rounded-full ring-1 ${active ? "ring-term" : "ring-[var(--chrome)]"}`}
-                    style={{ background: dotColor(status, active) }}
+                  <StatusDot
+                    status={status}
+                    active={active}
+                    className={`absolute bottom-0.5 left-0.5 ring-1 ${active ? "ring-term" : "ring-[var(--chrome)]"}`}
                   />
                   {marker && (
                     <span
@@ -257,11 +258,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                       ●
                     </span>
                   ) : null}
-                  <span
-                    aria-hidden
-                    className="w-1.5 h-1.5 rounded-full shrink-0 group-hover:hidden group-focus-within:hidden"
-                    style={{ background: dotColor(status, active) }}
-                  />
+                  <StatusDot status={status} active={active} className="group-hover:hidden group-focus-within:hidden" />
                   <button
                     tabIndex={focusId === t.id ? 0 : -1}
                     aria-label={`Cerrar ${title}`}

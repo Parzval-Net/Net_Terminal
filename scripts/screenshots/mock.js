@@ -1675,7 +1675,7 @@ Object.assign(scenes, {
   "q-backup-secret": async () => { await scenes.backup(); await wait(900); [...document.querySelectorAll("span")].find((x) => x.textContent === "secreto cambiado")?.scrollIntoView({ block: "center" }); },
   "q-transfer-top": async () => { await open("core-sw01"); await tool("Transferencias")(); },
   "q-reset": async () => { await click("Ajustes"); await wait(300); await click("Restablecer valores"); },
-  "q-topo-clear": async () => { await tool("Topología")(); await wait(300); await click("Borrar diagrama"); },
+  "q-topo-clear": async () => { await tool("Topología")(); await wait(300); await click("Más opciones: exportar, snapshots, fuentes de descubrimiento"); await click("Eliminar diagrama…"); },
 });
 // Acceso para el script de QA (CDP): pasos adicionales sobre una escena.
 window.__demo = { click, open, wait, svgNode, emit, find, setVal };

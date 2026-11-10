@@ -96,7 +96,7 @@ try {
   ws.addEventListener("message", (ev) => {
     const m = JSON.parse(ev.data);
     if (m.method === "Runtime.exceptionThrown") console.error("ERROR en página:", m.params.exceptionDetails?.exception?.description?.split("\n")[0]);
-    if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error") console.error("console.error:", m.params.args?.map((a) => a.value ?? a.description).join(" ").slice(0, 200));
+    if (m.method === "Runtime.consoleAPICalled" && (m.params.type === "error" || (m.params.type === "warning" && String(m.params.args?.[0]?.value).startsWith("escena:")))) console.error("console.error:", m.params.args?.map((a) => a.value ?? a.description).join(" ").slice(0, 200));
   });
   mkdirSync(OUT, { recursive: true });
   for (const [name, scene, theme, extra = {}] of SHOTS) {

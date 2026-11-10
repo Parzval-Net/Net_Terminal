@@ -3,7 +3,8 @@
  * Orden de preferencia cuando la terminal se angosta:
  *  1) el panel se acopla y la terminal se reajusta (el panel se achica hasta PANEL_MIN antes que superponerse);
  *  2) se oculta la barra de sesiones acoplada mientras el panel está abierto (la preferencia del usuario no cambia);
- *  3) solo si aun así no cabe `minTerm`, el panel se superpone con un ancho reducido.
+ *  3) si ni así cabe `minTerm`, el panel se acopla a PANEL_MIN y la terminal se reajusta al espacio restante (bajo ~60 columnas, pero sin texto tapado);
+ *  4) solo si la terminal quedaría bajo ~30 columnas (`hardTerm`), el panel se superpone con un ancho reducido.
  */
 export const PANEL_MIN = 260;
 /** Ancho de la barra de actividad (w-11). */
@@ -27,6 +28,8 @@ export interface PanelLayoutIn {
   panelW: number;
   /** Ancho mínimo de terminal (~60 columnas más el relleno de xterm). */
   minTerm: number;
+  /** Mínimo absoluto de terminal (~30 columnas) bajo el cual el panel se superpone. Por defecto, la mitad de las columnas de `minTerm`. */
+  hardTerm?: number;
 }
 
 export interface PanelLayout {
@@ -54,7 +57,8 @@ export function panelLayout(i: PanelLayoutIn): PanelLayout {
   const sidebarShown = i.sidebarOpen && !sidebarAutoHidden;
   const sb = sidebarShown && !i.focusMode ? i.sidebarW : 0;
   const dockW = dock(sb);
-  const panelOverlay = measured && panelOpen && dockW < PANEL_MIN;
+  const hardTerm = i.hardTerm ?? Math.round((i.minTerm - 30) / 2) + 30;
+  const panelOverlay = measured && panelOpen && dockW < PANEL_MIN && free - sb - PANEL_MIN < hardTerm;
   const panelWidth = panelOverlay ? Math.min(i.panelW, Math.max(PANEL_MIN, free - OVERLAY_TERM)) : Math.max(PANEL_MIN, Math.min(i.panelW, dockW));
   const termWidth = panelOpen && !panelOverlay ? free - sb - panelWidth : free - sb;
   return { sidebarAutoHidden, sidebarShown, panelOverlay, panelWidth, termWidth };

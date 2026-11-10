@@ -38,14 +38,21 @@ assert.equal(r.panelOverlay, false);
 assert.equal(r.panelWidth, PANEL_MIN);
 assert.ok(r.termWidth >= 500);
 
-// 720 px: ni sin barra cabe: panel superpuesto, reducido, con ~400 px de terminal a la vista.
+// 720 px: ni sin barra cabe el mínimo: el panel se acopla a PANEL_MIN y la terminal se reajusta (bajo 60 columnas, sin superponer).
 r = L({ rootW: 720 });
-assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.panelOverlay], [true, false, true]);
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.panelOverlay], [true, false, false]);
+assert.equal(r.panelWidth, PANEL_MIN);
+assert.equal(r.termWidth, 720 - 44 - PANEL_MIN);
+assert.ok(r.termWidth < 500 && r.termWidth >= 265);
+
+// Último recurso: la terminal acoplada quedaría bajo ~30 columnas: el panel se superpone, reducido.
+r = L({ rootW: 500 });
+assert.equal(r.panelOverlay, true);
 assert.ok(r.panelWidth >= PANEL_MIN && r.panelWidth < 307);
-assert.equal(r.termWidth, 720 - 44, "superpuesto: la terminal ocupa todo el área");
+assert.equal(r.termWidth, 500 - 44, "superpuesto: la terminal ocupa todo el área");
 
 // Sin barra de sesiones elegida por el usuario: nunca se marca como oculta por la app.
-r = L({ rootW: 720, sidebarOpen: false });
+r = L({ rootW: 500, sidebarOpen: false });
 assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown], [false, false]);
 
 // Sin medir (ancho 0) o en modo foco: no se toca nada.

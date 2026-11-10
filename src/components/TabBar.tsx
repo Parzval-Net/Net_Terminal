@@ -80,6 +80,29 @@ export const dotColor = (status: ConnStatus, active: boolean) =>
   active ? `color-mix(in oklab, ${statusColor[status]} 60%, var(--term-fg))` : statusColor[status];
 
 /**
+ * Punto de estado que se distingue por forma además de color (WCAG 1.4.1): conectada = círculo lleno,
+ * conectando = medio lleno con pulso (solo sin reduced motion), desconectada = anillo vacío.
+ * El estado se lee en el nombre accesible de la pestaña (`tabLabel`), por eso es decorativo.
+ */
+export function StatusDot({ status, active, className = "" }: { status: ConnStatus; active: boolean; className?: string }) {
+  const c = dotColor(status, active);
+  const style =
+    status === "connected"
+      ? { background: c, boxShadow: `inset 0 0 0 1.5px ${c}` }
+      : status === "connecting"
+        ? { background: `linear-gradient(90deg, ${c} 50%, transparent 50%)`, boxShadow: `inset 0 0 0 1.5px ${c}` }
+        : { background: "transparent", boxShadow: `inset 0 0 0 1.5px ${c}` };
+  return (
+    <span
+      aria-hidden
+      data-status={status}
+      className={`w-2 h-2 rounded-full shrink-0 ${status === "connecting" ? "motion-safe:animate-pulse" : ""} ${className}`}
+      style={style}
+    />
+  );
+}
+
+/**
  * Botón "cerrar" de una pestaña. La pestaña activa usa el fondo del tema de terminal, así que
  * el color va sobre --term-fg (no sobre --muted, que es de la interfaz: en modo oscuro con un
  * tema claro, o al revés, no contrasta). Siempre visible al enfocar con el teclado.
@@ -244,11 +267,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                   ●
                 </span>
               )}
-              <span
-                aria-hidden
-                className="w-1.5 h-1.5 rounded-full shrink-0 group-hover:hidden group-focus-within:hidden"
-                style={{ background: dotColor(status, active) }}
-              />
+              <StatusDot status={status} active={active} className="group-hover:hidden group-focus-within:hidden" />
               <button
                 tabIndex={focusId === t.id ? 0 : -1}
                 onMouseDown={(e) => e.stopPropagation()}
