@@ -138,6 +138,8 @@ export interface Settings {
   vaultAutoLockMin: number;
   /** Bóveda con contraseña maestra: bloquear al notar que el equipo estuvo suspendido. */
   vaultLockOnSleep: boolean;
+  /** Modo portable cifrado: al bloquear, detener las grabaciones de log en curso (si no, siguen con la llave de su archivo). */
+  dataLockStopLogs: boolean;
 }
 
 export interface UpdateInfo {
@@ -228,6 +230,7 @@ export const defaultSettings: Settings = {
   serverGuard: {},
   vaultAutoLockMin: 0,
   vaultLockOnSleep: false,
+  dataLockStopLogs: false,
 };
 
 /** Opciones de log que se pasan a set_logging. */

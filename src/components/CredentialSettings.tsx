@@ -8,6 +8,7 @@ import { HopPasswordDialog } from "./tools/HopPasswordDialog";
 import type { Settings } from "../lib/settings";
 import { AUTOLOCK_CHOICES, autolockMinutes } from "../lib/vaultLock";
 import { Item, Switch } from "./controls";
+import { DataCryptSettings } from "./DataCryptSettings";
 
 const KEYCHAIN = "llavero del sistema operativo";
 
@@ -110,6 +111,8 @@ export function CredentialSettings({ settings, onChange }: Props = {}) {
       )}
 
       {settings && onChange && <AutoLock keychain={keychain} exists={st.exists} settings={settings} onChange={onChange} />}
+
+      <DataCryptSettings settings={settings} onChange={onChange} onVaultChanged={refresh} />
 
       {msg && (
         <p role={msg.error ? "alert" : "status"} className={`text-[11.5px] ${msg.error ? "text-danger" : "text-accent"}`}>
