@@ -195,7 +195,8 @@ is("show clock\nclear crypto sa", "disruptive");
 atLeast("cat /etc/hosts && hostnamectl set-hostname x", "change");
 is("ethtool -s eth0 speed 100 duplex full", "disruptive");
 is("ethtool -S eth0", "read");
-is("iptables -F", "change");
+// Vaciar el firewall con política DROP deja fuera la sesión (y en la tabla nat corta el tráfico traducido).
+is("iptables -F", "disruptive");
 
 // ---------- Revisión del catálogo: comandos declarados disruptive que el motor daba como cambio ----------
 // Aruba
@@ -259,6 +260,70 @@ for (const cmd of [
   "configure\n" + "interface a 1\ntype x\n".repeat(500),
 ]) {
   fastEnough(`computeRisk con entrada larga (${cmd.slice(0, 20)}…)`, 50, () => computeRisk(cmd));
+}
+
+// ---------- Auditoría del motor: lista blanca por tramo, anidamiento, prompts y abreviaturas ----------
+// Los 322 casos del auditor y sus 123 consultas comunes están en fixtures/risk-cases.json (riskParity). Aquí, los
+// que el fixture compartido con Rust no admite y los límites del motor.
+is("re\u200bload", "disruptive");
+is("show\u00a0run | red flash:x", "change");
+// Tab: con espacio y unido; vale el más grave ("re<Tab>load" puede quedar "reload").
+for (const c of ["rel\t", "re\tload", "wr\t er\t", "del flash:\t"]) is(c, "disruptive");
+is("sh\t ru\t", "read");
+is("show\tversion", "read");
+// U+2028/U+2029 separan líneas.
+is("show version\u2028reload", "disruptive");
+is("show clock\u2029show version", "read");
+// Límites: línea de más de 8 KB, más de 100 tramos, más de 5 niveles de anidamiento o de 16 prefijos.
+is("show " + "a".repeat(9000), "disruptive");
+is("show clock\n".repeat(2000), "read");
+is("cat x" + " | grep a".repeat(101), "disruptive");
+is("cat x" + " | grep a".repeat(50), "read");
+is("echo $(echo $(echo $(echo $(echo $(echo $(hostname))))))", "disruptive");
+is("echo $(echo $(hostname))", "change");
+is("ssh a ".repeat(7) + "uptime", "disruptive");
+is("ssh a ssh b uptime", "read");
+is("sudo ".repeat(20) + "ls", "disruptive");
+is("sudo nohup env A=1 timeout 5 ls", "read");
+// Prompts: se quitan, pero "reboot # x" o "halt> x" en un shell ejecutan la primera palabra; "ls> x" redirige.
+for (const c of ["Router# show ip int br", "sw01> show version", "<HUAWEI> display version", "[edit] admin@mx# show | compare", "FGT (root) # get system status", "user@host:~$ uptime", "PS C:\\> Get-Process"]) is(c, "read");
+for (const c of ["reboot # show version", "halt> show", "cat> /dev/sda"]) is(c, "disruptive");
+is("ls> show version", "change");
+// Filtros de show: abreviaturas de escritura y "| s" (section en IOS, save en Junos solo con un archivo).
+for (const c of ["show run | s router", "show run | i a|reload", "sh run | b router", "show ver | e x"]) is(c, "read");
+for (const c of ["show configuration | s /var/tmp/x", "show log | t flash:x", "show run | i x | red flash:y", "show run | i x | sh"]) is(c, "change");
+// Variables de plantilla del catálogo y comillas: no son bloques ni redirecciones.
+for (const c of ["Resolve-DnsName {{dominio}} -Type MX", "dig @{{servidor}} {{dominio}}", "awk '$3 > 100' f", "grep '>' f"]) is(c, "read");
+is("Get-Process | % Name", "change");
+
+// ---------- Rendimiento: 100 KB adversos por familia de regex (líneas de casi 8 KB, que sí pasan por las regex) ----------
+{
+  let n = 0;
+  // Cada medición usa un texto distinto (espacios finales) para no medir la caché de computeRisk.
+  const fresh = (text) => () => computeRisk(text + " ".repeat(++n % 7) + "\n#" + n);
+  const block = (prefix, filler, suffix = "") => {
+    const line = prefix + filler.repeat(Math.max(1, Math.floor((7900 - prefix.length - suffix.length) / filler.length))) + suffix;
+    return (line + "\n").repeat(Math.ceil(100_000 / (line.length + 1)));
+  };
+  const families = [
+    ["redirecciones (SAFE_REDIRECT, REDIRECT_WRITE)", "ls", " ", ">x"], ["redirección segura", "cat x", " ", "y 2>&1"], ["redirección <>", "cat", " 1<>", "x"],
+    ["prompt", "a".repeat(60), "# ", "x"], ["ssh (remoteCommand)", "ssh ", "-o x "], ["ssh anidado", "", "ssh a "],
+    ["cadenas", "cat x", " ; ls", ""], ["tuberías", "cat x", " | a", ""], ["grupos ( )", "", "("], ["grupos $( )", "", "$("], ["bloques { }", "Get-X ", "{"],
+    ["hashtables", "Get-X ", "@{a="], ["comillas invertidas", "ls ", "`"], ["comillas", "ls ", "'\""], ["escapes", "", "x\\"],
+    ["prefijos (sudo)", "sudo ", "-u "], ["prefijos (env)", "env ", "A=b "], ["prefijos (xargs)", "xargs ", "-n 1 "],
+    ["abreviaturas", "cle ", "ip "], ["show", "show ", "a "], ["netsh", "netsh", " a", " x"], ["date", "date", " -1", " x"], ["arp", "arp -", "b", " -x"],
+    ["pfctl", "pfctl", " -s s", " -F"], ["sysctl", "sysctl ", "-a ", "="], ["iptables", "iptables", " -L", " -F"], ["nc", "nc ", "-v "],
+    ["rm (EXTRA_DISRUPTIVE)", "rm ", "-r ", "x"], ["-AutoReboot", "x", " -A", "utoReboot"], ["systemctl", "systemctl ", "-a ", "x"], ["del", "del ", "/a ", "x"],
+    ["tcpdump", "tcpdump ", "-n "], ["curl", "curl ", "-k "], ["tshark", "tshark ", "-n "], ["dmesg", "dmesg ", "-x "],
+    ["métodos", "Get-X ", ".a("], ["diagnose", "diagnose ", "sys "], ["fw tab", "fw tab -t x", " -a"], ["fw ctl conntab", "fw ctl conntab ", "-sip=1 "],
+    ["awk", "awk '", "system( "], ["sed", "sed '", "e "], ["find", "find / ", "-exec x "], ["ForEach-Object", "% ", "a"], ["plantillas", "show ", "{{a}} "],
+    ["kill", "kill ", "-s "], ["vi", "vi ", "-c x "], ["powershell", "powershell ", "-NoProfile "], ["cmd", "cmd ", "/q "],
+  ];
+  for (const [label, prefix, filler, suffix] of families) fastEnough(`computeRisk 100 KB adversos: ${label}`, 50, fresh(block(prefix, filler, suffix)));
+  // Una sola línea de 100 KB: "puede cortar servicio" sin pasar por las regex.
+  for (const s of ["ls" + " ".repeat(100_000) + ">x", "ssh a ".repeat(16_000), "(".repeat(100_000), "x\b".repeat(50_000)]) {
+    assert.equal(fastEnough("computeRisk línea de 100 KB", 50, fresh(s)), "disruptive");
+  }
 }
 
 // ---------- Catálogo: ninguna consulta declarada se vuelve cambio (rompería la sugerencia en gris) ----------

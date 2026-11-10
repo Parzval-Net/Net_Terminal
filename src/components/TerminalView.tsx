@@ -28,7 +28,7 @@ const notifyScpExit = (transfer: string, reason: string | null, closed = false) 
 import { ConfirmDialog } from "./ConfirmDialog";
 import { type CatalogVendor, riskLabel } from "../lib/packs";
 import { HighlightEngine, MarkEngine, type MarkInfo } from "../lib/termDecor";
-import { type PasteAnalysis, type PasteDecision, analyzePaste, pasteChunks, pasteDecision } from "../lib/pasteGuard";
+import { type PasteAnalysis, type PasteDecision, analyzePaste, pasteChunks, pasteDecision, sanitizePaste } from "../lib/pasteGuard";
 import { type TermHl, validateHl } from "../lib/termHl";
 import { HighlightDialog, LineSendBar, type LineSendOpts, type LineSendState, MarksDialog, PasteDialog, useAnnounce } from "./TermTools";
 import {
@@ -980,24 +980,22 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     // Pegado seguro. En un equipo remoto, lo que se ejecuta al pegar equivale a escribirlo: se analiza
     // (líneas, caracteres especiales, riesgo por línea con computeRisk) y se confirma con la misma regla que
     // Notas, catálogo y botones (ver lib/pasteGuard). Una sola línea sin Enter final no se ejecuta: pasa directo.
-    // Sin los marcadores de pegado entre corchetes: un texto copiado que trae "ESC[201~"
-    // cerraría el modo antes de tiempo y la shell ejecutaría el resto como si se tecleara.
-    const cleanPaste = (text: string) => text.replace(/\x1b\[20[01]~/g, "");
+    // El texto llega sin ESC ni C1 (sanitizePaste): ningún marcador "ESC[201~", tampoco anidado, puede cerrar el
+    // pegado entre corchetes antes de tiempo y hacer que la shell o vim ejecuten el resto como si se tecleara.
     const handlePaste = (text: string) => {
       if (readOnlyRef.current) return notify(READ_ONLY_MSG);
       if (lineRun) return notify("Envío línea a línea en curso: Esc lo detiene");
-      // Aplicaciones de pantalla completa (vim, nano, less: búfer alterno): no se interfiere. term.paste respeta
-      // el pegado entre corchetes que la aplicación haya activado.
-      if (term.buffer.active.type === "alternate") return term.paste(text);
-      const remote = sessionRef.current.type !== "local";
-      if (!remote) return term.paste(text);
       const a = analyzePaste(text);
+      // Terminal local y aplicaciones de pantalla completa (vim, nano, less: búfer alterno): no se evalúa el riesgo
+      // (term.paste respeta el pegado entre corchetes que active la aplicación), pero los caracteres de control
+      // (Ctrl-*, retroceso, invisibles) se confirman igual: remote false en pasteDecision.
+      const remote = sessionRef.current.type !== "local" && term.buffer.active.type !== "alternate";
       const d = pasteDecision(a, { remote, confirmSend: settingsRef.current.confirmSend });
       if (d.ask) setPasteAsk({ text, a, d });
       else term.paste(text);
     };
     const paste = async () => {
-      const text = cleanPaste(await readText().catch(() => ""));
+      const text = sanitizePaste(await readText().catch(() => ""));
       if (!text) return;
       handlePaste(text);
     };
@@ -1008,10 +1006,11 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         e.stopPropagation();
         return notify(READ_ONLY_MSG);
       }
-      const text = cleanPaste(e.clipboardData?.getData("text/plain") ?? "");
-      if (!text) return;
+      // Siempre se toma el evento: si xterm lo procesara, pegaría el texto sin limpiar (o lo que quede tras limpiarlo).
       e.preventDefault();
       e.stopPropagation();
+      const text = sanitizePaste(e.clipboardData?.getData("text/plain") ?? "");
+      if (!text) return;
       handlePaste(text);
     };
     /**

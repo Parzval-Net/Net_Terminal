@@ -109,7 +109,7 @@ const maxRisk = (a: Risk, b: Risk): Risk => (RANK[a] >= RANK[b] ? a : b);
  * configuración ("ssh server enable", "telnet 10.0.0.0 255.0.0.0 inside") o un comando remoto.
  */
 const READ_START =
-  /^(show|display|get|dir|more|ping|traceroute|tracert|tracepath|verify|monitor (traffic(?!.*\bwrite-file\b)|interface|start|stop)|test policy|compare configuration|who|policy-check|tcpdump|dnslookup|nslookup|vpn-tunnel diag-report|(undo )?terminal (logging|monitor|debugging|trapping)|request system storage cleanup dry-run|request system software validate|admin show|packet-tracer|ethanalyzer local(?!.*\bwrite\b)|terminal (length|width|(no )?monitor|pager)|no page\s*$|checkpoint diff\b|diag cable-diagnostic show\b|cd \/md\S*\s*$|mdconnect\s*$|screen-length\s+\d+\s+temporary|screen-width|set cli |file (list|show|checksum)|commit check|request support information|diagnose (sys (top|status|session (stat|list)|session filter(?=\s*$)|ha (status|checksum (?!recalculate)))|vpn (ike gateway|tunnel) list|sniffer packet|ip (route|arp) list|firewall iprope lookup|test application(?!\s+\S+\s+99\b))|execute (ping6?|traceroute6?|telnet|ssh)(?!-)|execute (ping|traceroute)-options view-settings|tftp \S+ put|copy (running-config|startup-config|run|start) (tftp|scp|ftp|http)|execute backup)\b/i;
+  /^(show|display|get|dir|more|ping|traceroute|tracert|tracepath|verify|monitor (traffic(?!.*\swr)|interface|start|stop)|test policy|compare configuration|who|policy-check|tcpdump|dnslookup|nslookup|vpn-tunnel diag-report|(undo )?terminal (logging|monitor|debugging|trapping)|request system storage cleanup dry-run|request system software validate|admin show|packet-tracer|ethanalyzer local(?!.*\swr)|terminal (length|width|(no )?monitor|pager)|no page\s*$|checkpoint diff\b|diag cable-diagnostic show\b|cd \/md\S*\s*$|mdconnect\s*$|screen-length\s+\d+\s+temporary|screen-width|set cli |file (list|show|checksum)|commit check|request support information|diagnose (sys (top|status|session (stat|list)|session filter(?=\s*$)|ha (status|checksum (?!rec)))|vpn (ike gateway|tunnel) list|sniffer packet|ip (route|arp) list|firewall iprope lookup|test application(?!\s+\S+\s+99\b))|execute (ping6?|traceroute6?|telnet|ssh)(?!-)|execute (ping|traceroute)-options view-settings|tftp \S+ put|copy (running-config|startup-config|run|start) (tftp|scp|ftp|http)|execute backup)\b/i;
 
 /**
  * Cortan servicio o sesiones, o dejan el equipo en otro estado (conmutación, rollback,
@@ -200,7 +200,7 @@ const ARP_READ = `arp${ARP_OPT}(\\s+((?=[^\\s]*[.:])[\\da-f.:]+|\\{\\{\\w+\\}\\}
  * aparte (iprouteRead): "ip route ..." también es la ruta estática de IOS o VRP.
  */
 const LINUX_READ = new RegExp(
-  "^((top|uptime|free|df|du|cat|less|tail|head|grep|ls|lsof|lsns|lsblk|lscpu|lsmod|lsusb|lshw|uname|raid_diagnostic|lspci|netstat)(\\s|$)|dmidecode(?!.*\\s--dump-bin\\b)(\\s|$)|hostname( -\\w+)*\\s*$|" +
+  "^((top|uptime|free|df|du|cat|less|tail|head|grep|ls|lsof|lsns|lsblk|lscpu|lsmod|lsusb|lshw|uname|raid_diagnostic|lspci|netstat|ps|w|id|pwd)(\\s|$)|find(?!.*\\s-(exec|execdir|ok|okdir|delete|fprint\\w*|fls)\\b)(\\s|$)|dmidecode(?!.*\\s--dump-bin\\b)(\\s|$)|hostname( -\\w+)*\\s*$|" +
     "date(?!.*\\s(-s|--set)\\b)(?!(?!.*\\s-\\w*j).*\\s-\\w*f\\b)(?!(\\s+-\\w+)*\\s+\\d[\\d.]*\\s*$)(\\s|$)|" +
     ARP_READ +
     "|ss\\b|ifconfig( \\S+)?$)",
@@ -212,16 +212,20 @@ const LINUX_READ = new RegExp(
  * bandera "i").
  */
 const [TCPDUMP_WRITE, TSHARK_WRITE, DMESG_WRITE, SS_WRITE, CURL_WRITE] = [
-  // tcpdump: -w escribe la captura y -G rota archivos (exige -w); tshark: -w y -b (anillo).
-  /^tcpdump\b.*\s-[A-Za-z]*[wG]\b/,
-  /^tshark\b.*\s-[A-Za-z]*[wb]\b/,
-  // dmesg -c/-C vacía el buffer del kernel; -n, -D y -E cambian el nivel de la consola.
-  /^dmesg\b.*\s(-[A-Za-z]*[cCnDE]|--(clear|read-clear|console-\w+))/,
-  // ss -K cierra conexiones; -D vuelca a un archivo.
-  /^ss\b.*\s(-[A-Za-z]*[KD]|--(kill|diag)\b)/,
-  // curl: otro método, datos o subida (-X, -d, -F, -T, --json…), escribir archivos (-o salvo a
-  // /dev/null, -O, -D, -c) o leer opciones de un archivo (-K) ya no es una consulta.
-  /^curl\b.*\s(-[A-Za-z]*[XdDFTOKcQ]|-[A-Za-z]*o\s*(?!\/dev\/null\b|nul\b|\$null\b)\S|--(request|data|form|upload-file|output|remote-name|config|json|cookie-jar|post30[123]|dump-header|trace|trace-ascii|stderr|libcurl|create-dirs|ftp-create-dirs|quote|mail-rcpt))/,
+  // tcpdump: -w escribe la captura, -G rota archivos y -z ejecuta un comando al rotar. El argumento puede ir pegado
+  // ("-wcap.pcap") y la letra puede cerrar un grupo de banderas sin argumento ("-nnw"); "-iwlan0" no cuenta (-i lleva
+  // argumento). tshark: -w, -b (anillo) y -X (extensiones Lua).
+  /^tcpdump\b.*\s-[^\sBcCEFGijmMrsTVwWyzZ]*[wGz]/,
+  /^tshark\b.*\s-[nqQVxlpPSDL2]*[wbX]/,
+  // dmesg -c/-C vacía el buffer del kernel; -n, -D y -E cambian el nivel de la consola. getopt_long acepta
+  // prefijos inequívocos de las opciones largas ("--cl" es --clear).
+  /^dmesg\b.*\s(-[A-Za-z]*[cCnDE]|--(cl|read-c|cons))/,
+  // ss -D vuelca a un archivo (-K, que cierra conexiones, corta servicio: EXTRA_DISRUPTIVE_CS).
+  /^ss\b.*\s(-[A-Za-z]*D|--d)/,
+  // curl: otro método, datos o subida (-X, -d, -F, -T, --json…), escribir archivos (-o salvo a /dev/null, -O, -D, -c,
+  // --etag-save, --hsts, --alt-svc, "-w %output{…}" desde curl 8.3) o leer opciones de un archivo (-K) ya no es una
+  // consulta; tampoco un esquema que habla con otro servicio (gopher://, telnet://, dict://… envían comandos).
+  /^curl\b.*(\s(-[A-Za-z]*[XdDFTOKcQ]|-[A-Za-z]*o\s*(?!\/dev\/null\b|nul\b|\$null\b)\S|--(request|data|form|upload-file|output|remote-name|config|json|cookie-jar|post30[123]|dump-header|trace|trace-ascii|stderr|libcurl|create-dirs|ftp-create-dirs|quote|mail-rcpt|etag-save|hsts|alt-svc|output-dir))|%output\{|\b(gopher|telnet|dict|ldaps?|smtps?|imaps?|pop3s?|mqtts?|rtsp|tftp|file|scp|sftp|smbs?|wss?):\/\/)/,
 ];
 const WRITE_FLAGS: Record<string, RegExp> = { tcpdump: TCPDUMP_WRITE, tshark: TSHARK_WRITE, dmesg: DMESG_WRITE, ss: SS_WRITE, curl: CURL_WRITE };
 
@@ -262,7 +266,7 @@ const OS_READ = new RegExp(
       "dns-sd -[BGLQZ]\\b",
       // wdutil diagnose y wdutil log escriben archivos o cambian el nivel de registro.
       "nettop|ndp(\\s+-[anprt]+)+(\\s+[^\\s-]\\S*)?\\s*$|(\\S*/)?airport -[Is]\\b|ifconfig( -\\w+)*( \\S+)?$|system_profiler|sw_vers|networkQuality|wdutil( info)?\\s*$",
-      "/usr/libexec/ApplicationFirewall/socketfilterfw --(get|list)\\w*(?!.*\\s--(set|add|remove|block|unblock))",
+      "(\\S*/)?socketfilterfw --(get|list)\\w*(?!.*\\s--(set|add|remove|block|unblock))",
       // pfctl procesa todas sus opciones: "pfctl -sr -F all" también vacía reglas.
       "pfctl(\\s+(-[vgrqn]*s\\s*\\w+|-[vgrqn]+|-a\\s+\\S+))+\\s*$",
       "log (show|stream)\\b",
@@ -489,9 +493,15 @@ function remoteCommand(line: string): string | null {
           if (c === "v" && k === t.length - 1 && /^[12]$/.test(toks[i + 1] ?? "")) i++;
           continue;
         }
-        if (c === "O" || c === "F") return null;
+        // -O (control), -F (archivo de configuración) e -I (biblioteca PKCS#11) cargan o ejecutan algo local.
+        if (c === "O" || c === "F" || c === "I") return null;
         const arg = k < t.length - 1 ? t.slice(k + 1) : toks[++i] ?? "";
-        if (c === "o" && /(proxy|local|knownhosts)command|permitlocalcommand/i.test(arg)) return null;
+        if (c === "o") {
+          const opt = arg.replace(/['"]/g, "");
+          if (/(proxy|local|knownhosts)command|permitlocalcommand|pkcs11provider|securitykeyprovider/i.test(opt)) return null;
+          // RemoteCommand: el comando que corre en el otro equipo (con lo que sigue, por si venía entre comillas).
+          if (/^remotecommand\b/i.test(opt)) return [opt.replace(/^remotecommand\s*=?\s*/i, ""), ...toks.slice(i + 1)].join(" ").replace(/['"]/g, "");
+        }
         break;
       }
     }
@@ -502,7 +512,7 @@ function remoteCommand(line: string): string | null {
       if (/^(routing-instance|source|port|logical-system|interface|vpn-instance|identity-key|user-identity-key|prefer_\w+)$/i.test(toks[i])) i++;
       else if (!/^(inet6?|bypass-routing|no-resolve)$/i.test(toks[i])) break;
     }
-    const cmd = toks.slice(i).join(" ");
+    const cmd = toks.slice(toks[i] === "--" ? i + 1 : i).join(" ");
     const q = /^(["'])(.*)\1$/.exec(cmd);
     return q ? q[2] : cmd;
   }
@@ -525,43 +535,206 @@ function remoteCommand(line: string): string | null {
 }
 
 /**
- * Una consulta deja de serlo si su salida se ejecuta, se escribe a disco o termina procesos.
- * "| save" (Junos), "| redirect" / "| append" (IOS) y "| file disk0:x" (IOS XR) guardan la
- * salida en el equipo. En PowerShell, los cmdlets cuyo verbo cambia algo (Set-Content,
- * Add-Content, Export-Csv, Out-File, Remove-Item, Invoke-…) y Tee-Object salvo con -Variable.
- */
-const PS_CHANGE_VERBS =
-  "Add|Block|Clear|Close|Compress|Connect|Copy|Disable|Disconnect|Dismount|Enable|Export|Grant|Initialize|Install|Invoke|Lock|Mount|Move|New|Publish|Register|Remove|Rename|Repair|Reset|Restart|Restore|Resume|Revoke|Save|Send|Set|Start|Stop|Suspend|Sync|Unblock|Uninstall|Unlock|Unregister|Update|Format(?!-(Table|List|Wide|Custom|Hex)\\b)|Write(?!-(Output|Host|Verbose|Debug|Information|Warning|Error|Progress)\\b)";
-const PIPE_CHANGES = new RegExp(
-  `^(sh|bash|zsh|ksh|dash|fish|csh|tcsh|python[\\d.]*|perl|ruby|node|php|pwsh|powershell|cmd|source|xargs|parallel|sudo|doas|iex|Invoke-Expression|save|redirect|append|file\\s+\\S*:|Tee-Object(?!\\s+-Var(iable)?\\b)|tee|Out-(File|Printer)|(${PS_CHANGE_VERBS})-\\w+)(?![\\w-])`,
-  "i",
-);
-/** ForEach-Object / Where-Object (o % y ?) con un bloque que cambia algo o ejecuta texto. */
-const PS_BLOCK = /^(ForEach-Object|foreach|Where-Object|%|\?)(\s|\{|$)/i;
-const PS_BLOCK_CHANGES = new RegExp(`\\b((${PS_CHANGE_VERBS})-\\w+|iex|Invoke-Expression|Out-File|Tee-Object)\\b|&\\s*[$({'"]`, "i");
-/**
  * Llamadas a métodos (".Delete()", ".Reboot()" de WMI o .NET). Solo los de esta lista son de
- * consulta; los de POWER_METHOD reinician o apagan el equipo o sueltan su IP.
+ * consulta; los de POWER_METHOD reinician o apagan el equipo, sueltan su IP o terminan procesos.
  */
 const METHOD_CALL = /\.([A-Za-z_]\w*)\s*\(/g;
 const READ_METHOD = /^(To\w+|Trim\w*|Split|Replace|Contains\w*|StartsWith|EndsWith|Substring|(Last)?IndexOf\w*|Pad(Left|Right)|Get\w*|Equals|CompareTo|Add(Days|Hours|Minutes|Seconds|Milliseconds|Months|Years|Ticks)|Normalize|IsMatch|Match(es)?|Format|Where|Count)$/i;
-const POWER_METHOD = /^(Reboot|Shutdown|Win32Shutdown\w*|ReleaseDHCPLease\w*|Disable)$/i;
+const POWER_METHOD = /^(Reboot|Shutdown|Win32Shutdown\w*|ReleaseDHCPLease\w*|Disable|Kill|Terminate)$/i;
 /**
  * ">" y ">>" (también "2>", "&>") escriben un archivo, salvo a /dev/null, $null o nul. "2>&1" y
- * ">&2" solo redirigen a otra salida.
+ * ">&2" solo redirigen a otra salida. "<>" abre el archivo para leer y escribir.
  */
-const REDIRECT_WRITE = /(?:^|[^-=<>])(?:\d|&)?>{1,2}\s*(?!&\d|\/dev\/(null|stdout|stderr)\b|\$null\b|nul\b)\S/i;
-/** Redirecciones que no escriben nada: se quitan antes de reconocer la consulta. */
-const SAFE_REDIRECT = /\s+(?:\d|&)?>{1,2}\s*(?:&\d|\/dev\/null|\$null|nul)(?=\s|$)/gi;
+const REDIRECT_WRITE = /(?:^|[^-=<>])(?:\d|&)?>{1,2}\s*(?!&\d|\/dev\/(null|stdout|stderr)\b|\$null\b|nul\b)\S|<>\s*\S/i;
+/**
+ * Redirecciones que no escriben nada: se quitan antes de reconocer la consulta. Solo empieza al comienzo de
+ * un tramo de espacios ((?<!\s)): sin eso, cada espacio de una línea larga era un intento nuevo que recorría
+ * el resto del tramo (tiempo cuadrático: 100 KB de espacios tardaban segundos).
+ */
+const SAFE_REDIRECT = /(?<!\s)\s+(?:\d|&)?>{1,2}\s*(?:&\d|\/dev\/null|\$null|nul)(?=\s|$)/gi;
+
+/** Navegación de contexto en FortiOS con VDOM (no cambia configuración). El nombre no lleva metacaracteres de shell. */
+const FORTI_CONTEXT = /^(config global|config vdom|edit ("[^"$`]*"|[\w.@:/-]+|\{\{\w+\}\})|end|next)$/i;
 
 /**
- * sudo y sus opciones: las que llevan argumento (-u usuario, -g grupo…) consumen también la
- * palabra siguiente. Distingue mayúsculas: -H, -P y -S son banderas.
+ * Cortan servicio y el motor de catálogo no los cubría (auditoría del motor de riesgo). Red: sesiones y tablas de
+ * ASA/IOS (conn, xlate, line, arp-cache), quitar un proceso de enrutamiento o una interfaz lógica, failover de ASA,
+ * "boot" de ArubaOS-Switch (reinicia), aplicar un checkpoint de Aruba, instalar Junos con reboot, reinicio de
+ * procesos de FortiOS, sacar a un administrador, "fw sam" de inhibición (bloquea tráfico) y "del" con un sistema de
+ * archivos de IOS ("del flash:x"; "del C:\x" de Windows queda como cambio). Sistemas: apagar o aislar con systemctl,
+ * detener servicios (service, sc, Stop-Service, launchctl), runlevels 0/1/6, formatear o escribir discos, vaciar el
+ * firewall o la tabla de rutas, borrar interfaces, rm/chmod recursivos sobre "/", bajar interfaces o cambiar la IP
+ * (netsh, Set-NetIPAddress), reiniciar por WMI/CIM o con -AutoReboot, y apagar el acceso remoto de macOS.
  */
-const SUDO = /^sudo(\s+(-[ugCDpRrTU]\s+\S+|--(user|group|chdir|host|prompt|role|type|close-from|other-user)=\S+|-\S+))*\s+/;
+const BLOCK_DEV = "\\/dev\\/(sd[a-z]|nvme\\d|hd[a-z]|vd[a-z]|xvd[a-z]|mmcblk\\d|r?disk\\d|md\\d|dm-\\d|mapper\\/|loop\\d|mtd(block)?\\d)";
+const EXTRA_DISRUPTIVE = new RegExp(
+  "^(" +
+    [
+      "clear (conn|xlate|local-host|line|arp-cache)\\b",
+      "clear configuration interface\\b",
+      "no router (bgp|ospf|ospfv3|eigrp|isis|rip)\\b",
+      "undo (ospf|ospfv3|bgp|isis|rip)(\\s+\\d+)?\\s*$",
+      "(no|undo) interface \\S+\\s*$",
+      "no failover\\s*$|failover (active|reload-standby)\\b",
+      "boot\\s*$",
+      "copy checkpoint \\S+ running-config\\b",
+      "request system software add\\b.*\\sreboot\\b",
+      "execute router restart\\b",
+      "fw sam\\b.*\\s-[a-z]*[ij]\\b",
+      "del(ete)?\\s+(\\/\\S+\\s+)*[a-z][\\w-]+:",
+      "systemctl(\\s+-\\S+)*\\s+(reboot|poweroff|halt|kexec|soft-reboot|isolate|emergency|rescue|suspend|hibernate|hybrid-sleep|suspend-then-hibernate|stop|kill)\\b",
+      "service \\S+ stop\\b",
+      "(tel)?init\\s+[016sS]\\s*$",
+      "(mkfs|mke2fs|mkswap|wipefs|mkdosfs|mkntfs|newfs)\\S*(\\s|$)",
+      `(dd|shred)\\b.*\\s(of=)?${BLOCK_DEV}`,
+      "nft(\\s+-\\S+)*\\s+(flush|delete)\\s+(ruleset|table)\\b",
+      "ip\\s+(-\\S+\\s+)*l(i(nk?)?)?\\s+(del|delete)\\b",
+      "rm(?=\\s)(?=.*\\s(-[a-z]*r[a-z]*|--recursive)(\\s|$))(?=.*\\s(\\/|\\/\\*|\\/\\.\\*)(\\s|$))",
+      "(chmod|chown|chgrp)(?=\\s)(?=.*\\s(-[a-z]*r|--recursive)(\\s|$))(?=.*\\s\\/(\\s|$))",
+      "taskkill\\b|Stop-Process\\b|spps\\b",
+      "Stop-Service\\b|spsv\\b|sc(\\.exe)?\\s+(\\\\\\\\\\S+\\s+)?(stop|pause)\\b",
+      "launchctl\\s+(unload|bootout|stop|remove|kill)\\b",
+      "diskutil\\s+(eraseDisk|eraseVolume|zeroDisk|randomDisk|secureErase|partitionDisk|reformat|apfs\\s+(deleteContainer|eraseVolume|deleteVolume))\\b",
+      "route\\s+(-n\\s+)?flush\\b",
+      "networksetup\\s+-(setv6off|setv4off)\\b",
+      "systemsetup\\s+-setremotelogin\\s+off\\b",
+      "(Set-NetIPAddress|Disable-NetAdapterBinding|Remove-NetAdapter\\w*)\\b",
+      "netsh\\s+(int|interface)\\s+set\\s+(int|interface)\\b.*\\s(disabled?|admin=disabled?)(\\s|$)",
+      "netsh\\s+(int|interface)\\s+(ip|ipv4|ipv6)\\s+(set|delete)\\s+(address|dns\\w*)\\b",
+      "Invoke-(Cim|Wmi)Method\\b.*\\s-(MethodName|Name)\\s+['\"]?(Reboot|Shutdown|Win32Shutdown\\w*|Terminate)\\b",
+      "\\S.*\\s-AutoReboot\\b",
+    ].join("|") +
+    ")",
+  "i",
+);
+/** Los mismos, con opciones que distinguen mayúsculas (iptables -F vacía, -f es fragmento; route -f de Windows; pfctl -F). */
+const EXTRA_DISRUPTIVE_CS = new RegExp(
+  "^(" +
+    [
+      // Vaciar las reglas o fijar la política en DROP/REJECT: con política por defecto DROP, vaciar corta la sesión.
+      "ip6?tables(-legacy|-nft)?\\b.*\\s(-[a-zA-Z]*F|--flush|(-P|--policy)\\s+\\S+\\s+(DROP|REJECT))(\\s|$)",
+      "pfctl\\b.*\\s-[a-zA-Z]*F",
+      "route\\s+([-/][a-zA-Z]+\\s+)*[-/]f(\\s|$)",
+      "ss\\b.*\\s(-[A-Za-z]*K|--k)",
+    ].join("|") +
+    ")",
+);
+/** Abren el watchdog (reinicio al vencer) o disparan SysRq: cortan aunque solo se lean. Un disco como destino de escritura. */
+const SPECIAL_PATH = /\/dev\/watchdog\d*\b|\/proc\/sysrq-trigger\b/;
+const BLOCK_WRITE = new RegExp(`>{1,2}\\s*${BLOCK_DEV}|^tee\\b(\\s+-\\S+)*\\s+${BLOCK_DEV}`, "i");
 
-/** Navegación de contexto en FortiOS con VDOM (no cambia configuración). */
-const FORTI_CONTEXT = /^(config global|config vdom|edit \S+|end|next)$/i;
+/**
+ * Formas de consulta que en realidad cambian algo (la regla de consulta del comando las aceptaba): "fw tab -a"
+ * agrega una entrada, "fw logswitch" rota el log, "fwaccel stats -r" y "nstat -r" reinician contadores, "cpview
+ * history" lo enciende o apaga, "systemd-resolve --flush-caches" y similares, "date -us" o "--se=" (prefijo de
+ * --set), journalctl con prefijos de --vacuum/--rotate/--flush…, "write" abreviado en capturas de Junos y NX-OS,
+ * FortiOS "execute date|time <valor>" y "Get-WindowsUpdate -Install".
+ */
+const EXTRA_CHANGE = new RegExp(
+  "^(" +
+    [
+      "fw (tab\\b.*\\s-a\\b|logswitch\\b)",
+      "fwaccel stats?\\b.*\\s-r\\b",
+      "cpview\\b.*\\shistory\\b",
+      "systemd-resolve\\b.*\\s--(flush|reset|set|revert|interface)",
+      "resolvectl\\b.*\\s(flush-caches|reset-\\S+|revert)\\b",
+      "nstat\\b.*\\s(-[a-z]*r|--reset)\\b",
+      "journalctl\\b.*\\s--(vac|rot|flu|syn|rel|sma|set|upd)",
+      "execute (date|time)\\s+\\S",
+      "Get-\\w+\\b.*\\s-(Install|AcceptAll|Download)\\b",
+    ].join("|") +
+    ")",
+  "i",
+);
+/** date: -s y --set (también en grupo, "-us", y abreviado, "--se"); -I lleva su argumento pegado ("-Iseconds"). */
+const DATE_SET = /^date\b.*\s(-(?!I)[a-zA-Z]*s|--se?t?(=|\s|$))/;
+
+/**
+ * Filtros de tubería que solo leen su entrada. Aplica tras un "|" y también como primer comando (con su validación:
+ * "sort -o" y "uniq entrada salida" escriben, "Tee-Object" solo con -Variable). awk, sed y find van aparte.
+ */
+const PIPE_READ_WORDS = new Set(
+  (
+    "grep egrep fgrep zgrep rg head tail wc cut tr less more tac nl column fold fmt rev expand unexpand jq xxd hexdump od strings " +
+    "base64 md5sum sha1sum sha256sum sha512sum cksum findstr echo true cat diff cmp comm pr " +
+    "select-string sls where-object where ? select-object select sort-object measure-object measure out-string oss out-host oh " +
+    "out-null out-gridview ogv group-object group get-unique gu get-member gm format-table ft format-list fl format-wide " +
+    "format-custom convertto-json convertto-csv convertto-html convertto-xml convertfrom-json convertfrom-csv convertfrom-string " +
+    "select-xml compare-object write-output"
+  ).split(" "),
+);
+const PIPE_READ_CHECK = new Map<string, (c: string) => boolean>([
+  ["sort", (c) => !/\s(-[a-zA-Z]*o|--o)/.test(c)],
+  ["uniq", (c) => c.split(/\s+/).filter((t, i) => i > 0 && !t.startsWith("-")).length <= 1],
+  ["tee-object", (c) => /\s-Var(iable)?\b/i.test(c)],
+]);
+
+/**
+ * Filtros de "|" tras un show/display/get de equipo de red. Los de REGEX toman el resto de la línea como expresión
+ * ("| include up|reload": el segundo "|" es parte de ella). Los de WRITE guardan la salida en el equipo ("| redirect"
+ * y "| append" de IOS, "| tee", "| save" de Junos, "| file" de IOS XR) y se reconocen abreviados como los acepta el
+ * equipo ("| red", "| appe", "| te", "| sav"). Ante una abreviatura que puede ser de los dos, gana la escritura,
+ * salvo "| s" (section en IOS, save en Junos): es save solo con un único argumento con forma de archivo.
+ */
+const SHOW_REGEX_FILTERS = ["include", "exclude", "begin", "section", "match", "except", "find", "grep", "egrep"];
+const SHOW_READ_FILTERS = ["count", "no-more", "last", "display", "json", "json-pretty", "xml", "trim", "hold", "resolve", "compare", "head", "tail", "wc", "sort", "uniq", "less", "more", "format", "linenum", "refresh", "utility"];
+const SHOW_WRITE_FILTERS = ["redirect", "append", "tee", "save", "file"];
+const SHOW_HEADS = new Set(["show", "display", "get", "dir", "more"]);
+
+/** Intérpretes: ejecutan lo que reciben por la entrada estándar o en un argumento. */
+const SHELLS = new Set(["sh", "bash", "zsh", "ksh", "mksh", "dash", "ash", "yash", "fish", "csh", "tcsh", "rbash"]);
+const INTERPRETERS = /^(python[\d.]*|pypy\d*|perl\d*|ruby|node|nodejs|deno|bun|php[\d.]*|lua[\d.]*|osascript|tclsh[\d.]*|wish|expect|rscript|irb|jshell|groovy|scala|at|batch|crontab|source|parallel)$/i;
+/** Prefijos que solo cambian cómo corre el comando que sigue: se evalúa ese comando. "exec" reemplaza el shell (cierra la sesión al terminar). */
+const PLAIN_WRAPPERS = new Set(["nohup", "time", "builtin", "setsid", "unbuffer", "caffeinate", "pkexec", "do", "then", "else", "elif", "if", "while", "until", "!", "busybox", "noglob", "nocorrect"]);
+/** Palabras de PowerShell que abren un bloque o una expresión: no son comandos. */
+const PS_KEYWORDS = new Set(["process", "begin", "end", "else", "elseif", "if", "try", "catch", "finally", "do", "while", "until", "for", "foreach", "switch", "trap", "return", "throw", "exit", "break", "continue", "param", "function", "filter", "data"]);
+
+/**
+ * Abreviaturas de los verbos que cortan servicio en equipos de red. Los CLI aceptan cualquier prefijo inequívoco de
+ * cada palabra (IOS, NX-OS, VRP, Junos, FortiOS): "relo", "wr er", "req sys reb", "cle ip bg *", "exe reboot",
+ * "diagnose sys kil 11 1234". Se expande cada palabra que es prefijo (con un largo mínimo) de una del árbol y se
+ * evalúa también la línea expandida (gana el mayor riesgo). Un prefijo ambiguo en el equipo se rechaza allá: aquí
+ * solo sube el riesgo, nunca lo baja.
+ */
+type Abbr = readonly [word: string, min: number, next?: readonly Abbr[]];
+const ROUTING: readonly Abbr[] = [["bgp", 2], ["ospf", 2], ["isis", 2], ["eigrp", 2], ["route", 3], ["mpls", 2]];
+const NET_ABBR: readonly Abbr[] = [
+  ["reload", 3], ["reboot", 3], ["shutdown", 3], ["squeeze", 3], ["erase", 2], ["format", 4], ["delete", 4], ["debug", 3], ["zeroize", 3], ["undelete", 4],
+  ["write", 2, [["erase", 1]]],
+  ["configure", 4, [["replace", 3], ["revert", 3, [["now", 1]]]]],
+  ["reset", 3, [["saved-configuration", 2], ...ROUTING, ["ike", 2, [["sa", 1]]], ["ipsec", 3, [["sa", 1]]], ["recycle-bin", 3], ["ip", 2, [["ospf", 2]]]]],
+  ["request", 3, [
+    ["system", 2, [["reboot", 3], ["halt", 2], ["power-off", 2], ["zeroize", 1], ["logout", 3], ["software", 2, [["rollback", 2]]]]],
+    ["node", 2, [["reboot", 3], ["halt", 2], ["power-off", 2], ["offline", 2]]],
+    ["chassis", 2, [["cluster", 2, [["failover", 1]]], ["routing-engine", 2, [["master", 1]]]]],
+  ]],
+  ["clear", 3, [
+    ["ip", 1, [...ROUTING, ["nat", 2, [["translation", 1]]], ["arp", 3]]], ...ROUTING, ["crypto", 2], ["conn", 4], ["xlate", 2], ["line", 2],
+    ["arp-cache", 4], ["local-host", 2], ["configuration", 4, [["interface", 2]]], ["mac", 3, [["address-table", 2]]], ["mac-address-table", 5],
+  ]],
+  ["execute", 3, [
+    ["reboot", 3], ["shutdown", 3], ["factoryreset", 4], ["formatlogdisk", 4], ["restore", 4],
+    ["ha", 2, [["failover", 1]]], ["router", 3, [["restart", 4], ["clear", 3]]],
+  ]],
+  ["diagnose", 4, [
+    ["sys", 2, [["kill", 3], ["session", 2, [["clear", 3]]], ["ha", 2, [["reset-uptime", 3]]]]],
+    ["vpn", 2, [["tunnel", 2, [["down", 3]]], ["ike", 2, [["gateway", 2, [["clear", 3], ["flush", 3]]], ["restart", 4]]]]],
+    ["firewall", 2, [["auth", 2, [["clear", 3]]]]],
+  ]],
+  ["undo", 4, [["interface", 3], ["ospf", 2], ["bgp", 2], ["isis", 2]]],
+  ["no", 2, [["router", 3, [["bgp", 2], ["ospf", 2], ["eigrp", 2], ["isis", 2], ["rip", 2]]], ["interface", 3], ["failover", 4]]],
+  ["failover", 4, [["active", 3], ["reload-standby", 3]]],
+  ["redundancy", 4, [["force-switchover", 2], ["switchover", 2]]],
+];
+/** Verbos de "diagnose" de FortiOS que cambian estado (FORTI_DIAG_READ): también abreviados ("cle", "dow", "recalc"). */
+const FORTI_DIAG_VERBS = ["clear", "delete", "reset", "kill", "killall", "restart", "flush", "enable", "disable", "unset", "start", "stop", "filter", "update", "purge", "failover", "clean", "reload", "test", "reboot", "shutdown", "down", "recalculate", "refresh", "kick", "sniff", "plain-ctl", "atcmd", "trigger", "push", "upgrade", "remove", "renew", "release", "erase", "format", "toggle", "block", "unblock"];
+
+/**
+ * Prompt pegado delante del comando (copiado de la terminal o de un manual): "Router# ", "Router(config-if)# ",
+ * "<HUAWEI> ", "[HUAWEI] ", "[edit] user@host# ", "FGT (vdom) # ", "PS C:\> ", "C:\Users\x> ", "user@host:~$ ".
+ * Cuantificadores acotados y anclado: tiempo constante.
+ */
+const PROMPT = /^(?:\[[^\]\n]{1,80}\]\s*)?(?:PS [^>\n]{1,200}>|[A-Za-z]:\\[^>\n]{0,200}>|<[^<>\s]{1,64}>|\[[~*]?[^\]\s]{1,64}\]|([\w.@:/~+-]{1,64})(\s?\([^()\n]{1,64}\))?\s?([#>$%]))\s+(?=\S)/;
 
 /** ethtool -s (minúscula) cambia velocidad/dúplex y renegocia el enlace; -S solo muestra. */
 const ETHTOOL_SET = /^ethtool -s\b/;
@@ -576,7 +749,7 @@ const ETHTOOL_SET = /^ethtool -s\b/;
  * dynamic|static" bajo link-aggregation) están en `blockDisruptive`.
  */
 const DISRUPTIVE_IN_CONFIG =
-  /^(shutdown|set (status|admin|admin-status) (down|disable)|set poe-status disable|disable|no enable\s*$|restart\s*$|default interface\b|power inline never|undo poe enable|poe mode disable|link-speed\b|(no |undo )?ip address\b|ip \d+\.\d+\.\d+\.\d+\/\d+|apply\s*$|set .*admin-status down|set status suppressed)\b/i;
+  /^(shutdown|set disable\s*$|set (status|admin|admin-status) (down|disable)|set poe-status disable|disable|no enable\s*$|restart\s*$|default interface\b|power inline never|undo poe enable|poe mode disable|link-speed\b|(no |undo )?ip address\b|ip \d+\.\d+\.\d+\.\d+\/\d+|apply\s*$|set .*admin-status down|set status suppressed)\b/i;
 
 /**
  * Órdenes que cortan servicio solo por el bloque en que van (varias líneas). Se exige la línea que
@@ -631,26 +804,29 @@ function splitChain(line: string): string[] {
 }
 
 /**
- * Partes de una línea separadas por "|" fuera de comillas: en "grep -E 'up|reboot' x" el "|"
- * es parte de la expresión regular. Con comillas sin cerrar se corta en todos los "|".
+ * Partes de una línea separadas por "|" fuera de comillas y de (), {} o []: en "grep -E 'up|reboot' x" el "|" es
+ * parte de la expresión regular y en "% { $_ | Stop-Process }" va dentro del bloque (que se evalúa aparte). Con
+ * comillas o paréntesis sin cerrar se corta en todos los "|".
  */
 function splitPipes(line: string): string[] {
   if (!line.includes("|")) return [line];
-  if (!line.includes("'") && !line.includes('"')) return line.split("|");
   const parts: string[] = [];
   let quote = "";
+  let depth = 0;
   let start = 0;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (quote) {
       if (c === quote) quote = "";
     } else if (c === "'" || c === '"') quote = c;
-    else if (c === "|") {
+    else if (c === "(" || c === "{" || c === "[") depth++;
+    else if (c === ")" || c === "}" || c === "]") depth = Math.max(0, depth - 1);
+    else if (c === "|" && depth === 0) {
       parts.push(line.slice(start, i));
       start = i + 1;
     }
   }
-  if (quote) return line.split("|");
+  if (quote || depth) return line.split("|");
   parts.push(line.slice(start));
   return parts;
 }
@@ -687,10 +863,6 @@ export function editedLine(line: string): string {
 
 const riskCache = new Map<string, Risk>();
 
-/**
- * Riesgo según el contenido. Analiza cada línea (sin lo que va tras "|"). Un comando que
- * no se reconoce como consulta se trata como cambio: ante la duda, se pide confirmación.
- */
 /** Riesgo mayor entre las líneas de un texto de varios comandos (aprobaciones MCP). */
 export function textRisk(text: string): Risk {
   return text
@@ -700,18 +872,30 @@ export function textRisk(text: string): Risk {
     .reduce<Risk>((a, b) => maxRisk(a, b), "read");
 }
 
+/**
+ * Riesgo según el contenido. Ante la duda, cambio: un comando solo es consulta si está en una lista blanca
+ * (consultas por fabricante y filtros de tubería conocidos). Diseño en docs/TECNICO.md («Motor de riesgo»).
+ */
 export function computeRisk(cmd: string): Risk {
   let risk = riskCache.get(cmd);
   if (risk === undefined) {
     // Es pura: se memoriza para no repetir las regex al recargar o reconstruir el catálogo.
     if (riskCache.size >= 10000) riskCache.clear();
-    risk = evalRisk(cmd);
+    risk = evalRisk(cmd, 0);
     riskCache.set(cmd, risk);
   }
   return risk;
 }
 
-const cuts = (x: string) => DISRUPTIVE.test(x) || OS_DISRUPTIVE.test(x) || DISRUPTIVE_VENDOR.test(x);
+const cuts = (x: string) =>
+  DISRUPTIVE.test(x) || OS_DISRUPTIVE.test(x) || DISRUPTIVE_VENDOR.test(x) || EXTRA_DISRUPTIVE.test(x) || EXTRA_DISRUPTIVE_CS.test(x) || ETHTOOL_SET.test(x);
+
+/** "diagnose …" de consulta: sin verbo que cambia estado, tampoco abreviado ("cle" es clear, "recalc" es recalculate). */
+function fortiDiagRead(line: string): boolean {
+  if (!FORTI_DIAG_READ.test(line)) return false;
+  for (const t of line.toLowerCase().split(/[\s_-]+/)) if (t.length >= 3 && t !== "sta" && FORTI_DIAG_VERBS.some((v) => v.length > t.length && v.startsWith(t))) return false;
+  return true;
+}
 
 /** La línea es una consulta (`word`: su primera palabra en minúsculas). */
 function isRead(line: string, word: string): boolean {
@@ -721,7 +905,7 @@ function isRead(line: string, word: string): boolean {
   return (
     READ_START.test(line) ||
     abbrevRead(line) ||
-    FORTI_DIAG_READ.test(line) ||
+    fortiDiagRead(line) ||
     FORTI_EXEC_READ.test(line) ||
     FORTIAP_READ.test(line) ||
     CHECKPOINT_READ.test(line) ||
@@ -732,55 +916,742 @@ function isRead(line: string, word: string): boolean {
   );
 }
 
-function evalRisk(cmd: string): Risk {
-  // Un "\r" suelto también separa comandos en el equipo, y Ctrl-Z termina la línea (IOS).
-  if (/[\r\x1a]/.test(cmd)) cmd = cmd.replace(/\r\n?|\x1a/g, "\n");
+// ---------- Evaluación ----------
+
+/** Una línea más larga que esto no es un comando escrito a mano: se confirma sin pasar por las regex. */
+const MAX_LINE = 8192;
+/** Niveles de anidamiento ($(…), bloques, sh -c, ssh host cmd, iex…). Más profundo: "puede cortar servicio". */
+const MAX_DEPTH = 5;
+/** Prefijos encadenados (sudo nohup env …) que se quitan por segmento. Más: "puede cortar servicio". */
+const MAX_WRAPPERS = 16;
+/** Comandos encadenados o tramos de tubería en una línea. Más no es algo que se escriba a mano: "puede cortar servicio". */
+const MAX_PARTS = 100;
+
+interface Ctx {
+  multi: boolean;
+  lines: string[];
+  depth: number;
+}
+/** Variables ("X=reboot") y alias ("alias ls=reboot") definidos antes en la misma línea. */
+type Vars = Map<string, string>;
+
+const LINE_BREAKS = /[\r\x1a\u2028\u2029]/;
+/** Espacios Unicode (NBSP, de ancho fijo…): \s de las regex ya los tomaba como separadores; se normalizan a " ". */
+const UNI_SPACE = /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/;
+const UNI_SPACE_G = new RegExp(UNI_SPACE.source, "g");
+const NESTED = /[`(){}]/;
+const TEMPLATE_VAR = /\{\{\s*[\w.-]+\s*\}\}/g;
+const QUOTED = /'[^']*'|"[^"]*"/g;
+const PS_LIKE = /^[([{$&.@]|^[A-Za-z]+-[A-Za-z]|^(%|\?|foreach|where|select|sort|measure|group|ft|fl|iex|icm)(\s|$)|\$_|@\{/i;
+
+function longestLine(s: string): number {
+  let max = 0;
+  for (let start = 0; ; ) {
+    const i = s.indexOf("\n", start);
+    const end = i < 0 ? s.length : i;
+    if (end - start > max) max = end - start;
+    if (i < 0) return max;
+    start = i + 1;
+  }
+}
+
+function evalRisk(cmd: string, depth: number): Risk {
+  if (depth > MAX_DEPTH) return "disruptive";
+  // Un "\r" suelto también separa comandos en el equipo, Ctrl-Z termina la línea (IOS) y U+2028/U+2029 son saltos
+  // de línea para quien muestra el texto: se evalúa cada tramo como una línea.
+  if (LINE_BREAKS.test(cmd)) cmd = cmd.replace(/\r\n?|\x1a|\u2028|\u2029/g, "\n");
+  if (cmd.length > MAX_LINE && longestLine(cmd) > MAX_LINE) return "disruptive";
   if (CONTROL_CHARS.test(cmd)) {
     // Esc, Ctrl-D o un carácter invisible: lo que se ejecuta depende del equipo.
     if (OPAQUE_CHARS.test(cmd)) return "disruptive";
     // Teclas de edición: vale lo que verá el equipo y también cada tramo por separado, por si
     // el equipo no las interpreta igual (BS como carácter, Ctrl-C que no borra).
-    return maxRisk(evalRisk(cmd.split("\n").map(editedLine).join("\n")), evalRisk(cmd.replace(EDIT_KEYS, "\n")));
+    return maxRisk(evalRisk(cmd.split("\n").map(editedLine).join("\n"), depth), evalRisk(cmd.replace(EDIT_KEYS, "\n"), depth));
   }
-  let risk: Risk = "read";
+  if (UNI_SPACE.test(cmd)) cmd = cmd.replace(UNI_SPACE_G, " ");
+  if (cmd.includes("\t")) {
+    // Tab completa en el equipo: "rel<Tab>" es reload y "re<Tab>load", si "re" es ambiguo, queda "reload". Vale la
+    // lectura con espacio y, si es más grave, la de la palabra unida.
+    const r = evalBody(cmd.replace(/\t/g, " "), depth);
+    return r !== "disruptive" && evalBody(cmd.replace(/\t/g, ""), depth) === "disruptive" ? "disruptive" : r;
+  }
+  return evalBody(cmd, depth);
+}
+
+function evalBody(cmd: string, depth: number): Risk {
   const lines = cmd
     .split("\n")
-    .map((l) => l.split("|")[0].trim())
+    .map((l) => l.trim())
     .filter(Boolean);
-  const multi = lines.length > 1;
+  if (!lines.length) return "read";
   // "config vdom / edit X" o "config global": solo cambia de contexto.
-  if (lines.every((l) => FORTI_CONTEXT.test(l)) && /^config (global|vdom)$/i.test(lines[0]) && lines.length <= 2) return "read";
-  // Una sustitución `...` o $(...) ejecuta un comando que no se analiza.
-  if (/`|\$\(/.test(cmd)) risk = "change";
-  if (multi && blockDisruptive(lines)) return "disruptive";
-  const parts = cmd.split("\n").flatMap(splitChain);
-  for (const raw of parts.map((l) => l.trim()).filter(Boolean)) {
-    // "sudo" no cambia la naturaleza del comando: se evalúa lo que ejecuta.
-    const segments = splitPipes(raw).map((x) => x.trim().replace(SUDO, "").replace(/^ip netns exec \S+\s+/i, ""));
-    const line = segments[0].includes(">") ? segments[0].replace(SAFE_REDIRECT, "") : segments[0];
-    const pipes = segments.slice(1);
-    const word = (/^\S+/.exec(line)?.[0] ?? "").toLowerCase();
-    // Tras un "|" de shell también corre un comando ("cat x | sudo reboot"). Tras show/display
-    // el "|" es un filtro y lo que sigue puede ser una expresión regular ("| include
-    // up|reload"): ahí no se evalúa como comando.
-    if (cuts(line) || ETHTOOL_SET.test(line) || (multi && DISRUPTIVE_IN_CONFIG.test(line))) return "disruptive";
-    if (STP_MODE.test(line) && !lines.some((l) => /^spanning-tree$/i.test(l))) return "disruptive";
-    if (pipes.length && word !== "show" && word !== "display" && word !== "get" && !abbrevRead(line) && pipes.some(cuts)) return "disruptive";
-    const remote = word === "ssh" || word === "telnet" || word === "stelnet" ? remoteCommand(line) : null;
-    if (remote) {
-      const r = evalRisk(remote);
-      if (r === "disruptive") return r;
-      risk = maxRisk(risk, r);
-    } else if (remote === null && (!isRead(line, word) || WRITE_FLAGS[word]?.test(line))) risk = maxRisk(risk, "change");
-    if (pipes.some((x) => PIPE_CHANGES.test(x) || (PS_BLOCK.test(x) && PS_BLOCK_CHANGES.test(x))) || (raw.includes(">") && REDIRECT_WRITE.test(raw))) risk = maxRisk(risk, "change");
-    if (raw.includes("(")) {
-      for (const [, name] of raw.matchAll(METHOD_CALL)) {
-        if (POWER_METHOD.test(name)) return "disruptive";
-        if (!READ_METHOD.test(name)) risk = maxRisk(risk, "change");
+  if (lines.length <= 2 && /^config (global|vdom)$/i.test(lines[0]) && lines.every((l) => FORTI_CONTEXT.test(l))) return "read";
+  const c: Ctx = { multi: lines.length > 1, lines, depth };
+  if (c.multi && blockDisruptive(lines)) return "disruptive";
+  let risk: Risk = "read";
+  for (const l of lines) {
+    risk = maxRisk(risk, lineRisk(l, c));
+    if (risk === "disruptive") break;
+  }
+  return risk;
+}
+
+/** Una línea: sin el prompt pegado delante, si lo hay. */
+function lineRisk(line: string, c: Ctx): Risk {
+  const m = /[#>$%\]]/.test(line) ? PROMPT.exec(line) : null;
+  // En un shell "ls> x" redirige: un nombre de equipo seguido de ">" lleva mayúscula, dígito, guion, "@" o ":".
+  if (m && !(m[3] === ">" && !m[2] && !/[A-Z0-9@:-]/.test(m[1]))) {
+    const r = chainRisk(line.slice(m[0].length), c);
+    // "reboot # x" o "halt> x" en un shell ejecutan la primera palabra.
+    if (m[1] && r !== "disruptive" && segRisk(m[1], c, false, new Map(), false) === "disruptive") return "disruptive";
+    return r;
+  }
+  return chainRisk(line, c);
+}
+
+/** Comandos encadenados (";", "&&", "||", "&"): vale el mayor. */
+function chainRisk(line: string, c: Ctx): Risk {
+  const vars: Vars = new Map();
+  let risk: Risk = "read";
+  const parts = /[;&|]/.test(line) ? splitChain(line) : [line];
+  if (parts.length > MAX_PARTS) return "disruptive";
+  for (const part of parts) {
+    const p = part.trim();
+    if (!p) continue;
+    risk = maxRisk(risk, pipelineRisk(p, c, vars, false));
+    if (risk === "disruptive") break;
+  }
+  return risk;
+}
+
+/** Cómo trata un show/display/get la palabra que sigue a "|". */
+function showFilter(seg: string): "regex" | "read" | "write" | null {
+  const sp = seg.search(/\s/);
+  const t = (sp < 0 ? seg : seg.slice(0, sp)).toLowerCase();
+  if (!/^[a-z][a-z-]*$/.test(t)) return null;
+  if (SHOW_REGEX_FILTERS.includes(t)) return "regex";
+  if (SHOW_READ_FILTERS.includes(t)) return "read";
+  if (SHOW_WRITE_FILTERS.some((w) => w.startsWith(t))) {
+    if (t !== "s") return "write";
+    const arg = sp < 0 ? "" : seg.slice(sp).trim();
+    return /^\S*[/:.]\S*$/.test(arg) ? "write" : "regex";
+  }
+  if (SHOW_REGEX_FILTERS.some((w) => w.startsWith(t))) return "regex";
+  if (SHOW_READ_FILTERS.some((w) => w.startsWith(t))) return "read";
+  return null;
+}
+
+/**
+ * Tubería: cada tramo se evalúa como comando completo y vale el mayor. Tras un show/display/get de equipo de red el
+ * "|" es un filtro (lista de arriba); fuera de ellos, lo que sigue a "|" solo es consulta si es un filtro conocido
+ * (PIPE_READ_WORDS, awk sin system(), sed sin -i ni "e"…): lo desconocido es al menos cambio.
+ */
+function pipelineRisk(part: string, c: Ctx, vars: Vars, expr: boolean): Risk {
+  const segs = part.includes("|") ? splitPipes(part) : [part];
+  if (segs.length > MAX_PARTS) return "disruptive";
+  const head = { word: "", cmd: "" };
+  let risk = segRisk(segs[0], c, false, vars, expr, head);
+  if (segs.length === 1 || risk === "disruptive") return risk;
+  const show = SHOW_HEADS.has(head.word) || abbrevRead(head.cmd);
+  let regexTail = false;
+  for (let i = 1; i < segs.length; i++) {
+    const s = segs[i].trim();
+    if (show) {
+      const f = showFilter(s);
+      if (regexTail) {
+        // "| include a|b": el resto es la expresión; solo cuenta un filtro que escribe o un intérprete.
+        if (f === "write" || SHELLS.has(s.split(/\s/, 1)[0].toLowerCase())) risk = maxRisk(risk, "change");
+        continue;
       }
+      if (f === "write") {
+        risk = maxRisk(risk, "change");
+        continue;
+      }
+      if (f === "regex") regexTail = true;
+      if (f) continue;
+    }
+    risk = maxRisk(risk, segRisk(s, c, true, vars, false));
+    if (risk === "disruptive") break;
+  }
+  return risk;
+}
+
+interface Group {
+  kind: "$(" | "<(" | ">(" | "(" | "{" | "@{" | "`";
+  text: string;
+  start: number;
+}
+
+/** Cierre del grupo que abre s[i], con anidamiento y comillas. Sin cierre: el final del texto. */
+function matchClose(s: string, i: number, open: string, close: string): number {
+  let depth = 0;
+  let q = "";
+  for (let j = i; j < s.length; j++) {
+    const ch = s[j];
+    if (q) {
+      if (ch === q) q = "";
+      else if (ch === "\\" && q === '"') j++;
+      continue;
+    }
+    if (ch === "\\") j++;
+    else if (ch === "'" || ch === '"') q = ch;
+    else if (ch === open) depth++;
+    else if (ch === close && --depth === 0) return j;
+  }
+  return s.length;
+}
+
+/** Grupos de primer nivel de un tramo: sustituciones, subshells, bloques y hashtables. Una sola pasada. */
+function scanGroups(s: string): Group[] {
+  const out: Group[] = [];
+  let q = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (q === "'") {
+      if (ch === "'") q = "";
+      continue;
+    }
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    if (ch === "`") {
+      const e = s.indexOf("`", i + 1);
+      const end = e < 0 ? s.length : e;
+      out.push({ kind: "`", text: s.slice(i + 1, end), start: i });
+      i = end;
+      continue;
+    }
+    const prev = s[i - 1];
+    if (ch === "(" && (q !== '"' || prev === "$")) {
+      const kind = prev === "$" ? "$(" : prev === "<" ? "<(" : prev === ">" ? ">(" : "(";
+      const end = matchClose(s, i, "(", ")");
+      out.push({ kind, text: s.slice(i + 1, end), start: kind === "(" ? i : i - 1 });
+      i = end;
+      continue;
+    }
+    if (q === '"') {
+      if (ch === '"') q = "";
+      continue;
+    }
+    if (ch === "'" || ch === '"') q = ch;
+    else if (ch === "{") {
+      const end = matchClose(s, i, "{", "}");
+      // "${VAR}" es una variable, no un bloque.
+      if (prev !== "$") out.push({ kind: prev === "@" ? "@{" : "{", text: s.slice(i + 1, end), start: prev === "@" ? i - 1 : i });
+      i = end;
+    }
+  }
+  return out;
+}
+
+/**
+ * Contenido de los grupos: $(…), `…`, <(…) y >(…) ejecutan un comando (al menos cambio, como antes); en PowerShell
+ * cada (…) y {…} es una subexpresión o un bloque que puede correr ("Get-Date (Restart-Computer)", "Measure-Command
+ * { … }", "Sort-Object { … }", "@{e={…}}"); en un shell, (…) o {…} al comienzo es un subshell o un grupo.
+ */
+function groupsRisk(seg: string, c: Ctx, ps: boolean): Risk {
+  if (c.depth + 1 > MAX_DEPTH) return "disruptive";
+  let risk: Risk = "read";
+  for (const g of scanGroups(seg)) {
+    let r: Risk;
+    if (g.kind === "$(" || g.kind === "`" || g.kind === "<(" || g.kind === ">(") r = maxRisk("change", evalRisk(g.text, c.depth + 1));
+    else if (g.kind === "@{") r = groupsRisk(g.text, { ...c, depth: c.depth + 1 }, true);
+    else if (ps) r = blockRisk(g.text, c);
+    else if (g.start === 0) r = evalRisk(g.text, c.depth + 1);
+    else continue;
+    risk = maxRisk(risk, r);
+    if (risk === "disruptive") break;
+  }
+  return risk;
+}
+
+/**
+ * Bloque o subexpresión de PowerShell: cada sentencia que empieza con un nombre es un comando (se evalúa entero);
+ * las que empiezan con "$", un literal o una palabra clave (process, if, foreach…) son expresiones: valen sus grupos
+ * y métodos. "& $x" o "& 'archivo'" ejecutan algo que no se ve: cambio.
+ */
+function blockRisk(text: string, c: Ctx): Risk {
+  const depth = c.depth + 1;
+  if (depth > MAX_DEPTH) return "disruptive";
+  const cc: Ctx = { multi: false, lines: c.lines, depth };
+  let risk: Risk = /(^|[;{(\s|])&\s*[$'"(]/.test(text) ? "change" : "read";
+  const vars: Vars = new Map();
+  for (const line of text.split("\n")) {
+    for (const part of splitChain(line)) {
+      const s = part.trim();
+      if (!s) continue;
+      const w = /^[A-Za-z][\w-]*/.exec(s)?.[0].toLowerCase();
+      risk = maxRisk(risk, pipelineRisk(s, cc, vars, !w || PS_KEYWORDS.has(w)));
+      if (risk === "disruptive") return risk;
     }
   }
   return risk;
+}
+
+interface Tok {
+  val: string;
+  start: number;
+  end: number;
+  quoted: boolean;
+}
+const isSpace = (ch: string) => ch <= " ";
+
+/**
+ * Palabra que empieza en i (o después de los espacios), sin comillas ni escapes como la ve un shell: "re\boot" y
+ * 're''boot' son reboot. Una ruta de Windows ("C:\…", "\\servidor\…") se toma tal cual.
+ */
+function tokenAt(s: string, i: number): Tok | null {
+  while (i < s.length && isSpace(s[i])) i++;
+  if (i >= s.length) return null;
+  const start = i;
+  if (/^([A-Za-z]:\\|\\\\)/.test(s.slice(i, i + 3))) {
+    while (i < s.length && !isSpace(s[i])) i++;
+    return { val: s.slice(start, i), start, end: i, quoted: false };
+  }
+  let val = "";
+  let q = "";
+  let quoted = false;
+  for (; i < s.length; i++) {
+    const ch = s[i];
+    if (q) {
+      if (ch === q) q = "";
+      else if (ch === "\\" && q === '"' && /[$`"\\]/.test(s[i + 1] ?? "")) val += s[++i];
+      else val += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      q = ch;
+      quoted = true;
+    } else if (ch === "\\" && i + 1 < s.length) val += s[++i];
+    else if (isSpace(ch)) break;
+    else val += ch;
+  }
+  return { val, start, end: i, quoted };
+}
+
+/** Salta las opciones ("-x", "--opción", y el argumento de las de `withArg`) y devuelve desde el comando. "--" las termina. */
+function skipOpts(s: string, withArg: RegExp | null): string {
+  let i = 0;
+  for (;;) {
+    const t = tokenAt(s, i);
+    if (!t) return "";
+    if (t.val === "--") return s.slice(t.end).trimStart();
+    if (t.quoted || t.val.length < 2 || t.val[0] !== "-") return s.slice(t.start);
+    i = t.end;
+    if (withArg?.test(t.val)) {
+      const a = tokenAt(s, i);
+      i = a ? a.end : s.length;
+    }
+  }
+}
+
+/** Nombre del programa sin su ruta ("/sbin/reboot", "C:\…\shutdown.exe") ni la extensión .exe/.com. */
+function basename(v: string): string {
+  const i = Math.max(v.lastIndexOf("/"), v.lastIndexOf("\\"));
+  const b = i >= 0 && i < v.length - 1 ? v.slice(i + 1) : v;
+  return /\.(exe|com)$/i.test(b) ? b.slice(0, -4) : b;
+}
+
+/** Quita las comillas que envuelven todo el texto ("cmd /c "shutdown /r""). */
+const unwrap = (s: string) => {
+  const t = s.trim();
+  return t.length > 1 && (t[0] === '"' || t[0] === "'") && t[t.length - 1] === t[0] ? t.slice(1, -1) : t;
+};
+
+interface Norm {
+  cmd: string;
+  word: string;
+  risk: Risk;
+  done: boolean;
+}
+
+const SUDO_ARG = /^(-[ugCDpRrTUhc]|--(user|group|chdir|host|prompt|role|type|close-from|other-user|command-timeout))$/;
+const PS_ARG = /^(executionpolicy|ex|ep|windowstyle|w|win\w*|configurationname|config\w*|workingdirectory|wd|version|v|inputformat|in\w*|outputformat|o\w*|psconsolefile|custompipename|settingsfile)$/;
+
+/**
+ * Lo que de verdad se ejecuta en un tramo: quita prefijos que solo cambian cómo corre el comando (sudo, doas, env
+ * VAR=x, nohup, time, timeout, watch, nice, xargs, exec, do/run de los equipos, palabras clave del shell…), la ruta
+ * y las comillas del nombre, y resuelve variables y alias de la misma línea. Los intérpretes con un comando en un
+ * argumento (sh -c, cmd /c, powershell -Command, clish -c, su -c, eval, iex, vi -c ':!…') se evalúan por ese
+ * argumento; -EncodedCommand oculta el comando: "puede cortar servicio".
+ */
+function normalize(seg: string, c: Ctx, vars: Vars): Norm {
+  let s = seg;
+  let risk: Risk = "read";
+  const nested = (text: string) => evalRisk(text, c.depth + 1);
+  const done = (r: Risk): Norm => ({ cmd: s, word: "", risk: maxRisk(risk, r), done: true });
+  for (let k = 0; k < MAX_WRAPPERS; k++) {
+    const t = tokenAt(s, 0);
+    if (!t) return done("read");
+    const rest = s.slice(t.end).trimStart();
+    const v = t.val;
+    // Variables y alias definidos antes en la misma línea.
+    const vm = /^\$\{?([A-Za-z_]\w*)\}?$/.exec(v);
+    if (vm && vars.has(vm[1])) {
+      s = `${vars.get(vm[1])} ${rest}`;
+      continue;
+    }
+    if (!t.quoted && vars.has(`alias:${v}`)) {
+      s = `${vars.get(`alias:${v}`)} ${rest}`;
+      continue;
+    }
+    // PowerShell: "$x = <comando>" ejecuta el comando.
+    if (/^\$[\w:]+$/.test(v) && /^=(?!=)/.test(rest)) {
+      s = rest.slice(1);
+      continue;
+    }
+    // Shell: VAR=valor antes del comando; sola, define la variable.
+    if (/^[A-Za-z_]\w*=/.test(s.slice(t.start))) {
+      const eq = v.indexOf("=");
+      if (!rest) {
+        vars.set(v.slice(0, eq), v.slice(eq + 1));
+        return done("change");
+      }
+      s = rest;
+      continue;
+    }
+    const base = basename(v);
+    const w = base.toLowerCase();
+    if (w === "alias") {
+      const a = tokenAt(rest, 0);
+      const eq = a ? a.val.indexOf("=") : -1;
+      if (a && eq > 0) vars.set(`alias:${a.val.slice(0, eq)}`, a.val.slice(eq + 1));
+      return done("change");
+    }
+    if (PLAIN_WRAPPERS.has(w) && !t.quoted) {
+      s = rest;
+      continue;
+    }
+    switch (w) {
+      case "sudo":
+      case "doas":
+      case "runuser":
+        s = skipOpts(rest, SUDO_ARG);
+        // Sin comando abre un shell (sudo -s, sudo -i).
+        if (!s) return done("change");
+        continue;
+      case "env":
+        if (/(^|\s)(-S|--split-string)/.test(rest)) risk = maxRisk(risk, "change");
+        s = skipOpts(rest, /^(-[uCS]|--(unset|chdir|split-string))$/);
+        continue;
+      case "nice":
+        s = skipOpts(rest, /^(-n|--adjustment)$/);
+        continue;
+      case "ionice":
+        s = skipOpts(rest, /^(-[cnpPu]|--(class|classdata|pid|pgid|uid))$/);
+        if (!s) return done("change");
+        continue;
+      case "stdbuf":
+        s = skipOpts(rest, /^-[ioe]$/);
+        continue;
+      case "timeout":
+      case "chrt":
+      case "taskset": {
+        // Tras las opciones va la duración, la prioridad o la máscara de CPU.
+        const r = skipOpts(rest, w === "timeout" ? /^(-[sk]|--(signal|kill-after))$/ : null);
+        const d = tokenAt(r, 0);
+        s = d ? r.slice(d.end).trimStart() : "";
+        if (!s) return done("change");
+        continue;
+      }
+      case "watch":
+        s = skipOpts(rest, /^(-n|--interval|-q|--equexit)$/);
+        continue;
+      case "xargs":
+        risk = maxRisk(risk, "change");
+        s = skipOpts(rest, /^(-[aEdIiLlnPs]|--(arg-file|eof|delimiter|max-lines|max-args|max-procs|max-chars|process-slot-var))$/);
+        if (!s) return done("change");
+        continue;
+      case "exec":
+        // Reemplaza el shell: la sesión termina con el comando.
+        risk = maxRisk(risk, "change");
+        s = skipOpts(rest, /^-a$/);
+        if (!s) return done("change");
+        continue;
+      case "command":
+      case "builtin":
+        if (/^-[a-zA-Z]*[vV](\s|$)/.test(rest)) return done("read");
+        s = skipOpts(rest, null);
+        continue;
+      case "run": {
+        // Junos "run <comando>" desde configuración; NX-OS "run bash <comando>".
+        const b = tokenAt(rest, 0);
+        s = b && b.val === "bash" ? rest.slice(b.end).trimStart() : rest;
+        if (!s) return done("change");
+        continue;
+      }
+      case "ip":
+        if (/^(netns|vrf)\s+exec\s+\S+\s+/i.test(rest)) {
+          s = rest.replace(/^(netns|vrf)\s+exec\s+\S+\s+/i, "");
+          continue;
+        }
+        break;
+      case "eval":
+      case "iex":
+      case "invoke-expression": {
+        // El texto se ejecuta como comando: lo que diga ese texto, y al menos cambio (puede venir de una variable).
+        const words: string[] = [];
+        for (let x = tokenAt(rest, 0); x; x = tokenAt(rest, x.end)) words.push(x.val);
+        return done(maxRisk("change", words.length ? nested(words.join(" ")) : "change"));
+      }
+      case "cmd": {
+        for (let x = tokenAt(rest, 0); x; x = tokenAt(rest, x.end)) {
+          if (/^\/[ckr]$/i.test(x.val)) return done(nested(unwrap(rest.slice(x.end))));
+          if (!x.val.startsWith("/")) break;
+        }
+        return done("change");
+      }
+      case "powershell":
+      case "pwsh":
+      case "powershell_ise": {
+        for (let x = tokenAt(rest, 0); x; x = tokenAt(rest, x.end)) {
+          const o = x.val.toLowerCase();
+          if (o[0] !== "-" && o[0] !== "/") return done(nested(unwrap(rest.slice(x.start))));
+          const name = o.slice(1);
+          if (!name) continue;
+          // -EncodedCommand (y sus prefijos -e, -en, -enc…, -ec): el comando va en base64, no se ve.
+          if ("encodedcommand".startsWith(name) || name === "ec") return done("disruptive");
+          if ("command".startsWith(name)) return done(nested(unwrap(rest.slice(x.end))));
+          if ("file".startsWith(name)) return done("change");
+          if (PS_ARG.test(name)) x = tokenAt(rest, x.end) ?? x;
+        }
+        return done("change");
+      }
+      case "clish":
+      case "vtysh": {
+        let r: Risk | null = null;
+        for (let x = tokenAt(rest, 0); x; x = tokenAt(rest, x.end)) {
+          if (x.val === "-c" || x.val === "--command") {
+            const a = tokenAt(rest, x.end);
+            if (!a) break;
+            r = maxRisk(r ?? "read", nested(a.val));
+            x = a;
+          } else if (/^-[fd]$|^--(inputfile|daemon)$/.test(x.val)) r = maxRisk(r ?? "read", "change");
+        }
+        return done(r ?? "change");
+      }
+      case "su": {
+        for (let x = tokenAt(rest, 0); x; x = tokenAt(rest, x.end)) {
+          if (x.val === "-c" || x.val === "--command") {
+            const a = tokenAt(rest, x.end);
+            return done(a ? nested(a.val) : "change");
+          }
+          if (x.val.startsWith("--command=")) return done(nested(x.val.slice(10)));
+        }
+        return done("change");
+      }
+      case "source":
+      case ".":
+        // ". { … }" de PowerShell: el bloque ya se evaluó (groupsRisk). Un archivo: no se ve qué ejecuta.
+        return done(rest.startsWith("{") ? "read" : "change");
+      case "vi":
+      case "vim":
+      case "nvim":
+      case "view":
+      case "ex":
+      case "gvim": {
+        let r: Risk = "change";
+        for (let x = tokenAt(rest, 0); x; x = tokenAt(rest, x.end)) {
+          let arg: string | null = null;
+          if (x.val === "-c" || x.val === "--cmd") {
+            const a = tokenAt(rest, x.end);
+            if (a) {
+              arg = a.val;
+              x = a;
+            }
+          } else if (x.val.startsWith("+")) arg = x.val.slice(1);
+          const bang = arg && /^:?\s*!(.*)$/s.exec(arg);
+          if (bang) r = maxRisk(r, nested(bang[1]));
+        }
+        return done(r);
+      }
+    }
+    if (SHELLS.has(w) && !(w === "sh" && abbrevRead(`sh ${rest}`))) {
+      for (let x = tokenAt(rest, 0); x; x = tokenAt(rest, x.end)) {
+        if (!/^[-+]./.test(x.val) || x.quoted) break;
+        if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.val)) {
+          const a = tokenAt(rest, x.end);
+          return done(a ? nested(a.val) : "change");
+        }
+        if (/^([-+][oO]|--rcfile|--init-file)$/.test(x.val)) x = tokenAt(rest, x.end) ?? x;
+      }
+      // Un script o la entrada estándar: no se ve qué ejecuta.
+      return done("change");
+    }
+    if (INTERPRETERS.test(w)) return done("change");
+    return { cmd: rest ? `${base} ${rest}` : base, word: w, risk, done: false };
+  }
+  return done("disruptive");
+}
+
+/** Abreviaturas de NET_ABBR: alguna expansión de la línea corta servicio. */
+function abbrevCuts(cmd: string, c: Ctx): boolean {
+  const sp = cmd.search(/\s/);
+  const first = (sp < 0 ? cmd : cmd.slice(0, sp)).toLowerCase();
+  if (!NET_ABBR.some(([w, min]) => first.length >= min && w.startsWith(first))) return false;
+  const toks: string[] = [];
+  const re = /\s*(\S+)/y;
+  let end = 0;
+  for (let k = 0; k < 7; k++) {
+    re.lastIndex = end;
+    const m = re.exec(cmd);
+    if (!m) break;
+    toks.push(m[1]);
+    end = re.lastIndex;
+  }
+  const tail = cmd.slice(end);
+  const out: string[] = [];
+  const walk = (level: readonly Abbr[], i: number, acc: string[]): void => {
+    const t = toks[i]?.toLowerCase();
+    let hit = false;
+    if (t)
+      for (const [w, min, next] of level) {
+        if (t.length < min || !w.startsWith(t)) continue;
+        hit = true;
+        if (next && i + 1 < toks.length) walk(next, i + 1, [...acc, w]);
+        else out.push([...acc, w, ...toks.slice(i + 1)].join(" ") + tail);
+      }
+    if (!hit && i > 0) out.push([...acc, ...toks.slice(i)].join(" ") + tail);
+  };
+  walk(NET_ABBR, 0, []);
+  const lower = cmd.toLowerCase();
+  return out.some((e) => e.toLowerCase() !== lower && (cuts(e) || (c.multi && DISRUPTIVE_IN_CONFIG.test(e))));
+}
+
+/**
+ * Un tramo de tubería: rutas especiales, grupos anidados, redirecciones, métodos, abreviaturas y, tras quitar los
+ * prefijos (normalize), el comando. `out` recibe el comando normalizado (para saber si es un show). `expr`: una
+ * sentencia de un bloque de PowerShell que no empieza con un comando (solo valen sus grupos y métodos).
+ */
+function segRisk(seg0: string, c: Ctx, afterPipe: boolean, vars: Vars, expr: boolean, out?: { word: string; cmd: string }): Risk {
+  const seg = seg0.trim();
+  if (!seg) return "read";
+  if (c.depth > MAX_DEPTH) return "disruptive";
+  if ((seg.includes("/dev/") || seg.includes("/proc/")) && (SPECIAL_PATH.test(seg) || BLOCK_WRITE.test(seg))) return "disruptive";
+  let risk: Risk = "read";
+  // Las variables de plantilla del catálogo ("{{interfaz}}") no son bloques de código.
+  const g = seg.includes("{{") ? seg.replace(TEMPLATE_VAR, "X") : seg;
+  if (NESTED.test(g)) {
+    risk = groupsRisk(g, c, expr || PS_LIKE.test(g));
+    if (risk === "disruptive") return risk;
+  }
+  // Un ">" entre comillas es texto ("awk '$3 > 100'", "grep '->'"), no una redirección.
+  if (seg.includes(">") && REDIRECT_WRITE.test(seg.replace(QUOTED, "''"))) risk = maxRisk(risk, "change");
+  if (g.includes("(")) {
+    for (const [, name] of g.matchAll(METHOD_CALL)) {
+      if (POWER_METHOD.test(name)) return "disruptive";
+      if (!READ_METHOD.test(name)) risk = maxRisk(risk, "change");
+    }
+  }
+  const n = normalize(seg, c, vars);
+  risk = maxRisk(risk, n.risk);
+  if (risk === "disruptive") return risk;
+  // Abreviaturas también sobre el texto tal cual: "exec factoryreset" (FortiOS) empieza con un prefijo de shell.
+  if (n.cmd !== seg && abbrevCuts(seg, c)) return "disruptive";
+  if (n.done) return risk;
+  if (out) {
+    out.word = n.word;
+    out.cmd = n.cmd;
+  }
+  if (expr && (!/^[A-Za-z]/.test(n.cmd) || PS_KEYWORDS.has(n.word))) return risk;
+  return maxRisk(risk, simpleRisk(n.cmd, n.word, c, afterPipe));
+}
+
+/** kill y similares: terminar procesos corta servicio; HUP, USR1/2, CONT o WINCH solo piden recargar o continuar. */
+function killRisk(cmd: string): Risk {
+  const toks = cmd.split(/\s+/, 8);
+  for (let i = 1; i < toks.length; i++) {
+    const t = toks[i];
+    if (!t.startsWith("-") || t === "--") break;
+    if (/^-(l|L)$|^--(list|table)$/.test(t)) return "change";
+    const sig = t === "-s" || t === "-n" || t === "--signal" ? (toks[i + 1] ?? "") : t.startsWith("--signal=") ? t.slice(9) : t.slice(1);
+    return /^(SIG)?(HUP|USR1|USR2|CONT|WINCH)$|^(0|1|10|12|18|28)$/i.test(sig) ? "change" : "disruptive";
+  }
+  return "disruptive";
+}
+
+/** find: consulta sin -exec/-ok/-delete/-fprint; lo de -exec se evalúa con "{}" reemplazado por la ruta inicial. */
+function findRisk(cmd: string, c: Ctx): Risk {
+  if (!/\s-(exec|execdir|ok|okdir|delete|fprint\w*|fls)\b/.test(cmd)) return "read";
+  let risk: Risk = "change";
+  const root = /^\S+\s+(?!-)(\S+)/.exec(cmd)?.[1] ?? ".";
+  for (const m of cmd.matchAll(/\s-(?:exec|execdir|ok|okdir)\s+(.*?)(?:\s\\?;|\s\+|$)/g)) {
+    risk = maxRisk(risk, evalRisk(m[1].replace(/\{\}/g, root), c.depth + 1));
+    if (risk === "disruptive") break;
+  }
+  return risk;
+}
+
+/** awk: system("…") ejecuta ese texto; print > archivo, "cmd" | getline, print | "cmd" e -i inplace cambian. */
+function awkRisk(cmd: string, c: Ctx): Risk {
+  let risk: Risk = "read";
+  if (/\bsystem\s*\(/.test(cmd)) {
+    risk = "change";
+    for (const m of cmd.matchAll(/\bsystem\s*\(\s*"((?:[^"\\]|\\.)*)"/g)) risk = maxRisk(risk, evalRisk(m[1].replace(/\\(.)/g, "$1"), c.depth + 1));
+  }
+  if (/\|\s*"|"\s*\||\bprintf?\b[^;}]*>|\s-i\s*inplace|--inplace/.test(cmd)) risk = maxRisk(risk, "change");
+  return risk;
+}
+
+/** sed: -i escribe el archivo; el comando "e" de GNU sed ejecuta su argumento; "w" y el flag /w o /e escriben o ejecutan. */
+function sedRisk(cmd: string, c: Ctx): Risk {
+  if (/\s(-[a-zA-Z]*i|--in-place)/.test(cmd)) return "change";
+  let risk: Risk = "read";
+  const e = /(?:^|[\s'";{}\d$])e\s+([^'";}]+)/.exec(cmd.slice(3));
+  if (e) risk = maxRisk("change", evalRisk(e[1], c.depth + 1));
+  if (/(?:^|[\s'";{}\d$/])[wW]\s+\S|\/[gIimMp\d]*[ew][gIimMp\d]*(?=['";}\s]|$)/.test(cmd.slice(3))) risk = maxRisk(risk, "change");
+  return risk;
+}
+
+/** ForEach-Object con -MemberName (o "% Nombre"): llama ese método en cada objeto. */
+function memberRisk(cmd: string): Risk {
+  const m = /^\S+\s+(?:-(?:MemberName|Mem\w*|M)\s+)?['"]?([A-Za-z_]\w*)/i.exec(cmd);
+  if (!m) return "read";
+  if (POWER_METHOD.test(m[1]) || /^Stop$/i.test(m[1])) return "disruptive";
+  return READ_METHOD.test(m[1]) ? "read" : "change";
+}
+
+/** Un comando ya normalizado: corta servicio, es una consulta conocida o, si no, cambio. */
+function simpleRisk(cmd: string, word: string, c: Ctx, afterPipe: boolean): Risk {
+  if (cuts(cmd) || (c.multi && DISRUPTIVE_IN_CONFIG.test(cmd))) return "disruptive";
+  if (STP_MODE.test(cmd) && !c.lines.some((l) => /^spanning-tree$/i.test(l))) return "disruptive";
+  if (abbrevCuts(cmd, c)) return "disruptive";
+  switch (word) {
+    case "kill":
+    case "killall":
+    case "pkill":
+    case "killall5":
+    case "skill":
+      return killRisk(cmd);
+    case "ssh":
+    case "telnet":
+    case "stelnet": {
+      const remote = remoteCommand(cmd);
+      // Tras un "|" el cliente lee comandos de la entrada: los ejecuta el otro equipo.
+      if (remote === "") return afterPipe ? "change" : "read";
+      if (remote !== null) return evalRisk(remote, c.depth + 1);
+      break;
+    }
+    case "find":
+      return findRisk(cmd, c);
+    case "awk":
+    case "gawk":
+    case "mawk":
+    case "nawk":
+      return awkRisk(cmd, c);
+    case "sed":
+      return sedRisk(cmd, c);
+    case "%":
+    case "foreach-object":
+    case "foreach":
+      return memberRisk(cmd);
+  }
+  const line = cmd.includes(">") ? cmd.replace(SAFE_REDIRECT, "") : cmd;
+  if (isRead(line, word) && !WRITE_FLAGS[word]?.test(line) && !EXTRA_CHANGE.test(line) && !(word === "date" && DATE_SET.test(line))) return "read";
+  const check = PIPE_READ_CHECK.get(word);
+  if (check ? check(line) : PIPE_READ_WORDS.has(word)) return "read";
+  return "change";
 }
 
 // ---------- Validación ----------

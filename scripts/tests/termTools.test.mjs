@@ -47,9 +47,46 @@ assert.equal(ask("show clock\nshow version\n", { remote: true, confirmSend: fals
 // Texto con salto final pero una sola línea vacía o espacios: nada que preguntar.
 assert.equal(ask("\n").ask, false);
 assert.equal(ask("   \n\n").ask, false);
-// Terminal local: nunca.
-assert.equal(ask("reload\n", { remote: false, confirmSend: true }).ask, false);
+// Terminal local y pantalla completa (remote: false): el riesgo no se evalúa, los caracteres de control sí.
+const LOCAL = { remote: false, confirmSend: true };
+assert.equal(ask("reload\n", LOCAL).ask, false);
+assert.equal(ask("show clock\nreload\n", LOCAL).ask, false);
 assert.equal(ask("").ask, false);
+for (const t of ["ls\x7f\x7frm -rf ~\n", "echo hi\x15touch /tmp/pwn\n", "a\x04", "x\u202ey\n", "a\u2028b"]) {
+  const d = ask(t, LOCAL);
+  assert.ok(d.ask && d.danger, `local con caracteres de control: ${JSON.stringify(t)}`);
+}
+
+// Portapapeles: sin ESC ni C1, así ningún marcador de pegado entre corchetes sobrevive, tampoco anidado.
+assert.equal(P.sanitizePaste("echo hi\x1b[20\x1b[201~1~; touch /tmp/pwn\n"), "echo hi[201~; touch /tmp/pwn\n");
+assert.ok(!P.sanitizePaste("a\x1b[201~b\x1b[200~c\x9b201~d\x1b\x1b[201~[201~e").includes("\x1b"));
+assert.equal(P.sanitizePaste("show\x85 run\x9b"), "show run");
+assert.equal(P.sanitizePaste("ñandú 🙂\tshow\n"), "ñandú 🙂\tshow\n", "texto normal intacto");
+{
+  // Pastejacking anidado: tras limpiar no queda nada que fuerce ni corte, y no hay ESC que cierre el pegado.
+  const t = P.sanitizePaste("echo hi\x1b[20\x1b[201~1~; touch /tmp/pwn\n");
+  assert.ok(!/\x1b/.test(t));
+}
+// Un texto enorme se limpia en tiempo lineal.
+fastEnough("sanitizePaste de 1 MB con marcadores anidados", 200, () => P.sanitizePaste("\x1b[20".repeat(70000) + "\x1b[201~" + "1~".repeat(70000)));
+
+// Tab y abreviaturas no bajan el riesgo: "rel<Tab>" es reload, "re<Tab>load" también.
+for (const t of ["rel\t\n", "wr\t er\t\n", "re\tload\n", "relo\n", "del flash:\t\n", "clea ip bg *\n"]) {
+  assert.equal(P.analyzePaste(t).risk, "disruptive", JSON.stringify(t));
+  assert.ok(ask(t, { remote: true, confirmSend: false }).ask, `se confirma aunque 'Confirmar envío' esté apagado: ${JSON.stringify(t)}`);
+}
+assert.equal(P.analyzePaste("sh\t ru\t\n").risk, "read");
+
+// U+2028/U+2029: saltos de línea para el riesgo y para "varias líneas", y etiqueta en la vista previa.
+{
+  const a = P.analyzePaste("show version\u2028reload\n");
+  assert.equal(a.risk, "disruptive");
+  assert.ok(a.forced);
+  assert.ok(a.flags.some((f) => f.kind === "lsep"));
+  assert.ok(a.lines[0].parts.some((p) => p.ctrl === "LS (U+2028)" && p.forces));
+  assert.ok(a.lines[0].shown.includes("⟨U+2028⟩"));
+  assert.ok(ask("show clock\u2029show version").ask, "dos líneas aunque no haya LF");
+}
 
 // Tab y "?" no fuerzan por sí solos; Esc y Ctrl-D sí.
 assert.equal(ask("show ver\t").ask, false, "Tab (autocompletar): sin confirmar");
