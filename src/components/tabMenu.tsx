@@ -1,4 +1,4 @@
-import { ArrowDownToLine, ArrowRightToLine, Bookmark, BookmarkPlus, ChevronDown, ChevronUp, ClipboardCopy, Columns2, Copy, CopyX, Eraser, Highlighter, History, LayoutGrid, ListX, Lock, LockOpen, MousePointerClick, PanelLeftDashed, PanelTop, Pencil, Plus, RefreshCcw, RotateCcw, Rows2, Save, Search, Square, SquareTerminal, Undo2, Unplug, X, Zap } from "lucide-react";
+import { ArrowDownToLine, Bot, BotOff, ArrowRightToLine, Bookmark, BookmarkPlus, ChevronDown, ChevronUp, ClipboardCopy, Columns2, Copy, CopyX, Eraser, Highlighter, History, LayoutGrid, ListX, Lock, LockOpen, MousePointerClick, PanelLeftDashed, PanelTop, Pencil, Plus, RefreshCcw, RotateCcw, Rows2, Save, Search, Square, SquareTerminal, Undo2, Unplug, X, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import { SplitLayout, layoutLabel } from "../lib/split";
 import type { TabLayout } from "../lib/settings";
@@ -29,6 +29,10 @@ export interface TabMenuHandlers {
   onJumpMark?: (id: string, dir: "prev" | "next") => void;
   onMarks?: (id: string) => void;
   onToggleReadOnly?: (id: string) => void;
+  /** "Sesiones visibles para agentes: solo las marcadas": marca o desmarca la sesión guardada de la pestaña. */
+  onToggleAgent?: (id: string) => void;
+  /** Ids de sesiones marcadas como visibles para agentes. */
+  agentMarked?: string[];
   /** Cierra varias pestañas (con un solo aviso): todas, las demás o las que siguen a `id`. */
   onCloseMany?: (scope: CloseScope, id: string) => void;
   /** Pestañas abiertas, para saber si hay otras o alguna después de esta. */
@@ -104,6 +108,13 @@ function annotateItems(t: Tab, p: TabMenuHandlers): MenuItem[] {
       t.readOnly
         ? ["Desactivar solo lectura", <LockOpen size={13} />, () => p.onToggleReadOnly!(t.id)]
         : ["Solo lectura (modo monitoreo)", <Lock size={13} />, () => p.onToggleReadOnly!(t.id)],
+    );
+  // Solo sesiones guardadas (la marca se guarda por id); "local" es la terminal local.
+  if (p.onToggleAgent && t.session.id && !t.session.scp)
+    out.push(
+      p.agentMarked?.includes(t.session.id)
+        ? ["Ocultar a los agentes IA", <BotOff size={13} />, () => p.onToggleAgent!(t.id)]
+        : ["Visible para agentes IA", <Bot size={13} />, () => p.onToggleAgent!(t.id)],
     );
   return out;
 }

@@ -1,0 +1,114 @@
+/**
+ * Ventana de consultas de un agente de IA (MCP): durante unos minutos, los comandos de UN agente en
+ * UNA conexión que el motor de riesgo clasifica como consulta (`read`) se envían sin diálogo.
+ *
+ * La decisión se toma solo aquí, en la interfaz, que es quien calcula el riesgo (computeRisk); Rust
+ * nunca aprueba por su cuenta y vuelve a exigir una línea, sin control y dentro del tope. Todo lo demás
+ * (cambios, cortes, varias líneas, caracteres de control, comandos largos, abrir sesiones) pide
+ * aprobación siempre. La ventana se revoca sola al vencer, al desconectar la sesión, al poner la
+ * pestaña en solo lectura y al apagar el servidor.
+ *
+ * Lógica pura, sin React: la prueban scripts/tests/mcpWindow.test.mjs.
+ */
+import type { Risk } from "./packs";
+
+/** Duraciones que ofrece la interfaz (minutos). */
+export const WINDOW_MINUTES = [5, 15, 60] as const;
+export type WindowMinutes = (typeof WINDOW_MINUTES)[number];
+
+/** Largo máximo de un comando que la ventana puede aprobar (el mismo AUTO_MAX_CHARS de mcp.rs). */
+export const AUTO_MAX_CHARS = 200;
+
+/** Herramientas que la ventana puede aprobar: solo las que escriben un comando de consulta. */
+const AUTO_TOOLS = new Set(["run_command", "send_command"]);
+
+export interface ConsultWindow {
+  /** Conexión (id del backend, cambia en cada reconexión). */
+  conn: string;
+  /** Clave del agente (id de sesión MCP); vacía si el cliente no la envía. */
+  clientKey: string;
+  /** Nombre del agente según su initialize: dato no confiable, solo para mostrar (escapado). */
+  clientName: string;
+  /** Nombre visible de la conexión. */
+  target: string;
+  /** Vence (ms desde epoch). */
+  until: number;
+}
+
+/** Lo que llega en el evento "mcp-approval" (ver ApprovalRequest en mcp.rs). */
+export interface WindowRequest {
+  tool: string;
+  detail: string;
+  connection?: string | null;
+  client_key?: string;
+}
+
+/** Controles C0/C1, DEL, tabulador y caracteres de ancho cero o de dirección. */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/;
+
+export const isWindowMinutes = (n: unknown): n is WindowMinutes => WINDOW_MINUTES.includes(n as WindowMinutes);
+
+/** Ventanas vigentes (las vencidas se descartan). */
+export function activeWindows(list: readonly ConsultWindow[], now: number): ConsultWindow[] {
+  return list.filter((w) => w.until > now);
+}
+
+/** Abre (o renueva) la ventana del agente en la conexión. */
+export function grantWindow(
+  list: readonly ConsultWindow[],
+  w: { conn: string; clientKey: string; clientName: string; target: string },
+  minutes: number,
+  now: number,
+): ConsultWindow[] {
+  if (!w.conn || !isWindowMinutes(minutes)) return activeWindows(list, now);
+  const rest = activeWindows(list, now).filter((x) => !(x.conn === w.conn && x.clientKey === w.clientKey));
+  return [...rest, { ...w, clientName: w.clientName.slice(0, 64), target: w.target.slice(0, 128), until: now + minutes * 60_000 }];
+}
+
+/** Revoca las ventanas de las conexiones que cumplan `drop` (desconexión, solo lectura). */
+export function revokeWhere(list: readonly ConsultWindow[], drop: (w: ConsultWindow) => boolean): ConsultWindow[] {
+  return list.filter((w) => !drop(w));
+}
+
+/** Revoca una ventana puntual. */
+export const revokeOne = (list: readonly ConsultWindow[], conn: string, clientKey: string) =>
+  revokeWhere(list, (w) => w.conn === conn && w.clientKey === clientKey);
+
+/**
+ * ¿Se aprueba sin diálogo? Solo si hay una ventana vigente para ese agente y esa conexión, la
+ * herramienta envía comandos, el comando es UNA línea sin caracteres de control, cabe en el tope y
+ * `risk` (computeRisk) lo clasifica como `read`. La decisión depende solo del resultado de `risk`.
+ */
+export function autoApprove(
+  list: readonly ConsultWindow[],
+  req: WindowRequest,
+  now: number,
+  risk: (cmd: string) => Risk,
+): { auto: true; risk: Risk } | { auto: false; reason: string } {
+  const conn = req.connection ?? "";
+  const key = req.client_key ?? "";
+  if (!AUTO_TOOLS.has(req.tool)) return { auto: false, reason: "herramienta" };
+  if (!conn || !activeWindows(list, now).some((w) => w.conn === conn && w.clientKey === key)) return { auto: false, reason: "sin ventana" };
+  const cmd = req.detail;
+  if (typeof cmd !== "string" || !cmd.trim()) return { auto: false, reason: "vacío" };
+  if (cmd.includes("\n") || cmd.includes("\r")) return { auto: false, reason: "varias líneas" };
+  if (CONTROL.test(cmd)) return { auto: false, reason: "caracteres de control" };
+  if ([...cmd].length > AUTO_MAX_CHARS) return { auto: false, reason: "largo" };
+  const r = risk(cmd);
+  if (r !== "read") return { auto: false, reason: r };
+  return { auto: true, risk: r };
+}
+
+/** Riesgo por línea para el diálogo de aprobación. */
+export function lineRisks(detail: string, risk: (cmd: string) => Risk): { line: string; risk: Risk }[] {
+  return detail
+    .split(/\r?\n|\r/)
+    .filter((l) => l.trim())
+    .map((line) => ({ line, risk: risk(line) }));
+}
+
+/** ¿Se puede ofrecer la ventana para esta solicitud? (comandos de una conexión, no abrir sesiones). */
+export const canOfferWindow = (req: WindowRequest) => AUTO_TOOLS.has(req.tool) && !!req.connection;
+
+/** Minutos restantes (redondeado hacia arriba) para mostrar. */
+export const minutesLeft = (w: ConsultWindow, now: number) => Math.max(0, Math.ceil((w.until - now) / 60_000));

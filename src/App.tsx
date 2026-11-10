@@ -12,8 +12,6 @@ import {
   importScript,
   listSessions,
   logsDirSet,
-  mcpConfigure,
-  mcpDecide,
   runScript as apiRunScript,
   saveSession as apiSaveSession,
   sendBreak,
@@ -47,7 +45,7 @@ import { compile, effectiveRules, onSlowRule } from "./lib/highlight";
 import { allFolders } from "./lib/folders";
 import { useMonitors } from "./lib/monitors";
 import { ButtonBar } from "./components/ButtonBar";
-import type { ApprovalRequest } from "./components/ApprovalDialog";
+import { useMcp } from "./lib/useMcp";
 import { ScriptPrompts } from "./components/ScriptPrompts";
 import type { ScriptLaunch } from "./components/ScriptLaunchDialog";
 import type { Section } from "./components/SettingsModal";
@@ -171,8 +169,6 @@ function Workspace({
   const scriptRunRef = useRef(scriptRun);
   scriptRunRef.current = scriptRun;
   const [scriptLaunch, setScriptLaunch] = useState<string | null>(null);
-  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
-  const [mcpStatus, setMcpStatus] = useState("");
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastSeq = useRef(0);
   /** Misma firma de siempre; el cierre (y su pausa al leer) lo maneja cada aviso en Toasts.tsx. */
@@ -248,22 +244,6 @@ function Workspace({
     root.style.setProperty("--term-fg", String(preset.theme.foreground));
   }, [dark, preset]);
 
-  // Servidor MCP: se (re)configura cuando cambian sus ajustes.
-  useEffect(() => {
-    mcpConfigure({
-      enabled: settings.mcpEnabled,
-      port: settings.mcpPort,
-      token: settings.mcpToken,
-      requireApproval: settings.mcpApproval,
-      readOnly: settings.mcpReadOnly,
-    })
-      .then(setMcpStatus)
-      .catch((e) => {
-        setMcpStatus(String(e));
-        if (settings.mcpEnabled) toastFail("iniciar el servidor MCP", e);
-      });
-  }, [settings.mcpEnabled, settings.mcpPort, settings.mcpToken, settings.mcpApproval, settings.mcpReadOnly, toastFail]);
-
   useEffect(() => {
     const un = listen("open-settings", () => setSettingsOpen(true));
     return () => {
@@ -315,17 +295,6 @@ function Workspace({
 
   useEffect(() => {
     const subs = [
-      listen<ApprovalRequest>("mcp-approval", (e) => setApprovals((a) => [...a, e.payload])),
-      listen<string>("mcp-approval-closed", (e) => setApprovals((a) => a.filter((x) => x.id !== e.payload))),
-      listen<string>("mcp-open-session", (e) => {
-        const s = sessionsRef.current.find((x) => x.id === e.payload);
-        if (s) openTab(s);
-      }),
-      listen<{ tool: string; target: string; detail: string; ok: boolean }>("mcp-activity", (e) => {
-        const { tool, target, detail, ok } = e.payload;
-        if (tool === "send_command" || tool === "open_session")
-          toast(`IA · ${ok ? "" : "rechazado: "}${detail.split("\n")[0]}${target ? ` → ${target}` : ""}`, "ai");
-      }),
       listen<{ run: string; script: string; kind: string; message: string }>("script-event", (e) => {
         const { kind, message, script, run } = e.payload;
         if (kind === "log") toast(`${script}: ${message}`);
@@ -743,6 +712,8 @@ function Workspace({
     [builtinPacks, userPacks],
   );
   const catalog = useMemo(() => buildCatalog(allPacks, settings.disabledPacks), [allPacks, settings.disabledPacks]);
+  // Servidor MCP: configuración, aprobaciones con ventana de consultas y consultas del backend.
+  const mcp = useMcp({ settings, tabs, states, controllers, catalog, monitors, sessionsRef, openTab, toast, toastFail });
 
   const updateSessions = async (changed: Session[]) => {
     try {
@@ -1188,6 +1159,15 @@ function Workspace({
       );
       controllers.current.get(t.id)?.focus();
     },
+    /** Marca o desmarca la sesión de la pestaña como visible para agentes IA ("solo las marcadas"). */
+    toggleAgent: (id: string) => {
+      const t = tabs.find((x) => x.id === id);
+      const sid = t?.session.id;
+      if (!t || !sid) return;
+      const on = !settings.mcpMarked.includes(sid);
+      update((s) => ({ mcpMarked: on ? [...s.mcpMarked.filter((x) => x !== sid), sid] : s.mcpMarked.filter((x) => x !== sid) }));
+      toast(on ? `${t.session.name}: visible para agentes IA` : `${t.session.name}: oculta a los agentes IA`, "ai");
+    },
     toggleTools,
     requestCloseTools,
     closeHistory: () => setHistoryFor(null),
@@ -1262,6 +1242,8 @@ function Workspace({
     onJumpMark: h.jumpMark,
     onMarks: h.openMarks,
     onToggleReadOnly: h.toggleReadOnly,
+    onToggleAgent: settings.mcpEnabled && settings.mcpVisibility === "marked" ? h.toggleAgent : undefined,
+    agentMarked: settings.mcpMarked,
     onRename: h.renameTab,
     onReorder: h.reorderTab,
     onDuplicate: h.duplicateTab,
@@ -1555,6 +1537,7 @@ function Workspace({
           onReconnect={h.reconnect}
           onDisconnect={h.disconnect}
           aiEnabled={settings.mcpEnabled}
+          aiWindows={mcp.windows.length}
           onAi={h.openAi}
           onSaveAs={activeTab ? () => h.saveTabAs(activeTab.id) : undefined}
           findOpen={!!activeId && !!findOpenIds[activeId]}
@@ -1586,7 +1569,10 @@ function Workspace({
             onImportFile={h.openImport}
             onExportFile={() => h.openExport()}
             initialSection={settingsSection}
-            mcpStatus={mcpStatus}
+            mcpStatus={mcp.status}
+            mcpWindows={mcp.windows}
+            onRevokeWindow={mcp.revoke}
+            onRevokeWindows={mcp.revokeAll}
             onChange={update}
             onClose={() => {
               setSettingsOpen(false);
@@ -1638,15 +1624,13 @@ function Workspace({
       {scriptLaunch && (
         <ScriptLaunchDialog script={scriptLaunch} onCancel={() => setScriptLaunch(null)} onRun={(l) => startScript(scriptLaunch, l)} />
       )}
-      {approvals[0] && (
+      {mcp.approvals[0] && (
         <ApprovalDialog
-          key={approvals[0].id}
-          request={approvals[0]}
-          pending={approvals.length}
-          onDecide={(approved) => {
-            mcpDecide(approvals[0].id, approved).catch((e) => toastFail("registrar la decisión sobre la solicitud MCP", e));
-            setApprovals((a) => a.slice(1));
-          }}
+          key={mcp.approvals[0].id}
+          request={mcp.approvals[0]}
+          pending={mcp.approvals.length}
+          windowMinutes={settings.mcpWindowMin}
+          onDecide={(approved, minutes) => mcp.decide(mcp.approvals[0], approved, minutes)}
         />
       )}
       <Toasts toasts={toasts} onClose={closeToast} rightInset={!focusMode && (commandsOpen || notesOpen) ? panelWidth : 0} />

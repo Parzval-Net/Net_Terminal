@@ -77,6 +77,7 @@ import {
 } from "../../lib/topoInsights";
 import { SnmpProfile } from "../../lib/snmp";
 import { useTopoTraffic } from "./useTopoTraffic";
+import { bridgeActive, setTopologyLive, type TopologyLive } from "../../lib/mcpBridge";
 import { vendorFor } from "../../lib/commands";
 import type { Session } from "../../types";
 import type { TabBrief, TerminalRef } from "./FileManager";
@@ -622,6 +623,29 @@ export function TopologyTool({
     return { down, load, issues };
   }, [attention]);
   const coverage = useMemo(() => checkCoverage(topoData, traffic.live), [topoData, traffic.live]);
+
+  // Agentes IA (MCP): tasas, estado de enlaces y "Requieren atención" mientras esta vista está
+  // abierta con el tráfico activo. Solo se publica una referencia; get_topology la lee si la pide.
+  useEffect(() => {
+    if (!bridgeActive() || !trafficOn || (!linkRates.size && !attention.length)) {
+      setTopologyLive(null);
+      return;
+    }
+    const links: TopologyLive["links"] = [];
+    for (const l of topoData.links) {
+      const k = linkKey(l);
+      const lt = linkRates.get(k);
+      const issues = checks.get(k);
+      if (!lt && !issues?.length) continue;
+      links.push({ a: l.a, aPort: l.aPort, b: l.b, bPort: l.bPort, ab: lt?.ab ?? null, ba: lt?.ba ?? null, speed: lt?.speed, util: lt?.util, level: linkLevelOf(issues, lt) });
+    }
+    setTopologyLive({
+      ts: Date.now(),
+      links,
+      attention: attention.map((r) => ({ aName: r.aName, bName: r.bName, level: r.level, util: r.util, phrase: r.phrase })),
+    });
+  }, [trafficOn, linkRates, checks, attention, topoData]);
+  useEffect(() => () => setTopologyLive(null), []);
 
   // Ficha del enlace: se arma solo para el enlace bajo el puntero (o enfocado). Las funciones leen
   // datos vigentes sin cambiar de identidad en cada arrastre: la ficha no depende de posiciones.

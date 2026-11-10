@@ -513,7 +513,31 @@ const SEARCH_CORPUS = [
   { kind: "notes", rel: "ventana-cambio.txt", day: "2026-11-02", modified: 1793610000, text: "Ventana 02-11: cambiar uplink GigabitEthernet1/0/3\nValidar changed state to up en core-sw01\nAvisar a NOC" },
 ];
 
+// &mcp=1: servidor MCP encendido, sesiones marcadas y auditoría (Ajustes › Agentes IA, aprobaciones).
+if (new URLSearchParams(location.search).has("mcp")) {
+  Object.assign(settings, {
+    mcpEnabled: true,
+    mcpToken: "0123456789abcdef0123456789abcdef0123456789abcdef",
+    mcpVisibility: new URLSearchParams(location.search).get("mcp") === "all" ? "all" : "marked",
+    mcpMarked: [sessions[0]?.id, "local"].filter(Boolean),
+    mcpAudit: true,
+  });
+}
+/** Lo que la interfaz respondió al "servidor MCP" simulado (decisiones y consultas), para QA. */
+const mcpLog = { decisions: [], replies: [] };
+const mcpAudit = [
+  { ts: new Date(now - 300000).toISOString(), client: "Claude Code", clientVersion: "2.1", tool: "list_connections", connection: null, target: null, command: null, risk: null, decision: "lectura" },
+  { ts: new Date(now - 240000).toISOString(), client: "Claude Code", clientVersion: "2.1", tool: "run_command", connection: "t1#1", target: "core-sw01", command: "show interfaces status", risk: "read", decision: "aprobado" },
+  { ts: new Date(now - 180000).toISOString(), client: "Claude Code", clientVersion: "2.1", tool: "run_command", connection: "t1#1", target: "core-sw01", command: "show logging | include UPDOWN", risk: "read", decision: "auto_ventana" },
+  { ts: new Date(now - 120000).toISOString(), client: "Claude Code", clientVersion: "2.1", tool: "send_command", connection: "t1#1", target: "core-sw01", command: "configure terminal\nsnmp-server community **** RO", risk: "change", decision: "rechazado" },
+  { ts: new Date(now - 60000).toISOString(), client: "Gemini CLI", clientVersion: "0.9", tool: "run_command", connection: "t2#1", target: "dist-sw01", command: "show clock", risk: null, decision: "solo_lectura" },
+];
+
 const handlers = {
+  mcp_configure: ({ enabled }) => (enabled ? "Escuchando en http://127.0.0.1:47821/mcp" : "Servidor MCP detenido"),
+  mcp_decide: (args) => void mcpLog.decisions.push(args),
+  mcp_query_reply: (args) => void mcpLog.replies.push(args),
+  mcp_audit_tail: ({ limit }) => mcpAudit.slice(-limit),
   "plugin:event|listen": ({ event, handler }) => {
     listeners.set(event, [...(listeners.get(event) ?? []), handler]);
     return handler;
@@ -1724,6 +1748,16 @@ Object.assign(scenes, {
   "quick-telnet": async () => { await click("Conexión rápida sin guardar"); await click("Telnet"); },
   confirm: async () => { await open("core-sw01"); await open("ar-wan01"); await wait(300); window.dispatchEvent(new KeyboardEvent("keydown", { key: "w", metaKey: true, ctrlKey: true, bubbles: true })); },
   approval: async () => { await wait(800); emit("mcp-approval", { id: "a1", tool: "send_command", target: "core-sw01 (192.0.2.1)", detail: "configure terminal\ninterface GigabitEthernet1/0/4\n no shutdown\nend" }); },
+  // Con &mcp=1: aprobación de una consulta con la conexión real de la pestaña (ofrece la ventana de consultas)
+  // y riesgo por línea en un envío de varias líneas. El nombre del agente trae HTML: debe verse como texto.
+  "approval-window": async () => {
+    await open("core-sw01");
+    await wait(1200);
+    const conn = [...connSessions.keys()].pop();
+    emit("mcp-approval", { id: "a2", tool: "run_command", target: "core-sw01", detail: "show interfaces status", connection: conn, client: "Claude Code <img src=x onerror=alert(1)>", client_key: "k1" });
+    emit("mcp-approval", { id: "a3", tool: "send_command", target: "core-sw01", detail: "show clock\nconfigure terminal\ninterface Gi1/0/4\n shutdown\nreload", connection: conn, client: "Claude Code", client_key: "k1" });
+  },
+  "s-ai-mcp": settingsAt("Agentes IA"),
   macro: async () => { await open("core-sw01"); await click("Nuevo botón"); },
   "cmd-editor": async () => { await open("core-sw01"); await click("Catálogo de comandos"); await click("Agregar un comando propio"); },
   // Nueva sesión con túneles, contraseña guardada y un error de validación visibles.
@@ -1943,6 +1977,6 @@ window.__newScene = {
 // Acceso para el script de QA (CDP): pasos adicionales sobre una escena.
 window.__demo = { click, open, wait, svgNode, emit, find, setVal };
 // Acceso para backends simulados que extienden este (scripts/video/plugins/mock-video.js).
-window.__mock = { serverOpts, guardStats, handlers, emit, cbs, channels, connSessions, sessions, settings, notes, enc };
+window.__mock = { serverOpts, guardStats, handlers, emit, cbs, channels, connSessions, sessions, settings, notes, enc, mcpLog };
 const scene = new URLSearchParams(location.search).get("scene");
 if (scene && scenes[scene]) window.addEventListener("load", () => wait(600).then(scenes[scene]));

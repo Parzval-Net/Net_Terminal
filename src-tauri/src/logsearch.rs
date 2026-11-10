@@ -761,7 +761,40 @@ impl Drop for Slot {
     }
 }
 
-fn roots_of(state: &crate::AppState) -> Roots {
+/// Búsqueda sincrónica para el servidor MCP: usa el mismo cupo que la interfaz (una búsqueda a la
+/// vez) y se cancela sola al vencer `timeout`. Devuelve los archivos con coincidencias y el resumen.
+pub fn search_now(roots: &Roots, params: &SearchParams, timeout: Duration) -> Result<(Vec<FileHits>, Summary), String> {
+    let q = params.prepare()?;
+    // Espera breve por el cupo: otra búsqueda corta (de la interfaz o de otro agente) suele terminar pronto.
+    let t0 = Instant::now();
+    let _slot = loop {
+        if let Some(s) = Slot::take() {
+            break s;
+        }
+        if t0.elapsed() > Duration::from_secs(5) {
+            return Err("Ya hay una búsqueda en curso en NetTerminal; reintenta en unos segundos".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    {
+        let (cancel, done) = (cancel.clone(), done.clone());
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            while !done.load(Ordering::SeqCst) && t0.elapsed() < timeout {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            cancel.store(true, Ordering::SeqCst);
+        });
+    }
+    let mut files = Vec::new();
+    let sum = search(roots, &q, &cancel, &mut |u| files.extend(u.files));
+    done.store(true, Ordering::SeqCst);
+    Ok((files, sum))
+}
+
+pub(crate) fn roots_of(state: &crate::AppState) -> Roots {
     Roots { logs: state.logs_dir(), backups: crate::backups::root(&state.data_dir), notes: state.notes_dir() }
 }
 

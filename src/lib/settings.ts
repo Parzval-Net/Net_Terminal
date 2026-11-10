@@ -88,6 +88,16 @@ export interface Settings {
   mcpToken: string;
   mcpApproval: boolean;
   mcpReadOnly: boolean;
+  /** Sesiones visibles para agentes: todas las abiertas (como antes), solo las marcadas o ninguna. */
+  mcpVisibility: "all" | "marked" | "none";
+  /** Ids de sesiones guardadas visibles con "solo las marcadas" ("local": terminal local). */
+  mcpMarked: string[];
+  /** Datos de la app que un agente puede leer además de las sesiones. */
+  mcpScopes: { logs: boolean; backups: boolean; notes: boolean };
+  /** Registro de auditoría local de lo que piden los agentes (apagado por defecto). */
+  mcpAudit: boolean;
+  /** Duración por defecto de la ventana de consultas (5, 15 o 60 minutos). */
+  mcpWindowMin: number;
   modules: Record<ModuleId, boolean>;
   monitors: MonitorTarget[];
   tftpPort: number;
@@ -186,6 +196,11 @@ export const defaultSettings: Settings = {
   mcpToken: "",
   mcpApproval: true,
   mcpReadOnly: false,
+  mcpVisibility: "all",
+  mcpMarked: [],
+  mcpScopes: { logs: true, backups: true, notes: true },
+  mcpAudit: false,
+  mcpWindowMin: 15,
   modules: { monitor: true, diag: true, topology: true, subnet: true, perf: true, transfer: true, syslog: true, plugins: true, backup: true, snmp: true, logsearch: true },
   monitors: [],
   tftpPort: 69,

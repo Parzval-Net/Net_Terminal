@@ -9,11 +9,43 @@ import type { Session } from "../types";
 // ---------- Servidor MCP ----------
 
 /** Configuración del servidor MCP: devuelve su estado en texto. */
-export const mcpConfigure = (cfg: { enabled: boolean; port: number; token: string; requireApproval: boolean; readOnly: boolean }) =>
-  invoke<string>("mcp_configure", cfg);
+export const mcpConfigure = (cfg: {
+  enabled: boolean;
+  port: number;
+  token: string;
+  requireApproval: boolean;
+  readOnly: boolean;
+  /** "all", "marked" o "none" (Sesiones visibles para agentes). */
+  visibility: string;
+  /** Ids de sesiones guardadas marcadas ("local" es la terminal local). */
+  marked: string[];
+  scopes: { logs: boolean; backups: boolean; notes: boolean };
+  audit: boolean;
+}) => invoke<string>("mcp_configure", cfg);
 
-/** Respuesta del usuario a una solicitud de aprobación MCP. */
-export const mcpDecide = (id: string, approved: boolean) => invoke("mcp_decide", { id, approved });
+/**
+ * Respuesta a una solicitud de aprobación MCP. `auto`: la aprobó la ventana de consultas (no el
+ * usuario en el diálogo); `risk`: riesgo calculado por la app, para la auditoría.
+ */
+export const mcpDecide = (id: string, approved: boolean, auto = false, risk?: string) => invoke("mcp_decide", { id, approved, auto, risk });
+
+/** Respuesta a una consulta del servidor MCP (datos vivos, catálogo, diff). */
+export const mcpQueryReply = (id: string, data: unknown) => invoke("mcp_query_reply", { id, data });
+
+/** Últimos eventos del registro de auditoría MCP (el más reciente al final). */
+export const mcpAuditTail = (limit: number) => invoke<McpAuditEvent[]>("mcp_audit_tail", { limit });
+
+export interface McpAuditEvent {
+  ts: string;
+  client: string;
+  clientVersion: string;
+  tool: string;
+  connection: string | null;
+  target: string | null;
+  command: string | null;
+  risk: string | null;
+  decision: string;
+}
 
 // ---------- Logs ----------
 
