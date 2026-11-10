@@ -83,7 +83,7 @@ pub const VAULT_NEEDED: &str =
 /// sensibles que vienen apagadas (API local, servidores, algoritmos legacy, bloqueo de la bóveda),
 /// rutas locales, datos del equipo y lo que se exporta aparte o no tiene sentido en otro equipo.
 /// La interfaz tiene la misma lista (`src/lib/bundle.ts`); una prueba de Node exige que coincidan.
-pub const SETTINGS_EXCLUDED: [&str; 34] = [
+pub const SETTINGS_EXCLUDED: [&str; 35] = [
     // API local (MCP): token, encendido, puerto, aprobación y solo lectura.
     "mcpToken",
     "mcpEnabled",
@@ -109,6 +109,8 @@ pub const SETTINGS_EXCLUDED: [&str; 34] = [
     // Bloqueo automático de la bóveda (política local).
     "vaultAutoLockMin",
     "vaultLockOnSleep",
+    // Modo portable cifrado: qué pasa con los logs al bloquear (política local).
+    "dataLockStopLogs",
     // Rutas locales.
     "logsDir",
     // Monitores (se encienden solos) y fuentes de Topología (envían comandos a los equipos).
@@ -1115,6 +1117,24 @@ pub fn check_dest(path: &Path, data_dir: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(path.to_path_buf())
+}
+
+/// Destino de una exportación en claro (log o respaldo descifrado, elegido en el diálogo nativo):
+/// ruta absoluta, no una carpeta, fuera de la carpeta de datos (la sirven TFTP, HTTP y FTP) y fuera
+/// de cualquier carpeta cifrada (ahí un archivo en claro sería un "claro encontrado").
+pub fn check_export_dest(path: &Path, data_dir: &Path) -> Result<(), String> {
+    if !path.is_absolute() || path.is_dir() {
+        return Err("Elige un archivo de destino".into());
+    }
+    let real = real_path(path).ok_or("La carpeta de destino no existe")?;
+    let data = data_dir.canonicalize().unwrap_or_else(|_| data_dir.to_path_buf());
+    if real.starts_with(&data) || path.starts_with(data_dir) || crate::datacrypt::shared_for(&real).is_some() {
+        return Err(format!(
+            "No se puede guardar en la carpeta de datos de NetTerminal ({}) ni en una carpeta cifrada: elige otra carpeta.",
+            data_dir.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Texto de la confirmación nativa de una exportación con contraseñas.

@@ -304,6 +304,17 @@ function Workspace({
           toast(`${script}: ${message}`, kind === "error" ? "error" : "info");
         }
       }),
+      // Carpeta cifrada bloqueada con «Detener las grabaciones de log al bloquear»: las pestañas lo reflejan.
+      listen<string[]>("logs-stopped", (e) => {
+        const conns = new Set(e.payload);
+        const ids = [...controllers.current.entries()].filter(([, c]) => conns.has(c.connId())).map(([id]) => id);
+        setStates((s) => {
+          const next = { ...s };
+          for (const id of ids) if (next[id]) next[id] = { ...next[id], logPath: null };
+          return next;
+        });
+        if (ids.length) toast(ids.length === 1 ? "Se detuvo 1 grabación de log al bloquear." : `Se detuvieron ${ids.length} grabaciones de log al bloquear.`);
+      }),
     ];
     return () => subs.forEach((u) => u.then((f) => f()));
   }, [openTab, toast]);

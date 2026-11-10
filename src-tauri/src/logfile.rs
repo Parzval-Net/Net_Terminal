@@ -134,9 +134,42 @@ pub fn render(pattern: &str, vars: &LogVars, now: &chrono::DateTime<chrono::Loca
     path
 }
 
+/// Destino de un log: archivo en claro, o cifrado por bloques en una carpeta cifrada (modo portable
+/// cifrado). En claro es el mismo `File` de siempre: una escritura por fragmento, sin pasos nuevos.
+pub enum LogFile {
+    Plain(File),
+    Enc(crate::datacrypt::Appender),
+}
+
+impl Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            LogFile::Plain(f) => f.write(buf),
+            LogFile::Enc(a) => a.write(buf),
+        }
+    }
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            LogFile::Plain(f) => f.write_all(buf),
+            // Un bloque cifrado por escritura (nunca uno a medias por una escritura parcial).
+            LogFile::Enc(a) => a.append(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Abre un log cifrado (`<nombre>.log.nte`). Con la carpeta bloqueada solo se puede seguir en un
+/// archivo que otra pestaña ya tiene abierto.
+fn open_enc(path: &Path, dk: Option<&crate::datacrypt::DataKey>, mode: crate::datacrypt::OpenMode) -> std::io::Result<(LogFile, bool)> {
+    let (a, had) = crate::datacrypt::open_append(path, dk, mode)?;
+    Ok((LogFile::Enc(a), had))
+}
+
 /// Abre (o crea) el archivo de log que corresponde a `now`. Devuelve la ruta y si el archivo
 /// ya tenía contenido (al anexar).
-fn open_log(dir: &Path, opts: &LogOptions, vars: &LogVars, now: &chrono::DateTime<chrono::Local>) -> Result<(File, PathBuf, bool), String> {
+fn open_log(dir: &Path, opts: &LogOptions, vars: &LogVars, now: &chrono::DateTime<chrono::Local>) -> Result<(LogFile, PathBuf, bool), String> {
     let rel = render(&opts.pattern, vars, now);
     // Defensa en profundidad: solo componentes normales, nunca "..", raíz ni unidad.
     if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
@@ -151,13 +184,33 @@ fn open_log(dir: &Path, opts: &LogOptions, vars: &LogVars, now: &chrono::DateTim
         return Err("La ruta del log sale de la carpeta de logs".into());
     }
     let file_name = base.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-    let with_ext = |suffix: &str| parent.join(format!("{file_name}{suffix}.log"));
+    // Carpeta cifrada: mismo nombre con `.nte`; la DEK se pide al abrir (bloqueada: error).
+    let enc = crate::datacrypt::key_for(dir).map_err(|e| e.to_string())?;
+    let tail = if enc.is_some() { ".log.nte" } else { ".log" };
+    let with_ext = |suffix: &str| parent.join(format!("{file_name}{suffix}{tail}"));
+    if let Some(dk) = enc {
+        use crate::datacrypt::OpenMode;
+        if opts.append {
+            let path = with_ext("");
+            let (f, had) = open_enc(&path, Some(&dk), OpenMode::Append).map_err(|e| e.to_string())?;
+            return Ok((f, path, had));
+        }
+        for n in 1..1000 {
+            let path = if n == 1 { with_ext("") } else { with_ext(&format!("-{n}")) };
+            match open_enc(&path, Some(&dk), OpenMode::CreateNew) {
+                Ok((f, _)) => return Ok((f, path, false)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        return Err("No se pudo crear un nombre de log libre".into());
+    }
     if opts.append {
         let path = with_ext("");
         let file = OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
         crate::session_store::restrict(&path);
         let had = file.metadata().map(|m| m.len() > 0).unwrap_or(false);
-        return Ok((file, path, had));
+        return Ok((LogFile::Plain(file), path, had));
     }
     // Archivo nuevo: nunca se sobrescribe uno existente (dos sesiones en el mismo segundo).
     for n in 1..1000 {
@@ -166,7 +219,7 @@ fn open_log(dir: &Path, opts: &LogOptions, vars: &LogVars, now: &chrono::DateTim
             Ok(file) => {
                 // Salida de equipos: solo el usuario actual (600), también fuera de data/.
                 crate::session_store::restrict(&path);
-                return Ok((file, path, false));
+                return Ok((LogFile::Plain(file), path, false));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e.to_string()),
@@ -252,7 +305,7 @@ pub fn mask_line(line: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 
 /// Escritor del log: quita ANSI, agrega la hora, enmascara y rota.
 pub struct LogWriter {
-    file: File,
+    file: LogFile,
     path: PathBuf,
     dir: PathBuf,
     vars: LogVars,
@@ -288,11 +341,16 @@ impl LogWriter {
     /// Continúa un log existente (reconexión). Si rotó mientras tanto, sigue en el último.
     pub fn resume(path: &Path, dir: &Path, opts: LogOptions, vars: LogVars) -> Result<Self, String> {
         let path = latest(path.to_path_buf());
-        let file = OpenOptions::new().append(true).open(&path).map_err(|e| e.to_string())?;
         // El día del archivo es el de su última escritura: si cambió, se rota al escribir.
-        let day = file
-            .metadata()
-            .and_then(|m| m.modified())
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified());
+        let file = if path.extension().is_some_and(|e| e == crate::datacrypt::EXT) {
+            // Log cifrado: sigue en el mismo archivo (si otra pestaña lo tiene abierto, sin pedir la DEK).
+            let dk = crate::datacrypt::key_for(dir).ok().flatten();
+            open_enc(&path, dk.as_deref(), crate::datacrypt::OpenMode::Existing).map_err(|e| e.to_string())?.0
+        } else {
+            LogFile::Plain(OpenOptions::new().append(true).open(&path).map_err(|e| e.to_string())?)
+        };
+        let day = modified
             .map(|t| chrono::DateTime::<chrono::Local>::from(t).date_naive())
             .unwrap_or_else(|_| chrono::Local::now().date_naive());
         let opts = normalize(opts);
@@ -302,7 +360,7 @@ impl LogWriter {
         Ok(w)
     }
 
-    fn with_file(file: File, path: PathBuf, dir: &Path, opts: LogOptions, vars: LogVars) -> Self {
+    fn with_file(file: LogFile, path: PathBuf, dir: &Path, opts: LogOptions, vars: LogVars) -> Self {
         Self {
             file,
             path,

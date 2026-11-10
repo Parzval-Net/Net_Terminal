@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Pack } from "./packs";
 import type { UpdateInfo, logOptions } from "./settings";
 import type { Session } from "../types";
+import type { DataOp, DataReport, DataStatus, UnlockReport } from "./dataCrypt";
 
 // ---------- Servidor MCP ----------
 
@@ -97,3 +98,30 @@ export const cmdpackSave = (pack: Pack) => invoke("cmdpack_save", { pack });
 export const cmdpackDelete = (id: string) => invoke("cmdpack_delete", { id });
 /** Historial de comandos enviados por equipo (solo envíos explícitos). */
 export const cmdHistoryAdd = (key: string, command: string) => invoke("cmd_history_add", { key, command });
+
+// ---------- Modo portable cifrado ----------
+// La contraseña maestra solo viaja en el comando que la usa (desbloquear, activar, desactivar) y el
+// campo se vacía enseguida; nunca vuelve a la interfaz.
+
+export const datacryptStatus = () => invoke<DataStatus>("datacrypt_status");
+export const dataUnlock = (master: string) => invoke<UnlockReport>("data_unlock", { master });
+export const dataLock = () => invoke("data_lock");
+/** Actividad en la app (para el bloqueo por inactividad); la interfaz la limita a una cada 20 s. */
+export const dataTouch = () => invoke("data_touch");
+export const datacryptSetPolicy = (stopLogs: boolean) => invoke("datacrypt_set_policy", { stopLogs });
+export const datacryptEnable = (master: string) => invoke<DataReport>("datacrypt_enable", { master });
+export const datacryptDisable = (master: string) => invoke<DataReport>("datacrypt_disable", { master });
+export const datacryptResume = (op: DataOp) => invoke<DataReport>("datacrypt_resume", { op });
+export const datacryptFixPlaintext = () => invoke<DataReport>("datacrypt_fix_plaintext");
+export const vaultCreate = (master: string) => invoke("vault_create", { master });
+
+/** Archivo de Buscar en logs o de Respaldos para el visor de la app (descifrado en memoria si está cifrado). */
+export interface FileText {
+  text: string;
+  truncated: boolean;
+  incomplete: boolean;
+  encrypted: boolean;
+}
+export const logsearchView = (kind: string, rel: string) => invoke<FileText>("logsearch_view", { kind, rel });
+/** "Exportar descifrado": el backend abre el diálogo de guardado; devuelve la ruta (null si se canceló). */
+export const logsearchExport = (kind: string, rel: string) => invoke<string | null>("logsearch_export", { kind, rel });

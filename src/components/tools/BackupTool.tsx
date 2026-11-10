@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { ClipboardCopy, Download, FileText, FolderOpen, GitCompare, Play, RefreshCw, Square } from "lucide-react";
+import { ClipboardCopy, Download, Eye, FileText, FolderOpen, GitCompare, Play, RefreshCw, Square } from "lucide-react";
+import { FileViewer } from "../FileViewer";
 import type { TerminalRef } from "./FileManager";
 import { Btn, Section, StatusPill, Toggle, fmtBytes } from "./ui";
 import { DiffView } from "./DiffView";
@@ -46,6 +47,8 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
   const stopRef = useRef(false);
   const [list, setList] = useState<DeviceBackups[]>([]);
   const [msg, setMsg] = useState("");
+  /** Respaldo abierto en el visor (descifrado en memoria si la carpeta está cifrada), con "Exportar…". */
+  const [viewing, setViewing] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     invoke<DeviceBackups[]>("backup_list").then((l) => setList(l ?? [])).catch((e) => setMsg(String(e)));
@@ -296,6 +299,9 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
                     <span className="flex-1" />
                     <PickBtn on={isA} onClick={() => setSelA({ device: d.device, file: f.name })} label="A" />
                     <PickBtn on={isB} onClick={() => setSelB({ device: d.device, file: f.name })} label="B" />
+                    <Btn kind="ghost" className="!h-7 !px-2" onClick={() => setViewing(`${d.device}/${f.name}`)} title="Ver o exportar" aria-label={`Ver o exportar el respaldo ${backupLabel(f.name)} de ${d.device}`}>
+                      <Eye size={13} />
+                    </Btn>
                     <Btn kind="ghost" className="!h-7 !px-2" onClick={() => toNotes(d.device, f.name)} title="Copiar a Notas">
                       <FileText size={13} />
                     </Btn>
@@ -344,6 +350,7 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
           <p className="text-[12.5px] text-muted">El resultado aparece aquí. Las secciones sin cambios se pliegan.</p>
         )}
       </Section>
+      {viewing && <FileViewer kind="backups" rel={viewing} onClose={() => setViewing(null)} />}
     </div>
   );
 }

@@ -16,6 +16,7 @@
 //!   en las copias de versiones anteriores. Al restaurar desde una copia se genera un token nuevo y
 //!   se avisa (`tokenRegenerated`).
 
+use crate::datacrypt as dfs;
 use crate::seal;
 use crate::session_store;
 use serde::Serialize;
@@ -182,7 +183,7 @@ enum ReadErr {
 type Parsed = (Map<String, Value>, Vec<u8>);
 
 fn read_object(path: &Path) -> Result<Option<Parsed>, ReadErr> {
-    let meta = match fs::metadata(path) {
+    let meta = match dfs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(ReadErr::Unreadable),
@@ -190,9 +191,11 @@ fn read_object(path: &Path) -> Result<Option<Parsed>, ReadErr> {
     if meta.len() > MAX_READ_BYTES {
         return Err(ReadErr::TooLarge);
     }
-    let bytes = match fs::read(path) {
+    let bytes = match dfs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // Archivo cifrado alterado o dañado: igual que un JSON ilegible (se restaura del respaldo).
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData || e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(ReadErr::Corrupt),
         Err(_) => return Err(ReadErr::Unreadable),
     };
     match serde_json::from_slice::<Value>(&bytes) {
@@ -248,13 +251,13 @@ pub fn migrate(map: &mut Map<String, Value>, from: u64, schema: Schema) -> Resul
 /// Copia el original a `<archivo>.v<N>.bak.json` (una vez por versión: no pisa la más antigua).
 fn write_version_backup(path: &Path, version: u64) {
     let dest = version_bak_path(path, version);
-    if dest.exists() || !path.is_file() {
+    if dfs::exists(&dest) || !dfs::physical(path).is_file() {
         return;
     }
     // Copia a un temporal propio y rename: un corte no deja una copia a medias con el nombre final.
-    if let Ok(bytes) = fs::read(path) {
-        if seal::write_atomic(&dest, &backup_bytes(path, bytes)).is_ok() {
-            session_store::restrict(&dest);
+    if let Ok(bytes) = dfs::read(path) {
+        if dfs::write_atomic(&dest, &backup_bytes(path, bytes)).is_ok() {
+            dfs::restrict(&dest);
         }
     }
 }
@@ -331,19 +334,18 @@ pub fn new_mcp_token() -> String {
 
 /// Copias de settings.json en `dir`: `.bak`, `.bak2`, `settings.v<N>.bak.json` y `settings.corrupt-<fecha>.json`.
 fn settings_backups(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = dfs::read_dir(dir) else { return Vec::new() };
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     entries
-        .flatten()
+        .into_iter()
         .filter(|e| {
-            let n = e.file_name();
-            let Some(n) = n.to_str() else { return false };
+            let n = e.name.as_str();
             n == "settings.json.bak"
                 || n == "settings.json.bak2"
                 || n.strip_prefix("settings.v").and_then(|r| r.strip_suffix(".bak.json")).is_some_and(digits)
                 || n.strip_prefix("settings.corrupt-").and_then(|r| r.strip_suffix(".json")).is_some_and(digits)
         })
-        .map(|e| e.path())
+        .map(|e| e.path)
         .collect()
 }
 
@@ -353,17 +355,17 @@ fn settings_backups(dir: &Path) -> Vec<PathBuf> {
 pub fn scrub_settings_backups(dir: &Path) -> usize {
     let mut n = 0;
     for p in settings_backups(dir) {
-        let Ok(meta) = fs::symlink_metadata(&p) else { continue };
+        let Ok(meta) = fs::symlink_metadata(dfs::physical(&p)) else { continue };
         if !meta.is_file() || meta.len() > MAX_REDACT_BYTES {
             continue;
         }
-        let Ok(bytes) = fs::read(&p) else { continue };
+        let Ok(bytes) = dfs::read(&p) else { continue };
         let Some(clean) = redact_settings_bytes(&bytes) else { continue };
-        if seal::write_atomic(&p, &clean).is_ok() {
+        if dfs::write_atomic(&p, &clean).is_ok() {
             if let Ok(m) = meta.modified() {
-                let _ = fs::File::options().write(true).open(&p).and_then(|f| f.set_modified(m));
+                dfs::set_modified(&p, m);
             }
-            session_store::restrict(&p);
+            dfs::restrict(&p);
             n += 1;
         }
     }
@@ -406,6 +408,10 @@ impl DataFiles {
         let path = self.path(kind);
         let mut st = self.state(kind);
         let mut notice = FileNotice::new(schema.target);
+        // Carpeta cifrada bloqueada: no se lee ni se "restaura" nada (no es un archivo dañado).
+        if dfs::unavailable(&self.dir).is_some() {
+            return (Value::Null, notice);
+        }
         st.version = schema.target;
         st.bak_pending = false;
 
@@ -488,7 +494,7 @@ impl DataFiles {
                     let Ok(b) = serde_json::to_vec_pretty(&Value::Object(map.clone())) else { continue };
                     bytes = b;
                 }
-                if seal::write_atomic(path, &bytes).is_ok() {
+                if dfs::write_atomic(path, &bytes).is_ok() {
                     notice.restored_from = cand.file_name().map(|n| n.to_string_lossy().into_owned());
                     notice.token_regenerated = regen;
                     return Some(map);
@@ -502,6 +508,9 @@ impl DataFiles {
     /// el archivo es de una versión posterior, y copia el original antes del primer guardado tras migrar.
     pub fn save(&self, kind: Kind, data: Value) -> Result<(), String> {
         let schema = self.schema(kind);
+        if let Some(why) = dfs::unavailable(&self.dir) {
+            return Err(why.into());
+        }
         let Value::Object(mut map) = data else {
             return Err(if kind == Kind::Topology { "topología inválida".into() } else { "ajustes inválidos".into() });
         };
@@ -549,7 +558,7 @@ impl DataFiles {
             st.bak_pending = false;
         }
         let json = if compact.len() < 512 * 1024 { serde_json::to_string_pretty(&value).map_err(|e| e.to_string())? } else { compact };
-        seal::write_atomic(&path, json.as_bytes())?;
+        dfs::write_atomic(&path, json.as_bytes())?;
         st.version = schema.target.max(st.version);
         if kind == Kind::Settings {
             // Token rotado o borrado: ninguna copia anterior debe conservarlo (defensa en profundidad:
@@ -638,12 +647,12 @@ pub enum Rotation {
 /// Renueva `<archivo>.bak` con el contenido actual si es válido y el respaldo tiene más de
 /// `min_age`; la versión previa pasa a `<archivo>.bak2`. Dos generaciones como máximo.
 pub fn rotate_backup(path: &Path, validate: &dyn Fn(&[u8]) -> bool, now: SystemTime, min_age: Duration) -> Rotation {
-    let Ok(meta) = fs::metadata(path) else { return Rotation::Skipped };
+    let Ok(meta) = dfs::metadata(path) else { return Rotation::Skipped };
     if !meta.is_file() || meta.len() > MAX_READ_BYTES {
         return Rotation::Skipped;
     }
     let bak = bak_path(path);
-    let bak_meta = fs::metadata(&bak).ok();
+    let bak_meta = dfs::metadata(&bak).ok();
     // Fecha futura por poco (reloj ajustado): cuenta como reciente; muy futura (reloj roto): como vieja.
     let age = bak_meta.as_ref().and_then(|m| m.modified().ok()).map(|t| match now.duration_since(t) {
         Ok(a) => a,
@@ -653,24 +662,24 @@ pub fn rotate_backup(path: &Path, validate: &dyn Fn(&[u8]) -> bool, now: SystemT
     if bak_meta.is_some() && age.is_some_and(|a| a < min_age) {
         return Rotation::Fresh;
     }
-    let Ok(bytes) = fs::read(path) else { return Rotation::Skipped };
+    let Ok(bytes) = dfs::read(path) else { return Rotation::Skipped };
     if !validate(&bytes) {
         return Rotation::Skipped;
     }
     let bytes = backup_bytes(path, bytes);
     if let Some(bm) = &bak_meta {
-        if fs::read(&bak).is_ok_and(|old| old == bytes) {
+        if dfs::read(&bak).is_ok_and(|old| old == bytes) {
             return Rotation::Unchanged;
         }
         if bm.len() > 4096 && (bytes.len() as u64) < bm.len() / 4 && !age.is_some_and(|a| a >= SHRINK_GUARD_AGE) {
             return Rotation::Shrunk;
         }
-        let _ = fs::rename(&bak, bak2_path(path));
+        let _ = dfs::rename(&bak, &bak2_path(path));
     }
-    if seal::write_atomic(&bak, &bytes).is_err() {
+    if dfs::write_atomic(&bak, &bytes).is_err() {
         return Rotation::Skipped;
     }
-    session_store::restrict(&bak);
+    dfs::restrict(&bak);
     Rotation::Rotated
 }
 
@@ -684,7 +693,7 @@ pub fn rotate_all(dir: &Path, now: SystemTime, min_age: Duration) -> Vec<(&'stat
         .map(|(name, valid)| {
             let path = dir.join(name);
             let r = rotate_backup(&path, &valid, now, min_age);
-            session_store::restrict(&bak2_path(&path));
+            dfs::restrict(&bak2_path(&path));
             (name, r)
         })
         .collect()
@@ -704,11 +713,11 @@ pub fn spawn_rotation(dir: PathBuf) {
 /// Primer respaldo (`.bak`, luego `.bak2`) que `validate` acepta: su nombre y su contenido.
 pub fn first_valid_backup(path: &Path, validate: &dyn Fn(&[u8]) -> bool) -> Option<(String, Vec<u8>)> {
     for cand in [bak_path(path), bak2_path(path)] {
-        let Ok(meta) = fs::metadata(&cand) else { continue };
+        let Ok(meta) = dfs::metadata(&cand) else { continue };
         if meta.len() > MAX_READ_BYTES {
             continue;
         }
-        if let Ok(bytes) = fs::read(&cand) {
+        if let Ok(bytes) = dfs::read(&cand) {
             if validate(&bytes) {
                 return Some((cand.file_name()?.to_string_lossy().into_owned(), bytes));
             }

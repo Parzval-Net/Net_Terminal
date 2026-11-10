@@ -845,6 +845,39 @@ const handlers = {
   vault_reset: () => ((vault.exists = vault.unlocked = false), vaultIds.clear(), emit("creds-changed", null), null),
   // Bloqueo automático (window.__autolock: última configuración recibida).
   vault_autolock_set: ({ minutes, onSleep }) => ((window.__autolock = { minutes, onSleep }), null),
+  // Modo portable cifrado simulado (?data=encrypted: carpeta cifrada y bloqueada al abrir; con
+  // ?vault=portable se ofrece activarlo). Como el real: la contraseña nunca vuelve a la interfaz.
+  datacrypt_status: () => ({
+    available: vault.portable || dataState.encrypted,
+    encrypted: dataState.encrypted,
+    unlocked: dataState.unlocked,
+    busy: false,
+    journal: null,
+    plaintext: dataState.encrypted && dataState.unlocked ? dataState.plaintext : [],
+    error: null,
+    vaultExists: vault.exists,
+    vaultMaster: vault.backend === "vault",
+    logsActive: 0,
+    dataDir: "/Volumes/PENDRIVE/NetTerminal/data",
+  }),
+  data_unlock: ({ master }) => {
+    if (master.length < 8) throw "Contraseña maestra incorrecta o llave de datos alterada";
+    dataState.unlocked = vault.unlocked = true;
+    emit("creds-changed", null);
+    return { vault: true, vaultExists: vault.exists };
+  },
+  data_lock: () => ((dataState.unlocked = vault.unlocked = false), emit("data-locked", null), emit("creds-changed", null), null),
+  data_touch: () => null,
+  datacrypt_set_policy: () => null,
+  datacrypt_enable: ({ master }) => {
+    if (master.length < 8) throw "Contraseña maestra incorrecta";
+    return fakeConversion(() => Object.assign(dataState, { encrypted: true, unlocked: true }));
+  },
+  datacrypt_disable: () => fakeConversion(() => Object.assign(dataState, { encrypted: false, unlocked: true })),
+  datacrypt_resume: () => fakeConversion(() => {}),
+  datacrypt_fix_plaintext: () => fakeConversion(() => (dataState.plaintext = [])),
+  logsearch_view: ({ rel }) => ({ text: `── Sesión iniciada 2026-10-20 09:12:03 ──\n[2026-10-20 09:12:05] core-sw01#show clock\n*09:12:05.123 CLT Tue Oct 20 2026\n(${rel})`, truncated: false, incomplete: false, encrypted: dataState.encrypted }),
+  logsearch_export: ({ rel }) => `/Users/demo/Documentos/${rel.split("/").pop()}`,
   // Diálogos del sistema: guardar siempre propone un archivo; abrir devuelve un .ntx si el filtro lo pide (o con ?ntx).
   "plugin:dialog|save": ({ options }) => `/Users/demo/Documentos/${options?.defaultPath ?? "archivo"}`,
   "plugin:dialog|open": ({ options }) =>
@@ -1541,6 +1574,25 @@ if (new URLSearchParams(location.search).has("video")) {
 const vaultPortable = location.search.includes("vault=portable");
 const vault = { backend: vaultPortable ? "vault" : "keychain", exists: !vaultPortable, unlocked: !vaultPortable, portable: vaultPortable };
 const vaultIds = new Set(["s6"]);
+const dataEncrypted = location.search.includes("data=encrypted");
+const dataState = { encrypted: dataEncrypted, unlocked: !dataEncrypted, plaintext: dataEncrypted ? ["settings.json", "notes/pendiente.txt"] : [] };
+if (dataEncrypted) Object.assign(vault, { backend: "vault", exists: true, unlocked: false, portable: true });
+/** Conversión simulada: avance en tres pasos y el informe. */
+function fakeConversion(apply) {
+  const total = 24;
+  return new Promise((resolve) => {
+    [8, 16, 24].forEach((done, i) =>
+      setTimeout(() => {
+        emit("datacrypt-progress", { done, total, bytes: done * 180_000, totalBytes: total * 180_000 });
+        if (done === total) {
+          apply();
+          emit("creds-changed", null);
+          resolve({ converted: total, aside: [], incomplete: [], bytes: total * 180_000, ms: 900 });
+        }
+      }, 300 * (i + 1)),
+    );
+  });
+}
 
 window.__TAURI_INTERNALS__ = {
   metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
@@ -1978,5 +2030,33 @@ window.__newScene = {
 window.__demo = { click, open, wait, svgNode, emit, find, setVal };
 // Acceso para backends simulados que extienden este (scripts/video/plugins/mock-video.js).
 window.__mock = { serverOpts, guardStats, handlers, emit, cbs, channels, connSessions, sessions, settings, notes, enc, mcpLog };
+// Modo portable cifrado: activación (con ?vault=portable), desbloqueo al abrir (con ?data=encrypted,
+// la puerta de la app la muestra sola) y bloqueo con sesiones abiertas.
+Object.assign(scenes, {
+  "data-enable": async () => {
+    await click("Ajustes");
+    await wait(300);
+    await click("Credenciales");
+    await wait(300);
+    await wait(400);
+    [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Cifrar los datos de esta carpeta…")?.click();
+    await wait(400);
+    const dlg = [...document.querySelectorAll('[role="dialog"]')].pop();
+    dlg?.querySelectorAll('input[type="password"]').forEach((el) => setVal(el, "frase de ejemplo larga"));
+    const ack = dlg?.querySelector('input[type="checkbox"]');
+    if (ack && !ack.checked) ack.click();
+  },
+  "data-unlock": async () => {},
+  "data-lock": async () => {
+    await open("core-sw01");
+    await wait(400);
+    await handlers.data_lock();
+  },
+  "data-found": async () => {
+    await click("Ajustes");
+    await wait(300);
+    await click("Credenciales");
+  },
+});
 const scene = new URLSearchParams(location.search).get("scene");
 if (scene && scenes[scene]) window.addEventListener("load", () => wait(600).then(scenes[scene]));

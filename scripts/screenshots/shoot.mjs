@@ -37,6 +37,8 @@ const SHOTS = [
   ["importar", "import", "light"],
   ["pestanas-verticales", "vertical", "light"],
   ["credenciales", "credentials", "light"],
+  ["cifrado-activar", "data-enable", "light", { query: "&vault=portable" }],
+  ["cifrado-desbloqueo", "data-unlock", "light", { query: "&data=encrypted" }],
   ["notas-protegidas", "secure-note", "light"],
   ["snmp", "snmp", "light"],
   ["transferencias", "transfer", "light"],

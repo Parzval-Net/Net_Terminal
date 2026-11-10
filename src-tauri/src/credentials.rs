@@ -8,12 +8,13 @@
 //! autocompletado al conectar). La llave queda en memoria en un búfer que se borra al
 //! bloquear y al salir.
 
+use crate::datacrypt;
 use crate::seal::{self, derive, random, write_atomic, Throttle};
 use crate::seal::{Kdf, KDF_DEFAULT};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -182,6 +183,8 @@ struct Inner {
     timer_running: bool,
     /// Último tic del temporizador: hora del sistema y espera pedida (para notar una suspensión).
     last_tick: Option<(SystemTime, Duration)>,
+    /// Carpeta cifrada (modo portable cifrado): su DEK se desbloquea y se bloquea junto con la bóveda.
+    data: Option<Arc<datacrypt::Shared>>,
 }
 
 /// Bloqueo automático de la bóveda con contraseña maestra.
@@ -223,12 +226,35 @@ fn since(later: SystemTime, earlier: SystemTime) -> Duration {
 }
 
 impl Inner {
+    /// Hay una llave en memoria: la de la bóveda o la de la carpeta cifrada.
+    fn has_key(&self) -> bool {
+        self.key.is_some() || self.data.as_ref().is_some_and(|d| d.unlocked())
+    }
+
+    /// Borra de memoria la llave de la bóveda y la de la carpeta cifrada (un solo estado de bloqueo).
+    fn drop_keys(&mut self) {
+        self.key = None;
+        if let Some(d) = &self.data {
+            d.set_key(None);
+        }
+    }
+
+    /// Último uso: de la bóveda o, en una carpeta cifrada, de los datos (leer o guardar, y la actividad
+    /// en la app que informa la interfaz).
+    fn last_used(&self) -> Option<(Instant, SystemTime)> {
+        let data = self.data.as_ref().and_then(|d| d.last_use());
+        match (self.last_use, data) {
+            (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    }
+
     /// La llave venció por inactividad o por una suspensión del equipo.
     fn expired(&self, now: Instant, wall: SystemTime) -> bool {
-        if self.key.is_none() || !self.master {
+        if !self.has_key() || !self.master {
             return false;
         }
-        let Some((at, at_wall)) = self.last_use else { return false };
+        let Some((at, at_wall)) = self.last_used() else { return false };
         let mono = now.saturating_duration_since(at);
         let real = since(wall, at_wall);
         if let Some(idle) = self.auto.idle {
@@ -243,7 +269,7 @@ impl Inner {
     /// Borra la llave si venció (la borra `Zeroizing` al soltarla). true si la borró.
     fn expire(&mut self, now: Instant, wall: SystemTime) -> bool {
         if self.expired(now, wall) {
-            self.key = None;
+            self.drop_keys();
             return true;
         }
         false
@@ -438,6 +464,13 @@ impl Credentials {
         if master.len() > MAX_PASSWORD {
             return Err("Contraseña demasiado larga".into());
         }
+        if self.data_attached() {
+            let r = self.data_unlock(master)?;
+            if r.vault_exists && !r.vault {
+                return Err("La contraseña abrió los datos, pero no la bóveda de contraseñas".into());
+            }
+            return Ok(());
+        }
         let mut inner = lock(&self.inner);
         inner.throttle.check()?;
         let (h, bytes) = self.read()?.ok_or("No hay bóveda creada")?;
@@ -461,7 +494,7 @@ impl Credentials {
     }
 
     pub fn lock(&self) {
-        lock(&self.inner).key = None;
+        lock(&self.inner).drop_keys();
     }
 
     pub fn change(&self, old: &str, new: &str) -> Result<(), String> {
@@ -480,9 +513,34 @@ impl Credentials {
                 return Err(e);
             }
         };
+        // Carpeta cifrada: la DEK se reenvuelve sin recifrar los datos. Orden a prueba de cortes:
+        // (1) ranura nueva en datakey.ntk junto a la vieja, (2) bóveda con la maestra nueva, (3) se
+        // quita la ranura vieja. En cualquier punto una de las dos contraseñas abre todo.
+        let data = match inner.data.clone() {
+            None => None,
+            Some(sh) => {
+                let dir = self.data_dir();
+                let mut kf = datacrypt::KeyFile::read(&dir)?.ok_or("Falta la llave de datos (datakey.ntk)")?;
+                let dk = match kf.unwrap(old) {
+                    Ok((k, _)) => k,
+                    Err(e) => {
+                        inner.throttle.fail();
+                        return Err(e);
+                    }
+                };
+                let slot = kf.add_slot(&dk, new, self.kdf)?;
+                kf.write(&dir)?;
+                Some((sh, kf, slot, dk, dir))
+            }
+        };
         let salt = random::<16>();
         let key = derive(new, &salt, self.kdf)?;
         self.encrypt_write(&key, Mode::Master, self.kdf, salt, &entries)?;
+        if let Some((sh, mut kf, slot, dk, dir)) = data {
+            kf.keep_only(slot);
+            kf.write(&dir)?;
+            sh.set_key(Some(dk));
+        }
         inner.key = Some(key);
         inner.master = true;
         inner.touch();
@@ -494,6 +552,9 @@ impl Credentials {
     /// o llavero perdido: las contraseñas guardadas se pierden.
     pub fn reset(&self) -> Result<(), String> {
         let mut inner = lock(&self.inner);
+        if inner.data.is_some() {
+            return Err("La carpeta de datos está cifrada con esta contraseña: restablecer la bóveda no la abre ni la recupera. Desactiva el cifrado antes (Ajustes › Credenciales)".into());
+        }
         inner.key = None;
         match std::fs::remove_file(&self.path) {
             Ok(()) => {}
@@ -859,7 +920,7 @@ impl Credentials {
         }
         let mut inner = lock(&self.inner);
         inner.auto = AutoLock { idle: (minutes > 0).then(|| Duration::from_secs(u64::from(minutes) * 60)), on_sleep };
-        if inner.key.is_some() {
+        if inner.has_key() {
             inner.touch();
         }
         Ok(())
@@ -869,7 +930,7 @@ impl Credentials {
     /// ninguno corriendo). Devuelve su generación; quien llama crea el hilo y llama a `autolock_tick`.
     pub fn autolock_arm(&self) -> Option<u64> {
         let mut inner = lock(&self.inner);
-        if inner.key.is_none() || !inner.master || !inner.auto.active() || inner.timer_running {
+        if !inner.has_key() || !inner.master || !inner.auto.active() || inner.timer_running {
             return None;
         }
         inner.timer_running = true;
@@ -884,7 +945,7 @@ impl Credentials {
         if inner.timer_gen != gen {
             return Tick::Stop;
         }
-        if inner.key.is_none() || !inner.master || !inner.auto.active() {
+        if !inner.has_key() || !inner.master || !inner.auto.active() {
             inner.timer_running = false;
             return Tick::Stop;
         }
@@ -892,11 +953,11 @@ impl Credentials {
         // reloj monótono del sistema siga contando mientras el equipo duerme).
         let slept = inner.auto.on_sleep && inner.last_tick.is_some_and(|(at, wait)| since(wall, at) > wait + SLEEP_SLACK);
         if slept || inner.expire(now, wall) {
-            inner.key = None;
+            inner.drop_keys();
             inner.timer_running = false;
             return Tick::Locked;
         }
-        let wait = match (inner.auto.idle, inner.last_use) {
+        let wait = match (inner.auto.idle, inner.last_used()) {
             (Some(idle), Some((at, at_wall))) => idle.saturating_sub(now.saturating_duration_since(at).max(since(wall, at_wall))),
             _ => TICK_MAX,
         }
@@ -904,6 +965,109 @@ impl Credentials {
         inner.last_tick = Some((wall, wait));
         Tick::Wait(wait)
     }
+}
+
+impl Credentials {
+    // ---------- Modo portable cifrado ----------
+
+    fn data_dir(&self) -> PathBuf {
+        self.path.parent().map(Path::to_path_buf).unwrap_or_default()
+    }
+
+    pub fn kdf(&self) -> Kdf {
+        self.kdf
+    }
+
+    /// Une la carpeta cifrada a la bóveda: se desbloquea con la misma contraseña y se bloquea con
+    /// ella (a mano, por inactividad, al suspender el equipo y al salir).
+    pub fn attach_data(&self, sh: Arc<datacrypt::Shared>) {
+        let mut inner = lock(&self.inner);
+        if sh.unlocked() {
+            inner.master = true;
+            inner.touch();
+        }
+        inner.data = Some(sh);
+    }
+
+    pub fn detach_data(&self) {
+        lock(&self.inner).data = None;
+    }
+
+    pub fn data_attached(&self) -> bool {
+        lock(&self.inner).data.is_some()
+    }
+
+    /// Desbloqueo de la carpeta cifrada y la bóveda con una sola contraseña. Las dos derivaciones
+    /// Argon2id corren en paralelo. La carpeta se abre si la contraseña abre `datakey.ntk`; la bóveda,
+    /// si además abre `credentials.vault`. Tras un cambio de maestra cortado (dos ranuras) queda solo
+    /// la ranura de la contraseña que abrió ambas.
+    pub fn data_unlock(&self, master: &str) -> Result<UnlockReport, String> {
+        if master.len() > MAX_PASSWORD {
+            return Err("Contraseña demasiado larga".into());
+        }
+        let mut inner = lock(&self.inner);
+        let data = inner.data.clone().ok_or("La carpeta de datos no está cifrada")?;
+        inner.throttle.check()?;
+        let dir = self.data_dir();
+        let kf = datacrypt::KeyFile::read(&dir)?.ok_or("Falta la llave de datos (datakey.ntk): sin ella los datos no se pueden abrir")?;
+        let vault = self.read().ok().flatten().filter(|(h, _)| h.mode == Mode::Master);
+        let (dres, vkey) = std::thread::scope(|s| {
+            let t = s.spawn(|| kf.unwrap(master));
+            let vk = vault.as_ref().and_then(|(h, b)| derive(master, &h.salt, h.kdf).ok().filter(|k| Self::decrypt(k, b).is_ok()));
+            (t.join().unwrap_or_else(|_| Err("No se pudo derivar la llave".into())), vk)
+        });
+        let (dk, slot) = match dres {
+            Ok(x) => x,
+            Err(e) => {
+                inner.throttle.fail();
+                return Err(e);
+            }
+        };
+        inner.throttle.reset();
+        data.set_key(Some(dk));
+        inner.master = true;
+        let vault_ok = vkey.is_some();
+        if let Some(k) = vkey {
+            inner.key = Some(k);
+        }
+        inner.touch();
+        if kf.slots() > 1 && (vault_ok || vault.is_none()) {
+            let mut kf = kf;
+            kf.keep_only(slot);
+            let _ = kf.write(&dir);
+        }
+        Ok(UnlockReport { vault: vault_ok, vault_exists: vault.is_some() })
+    }
+
+    /// Verifica la contraseña contra la llave de datos (para desactivar el cifrado), con la misma
+    /// espera creciente que al desbloquear.
+    pub fn verify_data(&self, master: &str) -> Result<(), String> {
+        if master.len() > MAX_PASSWORD {
+            return Err("Contraseña demasiado larga".into());
+        }
+        let mut inner = lock(&self.inner);
+        inner.throttle.check()?;
+        let kf = datacrypt::KeyFile::read(&self.data_dir())?.ok_or("La carpeta de datos no está cifrada")?;
+        match kf.unwrap(master) {
+            Ok(_) => {
+                inner.throttle.reset();
+                Ok(())
+            }
+            Err(e) => {
+                inner.throttle.fail();
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Resultado de desbloquear una carpeta cifrada.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockReport {
+    /// La bóveda también quedó desbloqueada.
+    pub vault: bool,
+    pub vault_exists: bool,
 }
 
 /// Llave de la bóveda tomada para una exportación o importación completa. Se borra al soltarse.
@@ -1619,6 +1783,104 @@ mod tests {
         assert!(c.set("s1", "a\rb", &[]).is_err());
         assert!(c.set(&"i".repeat(200), "x", &[]).is_err());
         assert!(c.set("", "x", &[]).is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    // ---------- Modo portable cifrado ----------
+
+    /// Bóveda con maestra y carpeta cifrada con la misma contraseña, ya unidas.
+    fn data_mode(pw: &str) -> (PathBuf, Credentials, std::sync::Arc<crate::datacrypt::Shared>) {
+        let d = dir();
+        let c = Credentials::with(&d, true, Box::new(MemKeys::default()), FAST);
+        c.create(pw).unwrap();
+        std::fs::write(d.join("settings.json"), b"{}").unwrap();
+        let layout = crate::datacrypt::Layout::new(&d, None);
+        let mut key = None;
+        crate::datacrypt::enable(&layout, pw, FAST, &crate::datacrypt::no_hook, &mut |_| {}, &mut key).unwrap();
+        let sh = crate::datacrypt::Shared::new();
+        crate::datacrypt::register(&d, &sh);
+        sh.set_key(key);
+        c.attach_data(sh.clone());
+        (d, c, sh)
+    }
+
+    #[test]
+    fn data_mode_unlocks_and_locks_with_the_vault() {
+        let (d, c, sh) = data_mode("maestra-larga");
+        assert!(sh.unlocked());
+        c.lock();
+        assert!(!sh.unlocked() && !c.status().unlocked, "un solo bloqueo para datos y bóveda");
+        assert!(crate::datacrypt::read(&d.join("settings.json")).is_err());
+        assert!(c.data_unlock("otra-maestra").is_err());
+        assert!(!sh.unlocked());
+        assert!(c.data_unlock("maestra-larga").unwrap_err().contains("Espera"), "misma espera creciente");
+        lock(&c.inner).throttle.retry_at = None;
+        let r = c.data_unlock("maestra-larga").unwrap();
+        assert!(r.vault && r.vault_exists);
+        assert!(sh.unlocked() && c.status().unlocked);
+        assert_eq!(crate::datacrypt::read(&d.join("settings.json")).unwrap(), b"{}");
+        // vault_unlock (la misma contraseña) también abre los datos.
+        c.lock();
+        c.unlock("maestra-larga").unwrap();
+        assert!(sh.unlocked());
+        // Restablecer la bóveda no se permite con la carpeta cifrada (los datos quedarían sin llave).
+        assert!(c.reset().unwrap_err().contains("cifrada"));
+        assert!(d.join("credentials.vault").exists());
+        crate::datacrypt::unregister(&sh);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn data_mode_autolock_clears_the_data_key_and_app_activity_counts() {
+        let (d, c, sh) = data_mode("maestra-larga");
+        c.set_autolock(5, false).unwrap();
+        let gen = c.autolock_arm().unwrap();
+        // La actividad en la app (data_touch) cuenta como uso.
+        let later = Instant::now() + Duration::from_secs(240);
+        sh.touch();
+        assert!(matches!(c.autolock_tick(gen, later, SystemTime::now() + Duration::from_secs(240)), Tick::Wait(_)));
+        assert_eq!(c.autolock_tick(gen, Instant::now() + Duration::from_secs(301), SystemTime::now() + Duration::from_secs(301)), Tick::Locked);
+        assert!(!sh.unlocked(), "la DEK se borra con la llave de la bóveda");
+        crate::datacrypt::unregister(&sh);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn data_mode_change_master_rewraps_and_survives_a_cut() {
+        let (d, c, sh) = data_mode("maestra-vieja");
+        c.change("maestra-vieja", "maestra-nueva").unwrap();
+        let kf = crate::datacrypt::KeyFile::read(&d).unwrap().unwrap();
+        assert_eq!(kf.slots(), 1);
+        assert!(kf.unwrap("maestra-vieja").is_err() && kf.unwrap("maestra-nueva").is_ok());
+        c.lock();
+        c.data_unlock("maestra-nueva").unwrap();
+        assert_eq!(crate::datacrypt::read(&d.join("settings.json")).unwrap(), b"{}", "los datos no se recifraron");
+
+        // Corte tras agregar la ranura nueva y antes de reescribir la bóveda: la vieja abre todo.
+        let mut kf = crate::datacrypt::KeyFile::read(&d).unwrap().unwrap();
+        let (dk, _) = kf.unwrap("maestra-nueva").unwrap();
+        kf.add_slot(&dk, "maestra-otra", FAST).unwrap();
+        kf.write(&d).unwrap();
+        c.lock();
+        lock(&c.inner).throttle.retry_at = None;
+        let r = c.data_unlock("maestra-nueva").unwrap();
+        assert!(r.vault, "la bóveda sigue con la anterior");
+        let kf = crate::datacrypt::KeyFile::read(&d).unwrap().unwrap();
+        assert_eq!(kf.slots(), 1, "queda la ranura de la contraseña que abrió ambas");
+        assert!(kf.unwrap("maestra-otra").is_err());
+        // Contraseña que abre los datos y no la bóveda (corte después del paso 2, simulado al revés).
+        let mut kf = kf;
+        kf.add_slot(&dk, "solo-datos-123", FAST).unwrap();
+        kf.write(&d).unwrap();
+        c.lock();
+        let r = c.data_unlock("solo-datos-123").unwrap();
+        assert!(!r.vault && r.vault_exists && sh.unlocked());
+        assert_eq!(crate::datacrypt::KeyFile::read(&d).unwrap().unwrap().slots(), 2, "sin abrir la bóveda no se poda nada");
+        assert!(c.unlock("solo-datos-123").unwrap_err().contains("no la bóveda"));
+        // Verificación para desactivar.
+        lock(&c.inner).throttle.retry_at = None;
+        assert!(c.verify_data("maestra-nueva").is_ok());
+        crate::datacrypt::unregister(&sh);
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

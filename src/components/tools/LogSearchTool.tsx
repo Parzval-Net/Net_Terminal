@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { ChevronRight, Copy, ExternalLink, FolderOpen, Search, Square } from "lucide-react";
+import { ChevronRight, Copy, Eye, ExternalLink, FolderOpen, Search, Square } from "lucide-react";
+import { FileViewer } from "../FileViewer";
+import { datacryptStatus } from "../../lib/api";
 import { persist, stored } from "../../lib/prefs";
 import {
   FILE_MB_CHOICES,
@@ -162,12 +164,18 @@ function FileGroup({
   open,
   onToggle,
   onOpen,
+  onView,
+  encrypted,
   onCopy,
 }: {
   file: FileHits;
   open: boolean;
   onToggle: () => void;
   onOpen: (f: FileHits, reveal: boolean) => void;
+  /** Visor dentro de la app (descifra en memoria; la única forma de leerlo con la carpeta cifrada). */
+  onView: (f: FileHits) => void;
+  /** Carpeta cifrada: no se ofrece abrir con otra aplicación (habría que escribirlo en claro). */
+  encrypted: boolean;
   onCopy: (h: Hit) => void;
 }) {
   const { name, dir } = fileParts(file.rel);
@@ -199,6 +207,17 @@ function FileGroup({
         </button>
         <button
           type="button"
+          onClick={() => onView(file)}
+          title={encrypted ? "Ver el archivo descifrado en la app" : "Ver el archivo en la app"}
+          aria-label={`Ver ${name}`}
+          className="h-7 px-1.5 inline-flex items-center gap-1 rounded-md text-[12px] text-muted hover:text-fg hover:bg-hover"
+        >
+          <Eye size={13} />
+          <span className="hidden @[52rem]:inline">Ver</span>
+        </button>
+        {!encrypted && (
+        <button
+          type="button"
           onClick={() => onOpen(file, false)}
           title="Abrir archivo con la aplicación del sistema"
           aria-label={`Abrir ${name}`}
@@ -207,6 +226,7 @@ function FileGroup({
           <ExternalLink size={13} />
           <span className="hidden @[52rem]:inline">Abrir archivo</span>
         </button>
+        )}
         <button
           type="button"
           onClick={() => onOpen(file, true)}
@@ -278,6 +298,13 @@ export default function LogSearchTool({ visible }: { visible?: boolean }) {
       if (!n.delete(key(f))) n.add(key(f));
       return n;
     });
+  const [viewing, setViewing] = useState<FileHits | null>(null);
+  const [encrypted, setEncrypted] = useState(false);
+  useEffect(() => {
+    datacryptStatus()
+      .then((s) => setEncrypted(!!s?.encrypted))
+      .catch(() => {});
+  }, []);
   const openFile = (f: FileHits, reveal: boolean) => {
     setError("");
     invoke("logsearch_open", { kind: f.kind, rel: f.rel, reveal }).catch((e) => setError(String(e)));
@@ -427,12 +454,13 @@ export default function LogSearchTool({ visible }: { visible?: boolean }) {
         >
           <div className="space-y-2">
             {files.map((f) => (
-              <FileGroup key={key(f)} file={f} open={!collapsed.has(key(f))} onToggle={() => toggle(f)} onOpen={openFile} onCopy={copy} />
+              <FileGroup key={key(f)} file={f} open={!collapsed.has(key(f))} onToggle={() => toggle(f)} onOpen={openFile} onView={setViewing} encrypted={encrypted} onCopy={copy} />
             ))}
           </div>
         </Section>
       )}
       {!running && summary && files.length === 0 && !error && <p className="text-[12.5px] text-muted">Sin coincidencias.</p>}
+      {viewing && <FileViewer kind={viewing.kind} rel={viewing.rel} onClose={() => setViewing(null)} />}
     </div>
   );
 }

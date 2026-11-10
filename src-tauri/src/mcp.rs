@@ -674,6 +674,12 @@ fn handle_with(srv: &McpServer, cfg: &McpConfig, meta: &mut ReqMeta, msg: &Value
         }
         Ok(out)
     };
+    // Carpeta cifrada bloqueada (o convirtiéndose): ni herramientas, ni recursos, ni prompts.
+    if !matches!(method, "initialize" | "ping") {
+        if let Some(why) = host.blocked() {
+            return Some(rpc_error(id, -32000, &format!("NetTerminal no atiende agentes ahora: {why}")));
+        }
+    }
     let result: Result<Value, RpcErr> = match method {
         "initialize" => {
             let asked = params["protocolVersion"].as_str().unwrap_or("");
@@ -781,6 +787,10 @@ impl Host for AppHost {
 
     fn topology_path(&self) -> PathBuf {
         self.state().files.path(crate::datafiles::Kind::Topology)
+    }
+
+    fn blocked(&self) -> Option<&'static str> {
+        crate::datacrypt::unavailable(&self.state().data_dir)
     }
 
     fn query_ui(&self, kind: &str, args: Value) -> Option<Value> {

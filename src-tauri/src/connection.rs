@@ -705,6 +705,23 @@ impl ConnectionManager {
         &self.triggers
     }
 
+    /// Pestañas con grabación de log activa (cifrar o descifrar la carpeta exige que no haya).
+    pub fn logging_count(&self) -> usize {
+        lock(&self.conns).values().filter(|c| !c.sink.exited.load(Ordering::SeqCst) && lock(&c.sink.log).is_some()).count()
+    }
+
+    /// Detiene todas las grabaciones de log (al bloquear, si así se pidió). Devuelve los ids.
+    pub fn stop_all_logging(&self) -> Vec<String> {
+        let map = lock(&self.conns);
+        let mut ids = Vec::new();
+        for (id, c) in map.iter() {
+            if lock(&c.sink.log).take().is_some() {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
     /// Activa o desactiva el log. Devuelve la ruta del archivo cuando se activa.
     pub fn set_logging(
         &self,
@@ -815,7 +832,9 @@ fn newline_of(session: &Session) -> &'static str {
 fn resumable_log(dir: &Path, path: &Path) -> Option<PathBuf> {
     let dir = dir.canonicalize().ok()?;
     let path = path.canonicalize().ok()?;
-    (path.starts_with(&dir) && path.extension().is_some_and(|e| e == "log") && path.is_file()).then_some(path)
+    // `.log` o, en una carpeta cifrada, `.log.nte`.
+    let ext_ok = path.extension().is_some_and(|e| e == "log") || path.to_string_lossy().ends_with(".log.nte");
+    (path.starts_with(&dir) && ext_ok && path.is_file()).then_some(path)
 }
 
 

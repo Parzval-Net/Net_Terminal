@@ -5,6 +5,7 @@
 //! archivos, manda el cifrado: el `.txt` se ignora y se borra al desbloquear la nota.
 //! Las notas protegidas no entran en la búsqueda ni las expone ninguna otra función.
 
+use crate::datacrypt as dfs;
 use crate::seal::{self, derive, random, write_atomic, Kdf, Throttle, KDF_DEFAULT};
 use serde::Serialize;
 use std::fs;
@@ -53,12 +54,11 @@ fn path_for(dir: &Path, name: &str, ext: &str) -> Result<PathBuf, String> {
 
 pub fn list(dir: &Path) -> Vec<NoteInfo> {
     let _ = fs::create_dir_all(dir);
-    let mut notes: Vec<NoteInfo> = fs::read_dir(dir)
+    let mut notes: Vec<NoteInfo> = dfs::read_dir(dir)
         .into_iter()
         .flatten()
-        .flatten()
         .filter_map(|e| {
-            let path = e.path();
+            let path = e.path.clone();
             let protected = match path.extension()?.to_str()? {
                 TXT => false,
                 ENC => true,
@@ -93,7 +93,7 @@ pub fn read(dir: &Path, name: &str) -> Result<String, String> {
     }
     // Lectura tolerante: una nota guardada en Windows-1252 por otro editor no debe verse vacía
     // (y sobrescribirse con la primera tecla).
-    let bytes = fs::read(file_for(dir, name)?).map_err(|e| e.to_string())?;
+    let bytes = dfs::read(&file_for(dir, name)?).map_err(|e| e.to_string())?;
     Ok(String::from_utf8(bytes).unwrap_or_else(|e| e.into_bytes().iter().map(|&b| b as char).collect()))
 }
 
@@ -109,21 +109,21 @@ fn write_txt(dir: &Path, name: &str, content: &str) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = file_for(dir, name)?;
     // Atómico (temporal único, fsync y rename): un corte a mitad de guardado deja la nota anterior intacta.
-    write_atomic(&path, content.as_bytes())
+    dfs::write_atomic(&path, content.as_bytes())
 }
 
 pub fn rename(dir: &Path, from: &str, to: &str) -> Result<String, String> {
     let (src, dst) = if is_protected(dir, from) {
         // Un .txt sobrante del mismo nombre se descarta: manda el cifrado.
-        let _ = fs::remove_file(file_for(dir, from)?);
+        let _ = dfs::remove_file(&file_for(dir, from)?);
         (enc_for(dir, from)?, enc_for(dir, to)?)
     } else {
         (file_for(dir, from)?, file_for(dir, to)?)
     };
-    if file_for(dir, to)?.exists() || enc_for(dir, to)?.exists() {
+    if dfs::exists(&file_for(dir, to)?) || enc_for(dir, to)?.exists() {
         return Err("Ya existe una nota con ese nombre".into());
     }
-    fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+    dfs::rename(&src, &dst).map_err(|e| e.to_string())?;
     Ok(dst.file_stem().unwrap_or_default().to_string_lossy().into_owned())
 }
 
@@ -132,10 +132,10 @@ pub fn delete(dir: &Path, name: &str) -> Result<(), String> {
     let txt = file_for(dir, name)?;
     if enc.exists() {
         fs::remove_file(&enc).map_err(|e| e.to_string())?;
-        let _ = fs::remove_file(&txt);
+        let _ = dfs::remove_file(&txt);
         return Ok(());
     }
-    fs::remove_file(txt).map_err(|e| e.to_string())
+    dfs::remove_file(&txt).map_err(|e| e.to_string())
 }
 
 /// Coincidencia de búsqueda en una nota.
@@ -169,7 +169,7 @@ pub fn search(dir: &Path, query: &str) -> Vec<NoteMatch> {
             continue;
         }
         let Ok(path) = file_for(dir, &note.name) else { continue };
-        if fs::metadata(&path).map(|m| m.len() > SEARCH_MAX_FILE).unwrap_or(true) {
+        if dfs::metadata(&path).map(|m| m.len() > SEARCH_MAX_FILE).unwrap_or(true) {
             continue;
         }
         let Ok(text) = read(dir, &note.name) else { continue };
@@ -371,7 +371,7 @@ impl SecureNotes {
         seal_write(&enc, &key, self.kdf, salt, &content)?;
         // Se borra el original. En SSD/APFS sobrescribir antes de borrar no garantiza nada
         // (copy-on-write, nivelación de desgaste): para eso está el cifrado de disco del sistema.
-        fs::remove_file(&txt).map_err(|e| format!("La nota quedó cifrada, pero no se pudo borrar el original: {e}"))?;
+        dfs::remove_file(&txt).map_err(|e| format!("La nota quedó cifrada, pero no se pudo borrar el original: {e}"))?;
         let mut inner = self.inner();
         inner.open = Some(Unlocked { name: name.to_string(), key, kdf: self.kdf, salt, idle: idle(idle_secs), last: Instant::now() });
         Ok(())
@@ -396,7 +396,7 @@ impl SecureNotes {
         };
         inner.throttle.reset();
         // Restos en claro de un corte anterior (ver encabezado del módulo).
-        let _ = fs::remove_file(file_for(dir, name)?);
+        let _ = dfs::remove_file(&file_for(dir, name)?);
         inner.open = Some(Unlocked { name: name.to_string(), key, kdf: h.kdf, salt: h.salt, idle: idle(idle_secs), last: Instant::now() });
         Ok(text)
     }

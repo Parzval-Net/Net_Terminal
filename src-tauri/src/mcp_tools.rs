@@ -79,6 +79,10 @@ pub trait Host {
     fn logs_dir(&self) -> PathBuf;
     fn notes_dir(&self) -> PathBuf;
     fn topology_path(&self) -> PathBuf;
+    /// Datos no disponibles (carpeta cifrada bloqueada o convirtiéndose): el motivo.
+    fn blocked(&self) -> Option<&'static str> {
+        None
+    }
     /// Consulta a la interfaz (datos vivos, catálogo, diff, riesgo). None si no respondió a tiempo.
     fn query_ui(&self, kind: &str, args: Value) -> Option<Value>;
     fn ask(&self, req: &ApprovalReq) -> Verdict;
@@ -687,14 +691,14 @@ fn session_info(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
 /// Topología guardada (topology.json), leída sin modificarla.
 fn persisted_topology(host: &dyn Host) -> Result<Value, String> {
     let path = host.topology_path();
-    let meta = match std::fs::metadata(&path) {
+    let meta = match crate::datacrypt::metadata(&path) {
         Ok(m) => m,
         Err(_) => return Ok(json!({ "nodes": [], "links": [] })),
     };
     if meta.len() > crate::datafiles::MAX_TOPOLOGY_BYTES as u64 {
         return Err("topology.json supera el tamaño máximo".into());
     }
-    let v: Value = serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?).map_err(|_| "topology.json no es válido".to_string())?;
+    let v: Value = serde_json::from_slice(&crate::datacrypt::read(&path).map_err(|e| e.to_string())?).map_err(|_| "topology.json no es válido".to_string())?;
     Ok(v.get("topology").cloned().unwrap_or_else(|| json!({ "nodes": [], "links": [] })))
 }
 

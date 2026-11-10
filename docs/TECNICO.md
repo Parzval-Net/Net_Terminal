@@ -15,6 +15,7 @@ Detalle técnico de NetTerminal: funciones completas, seguridad, formatos, API d
 - [Seguridad](#seguridad)
   - [Archivo cifrado de NetTerminal (.ntx)](#archivo-cifrado-de-netterminal-ntx)
   - [Bloqueo automático de la bóveda](#bloqueo-automático-de-la-bóveda)
+  - [Modo portable cifrado](#modo-portable-cifrado)
 - [Packs de comandos](#packs-de-comandos)
 - [Topología CDP / LLDP, ruteo y manual](#topología-cdp--lldp-ruteo-y-manual)
 - [CLI Lab](#cli-lab)
@@ -247,6 +248,8 @@ Por defecto las sesiones se guardan en el directorio de configuración del siste
 - **Linux**: el `.AppImage` es autocontenido.
 - **macOS**: `NetTerminal.app` es autocontenido.
 
+Opcional: el [modo portable cifrado](#modo-portable-cifrado) cifra también sesiones, ajustes, notas, historial, topología, respaldos y logs con la contraseña maestra.
+
 ## Ejecutar sin permisos de administrador
 
 | Sistema | Cómo | Requisito previo |
@@ -280,6 +283,7 @@ Auditoría del binario con REA (Ghidra y utilidades nativas de macOS) y revisió
 | Importación: tope de 64 MB, validación de host, usuario y carpeta; se descartan contraseñas, `ssh_args`, comandos al conectar, proxies y túneles | Con tests |
 | Archivo cifrado (.ntx): XChaCha20-Poly1305 con llave Argon2id (256 MiB, t=3) y cabecera autenticada como AAD; todo el cifrado en Rust; contraseña del archivo de 12 caracteres o más en un campo propio que se borra de memoria; contraseñas de la bóveda solo con la casilla (apagada por defecto), aviso, la palabra `EXPORTAR` y, con contraseña maestra, volver a ingresarla (verificada en Rust); nunca pasan por JS. Al importar: mismo saneamiento que los importadores, `ssh_args` con `check_extra_args`, túneles con `tunnel_args`, ajustes sensibles excluidos e ignorados, y contraseñas solo a sesiones importadas con el mismo destino | Con tests (Rust y Node) |
 | Bloqueo automático de la bóveda con contraseña maestra: por inactividad y al notar una suspensión, con temporizador solo mientras está desbloqueada; la llave se borra de memoria y se avisa `creds-changed` | Con tests |
+| Modo portable cifrado (opcional): DEK aleatoria envuelta con Argon2id, archivos por bloques XChaCha20-Poly1305 con nonce aleatorio, número de bloque, identificador de archivo y cierre en el AAD; conversión con copia verificada y reanudable; nada se muestra ni se lee antes de desbloquear ([detalle](#modo-portable-cifrado)) | Con tests |
 | Túneles SSH: puertos y direcciones validados, escucha en 127.0.0.1 por defecto, aviso al usar 0.0.0.0 o túneles remotos, y doble validación con las reglas de argumentos extra | Con tests |
 | Alertas: expresiones con el motor lineal de Rust (sin ReDoS), sin respuestas automáticas, límite de avisos por regla | Con tests |
 | Envío desde Notas y botones: pasa por el mismo motor de riesgo que el catálogo; lo que puede cortar servicio se confirma siempre | Código |
@@ -348,6 +352,7 @@ La llave de la bóveda se toma una sola vez para todo el flujo (`Credentials::ho
 | Excluida | `tftpPort`, `httpPort`, `syslogPort`, `syslogSave`, `ftpPort`, `snmpTrapPort`, `snmpTrapBind`, `serverGuard` | Servidores integrados: un archivo podría dejarlos en todas las interfaces, sin filtro de clientes ni detención automática |
 | Excluida | `autoLegacySsh` | Algoritmos SSH débiles |
 | Excluida | `vaultAutoLockMin`, `vaultLockOnSleep` | Política local de la bóveda |
+| Excluida | `dataLockStopLogs` | Política local del modo portable cifrado (logs al bloquear) |
 | Excluida | `logsDir` | Ruta local |
 | Excluida | `monitors`, `topoSources` | Se encienden solos o envían comandos a los equipos |
 | Excluida | `topology`, `topoSnapshots`, `sidebarOrder`, `deviceInfo`, `speedHistory`, `updateDismissed` | Datos de este equipo |
@@ -386,6 +391,51 @@ Ajustes › Credenciales: "Bloquear tras inactividad" (nunca, 5, 15, 30, 60 o 24
 Inactividad = tiempo desde el último uso de la llave (desbloquear, autocompletar, guardar o consultar contraseñas, saltos, exportar, importar). La configuración la aplica Rust al arrancar leyendo `vaultAutoLockMin` y `vaultLockOnSleep` de settings.json (`autolock_from_settings`; un valor inválido o sobre 24 h queda apagado), sin depender de que la interfaz la envíe; la interfaz la vuelve a enviar al cargar y al cambiarla. Se cuenta con el mayor entre el reloj monótono y la hora del sistema, así el tiempo suspendido también cuenta. Sin hilos en reposo: se evalúa al usar la bóveda y con un temporizador (`arm_autolock` en `lib.rs`, `autolock_tick` en `credentials.rs`) que existe solo mientras la bóveda está desbloqueada y la opción activa; despierta como mucho cada 30 s y termina al bloquearse. Al vencer, la llave (`Zeroizing`) se borra de memoria y se emite `creds-changed`. Mismo patrón que las notas protegidas (vencimiento evaluado al usar la llave).
 
 Suspensión, sin dependencias nuevas: (a) al usar la bóveda, si la hora del sistema avanzó más de 60 s por sobre el reloj monótono desde el último uso (en macOS y Linux el reloj monótono se detiene al suspender); (b) el temporizador nota que no corrió durante bastante más que su espera (vale también donde el reloj monótono sigue contando). Un ajuste del reloj hacia adelante bloquea igual (lado seguro). El bloqueo de pantalla sin suspensión no se detecta: requeriría APIs de cada sistema.
+
+### Modo portable cifrado
+
+Opcional, apagado por defecto y solo en la edición portable (Ajustes › Credenciales › Cifrado de la carpeta portable). Cifra en reposo, con la contraseña maestra de la bóveda: sesiones, ajustes, topología, notas (las no protegidas), historial de comandos y destinos recientes, respaldos de configuración (con su llave y huellas de secretos), logs de sesión (también en una carpeta de logs elegida por el usuario) y auditoría MCP, más todas sus copias (`.bak`, `.bak2`, `.v<N>.bak.json`, `*.corrupt-<fecha>.json`). Código: `src-tauri/src/datacrypt.rs` (formato, llave de datos, capa de archivos, conversión), `datamode.rs` (comandos), `credentials.rs` (desbloqueo y bloqueo junto con la bóveda), `src/lib/dataCrypt.ts`, `components/DataGate.tsx`, `DataCryptSettings.tsx` y `FileViewer.tsx`.
+
+**Llaves.** Una llave de datos aleatoria de 256 bits (DEK) cifra todo. `datakey.ntk` la guarda envuelta con XChaCha20-Poly1305 por una llave derivada de la maestra con Argon2id (los mismos parámetros que la bóveda: 64 MiB, t = 3, p = 1; al leer se aceptan hasta 256 MiB, t = 10, p = 8). Es independiente de `credentials.vault`: borrar o dañar la bóveda no deja los datos sin llave. Al desbloquear corren en paralelo las dos derivaciones (bóveda y datos). Cambiar la maestra reenvuelve la DEK sin recifrar nada, con dos ranuras y en este orden: (1) se agrega la ranura de la nueva junto a la vieja, (2) se reescribe la bóveda, (3) se quita la vieja. Un corte en cualquier punto deja una contraseña que abre todo; al desbloquear con dos ranuras se poda la que no abrió la bóveda. Restablecer la bóveda se rechaza con la carpeta cifrada. Las llaves en memoria son `Zeroizing` y se borran al bloquear.
+
+| `datakey.ntk` | Contenido |
+| --- | --- |
+| 0..8 | `NTDATKEY` |
+| 8 | Versión (1). Una mayor se rechaza con un mensaje claro y sin tocar nada |
+| 9 | Ranuras (1 o 2) |
+| 10..26 | Identificador de la DEK (público; va en cada archivo) |
+| 26.. | Por ranura (100 bytes): Argon2id `m`, `t`, `p` (u32 LE), sal (16), nonce (24), DEK envuelta (32 + etiqueta 16). AAD = magia, versión, identificador y los primeros 52 bytes de la ranura |
+
+**Archivo de datos.** El nombre lógico `x` vive en disco como `x.nte` (una versión anterior no ve esos nombres y nunca los reescribe). Cabecera de 112 bytes y bloques:
+
+| Bytes | Contenido |
+| --- | --- |
+| 0..6 | `NTDATA` |
+| 6 | Versión (1) |
+| 7 | 0 (reservado) |
+| 8..24 | Identificador de la DEK |
+| 24..40 | Identificador del archivo (aleatorio) |
+| 40..64 | Nonce del envoltorio |
+| 64..112 | Llave propia del archivo (aleatoria, 256 bits) envuelta con la DEK, AAD = bytes 0..64 |
+| Bloques | u32 LE con el largo del texto cifrado (bit 31 = cierre), nonce aleatorio (24) y texto cifrado + etiqueta. AAD = bytes 0..40 de la cabecera, número de bloque (u64 LE) y el bit de cierre |
+
+El último bloque es vacío y marca el cierre; nada puede venir después. Un bloque alterado, quitado, reordenado o traído de otro archivo no descifra (otro número, otra llave de archivo y otro identificador en el AAD); un archivo cortado se nota por la falta del cierre. Los archivos completos (ajustes, sesiones, notas…) se escriben en bloques de 256 KiB con la escritura atómica de siempre y se exige el cierre al leer. Logs y auditoría se anexan sin reescribir: cada escritura del log es un bloque (nonce nuevo, número siguiente); al cerrar se agrega el cierre y al retomar (reconexión, anexar) se verifica el último bloque, se quita el cierre o los bytes de un bloque a medias tras un corte y se sigue numerando con nonces nuevos (no se reutiliza un nonce aunque se reescriba un número). Dos pestañas que anexan al mismo log comparten el escritor: los bloques quedan en orden. Un log sin cierre (grabación en curso o cortada) se lee hasta el último bloque íntegro y se avisa.
+
+**Capa de archivos.** Los módulos de datos (`session_store`, `datafiles`, `history`, `notes`, `backups`, `mcp_audit`, `logfile`, `logsearch`, `mcp_tools`) usan `datacrypt::read`, `write_atomic`, `read_dir`, `rename`, `copy`… con el mismo contrato que `std::fs`. Fuera de una carpeta cifrada registrada son `std::fs` tal cual (cuesta leer un `AtomicBool`); el log en claro escribe en el mismo `File` de siempre (una rama por escritura, ninguna por byte) y el camino de la salida de la terminal no cambia. Quedan fuera, con su propio cifrado o en claro a propósito: `credentials.vault`, notas protegidas (`.ntenc`), la carpeta compartida (TFTP, HTTP y FTP), scripts, plugins, packs de comandos propios y los mensajes de Syslog guardados. Los nombres, tamaños y fechas de los archivos siguen visibles (por ejemplo el nombre de un equipo en `backups/<equipo>/` o la sesión en el nombre de un log).
+
+**Al abrir y al bloquear.** Con `datakey.ntk` presente, la carpeta se registra bloqueada al arrancar: `sessions.json` no se lee (`SessionStore::deferred`), `get_settings` y los guardados se rechazan, el respaldo diario y el bloqueo automático guardado esperan al desbloqueo, y la interfaz (`DataGate`) no monta la app hasta que la contraseña abre la DEK. Se bloquea con la bóveda (a mano, por inactividad o al suspender): se borra la DEK, la app queda montada pero oculta e inerte bajo la pantalla de desbloqueo y el backend no lee ni escribe datos; MCP responde que NetTerminal está bloqueado (salvo `initialize` y `ping`); se bloquea la nota protegida abierta. Las conexiones siguen. Cada log en curso sigue grabándose con la llave de su propio archivo (nunca la DEK), así la sesión no pierde evidencia; con el ajuste `dataLockStopLogs` («Detener las grabaciones de log al bloquear») se detienen y se avisa. Una reconexión o una rotación diaria con la carpeta bloqueada no puede abrir un log nuevo: sigue en el actual o queda sin log. Con la carpeta cifrada la actividad en la app (teclado o ratón, informada como mucho cada 20 s con `data_touch`) también cuenta para el bloqueo por inactividad, y cualquier lectura o escritura de datos cuenta como uso.
+
+**Conversión.** Activar exige la contraseña maestra (si no hay bóveda, el diálogo la crea en el mismo paso) y que no haya logs grabándose. Orden: (1) diario `datacrypt.journal`; (2) `datakey.ntk`, escrito y verificado al releerlo y abrirlo; (3) cada archivo: copia cifrada en un temporal con fsync, rename, verificación (SHA-256 del contenido descifrado igual al del original) y recién entonces se borra el original; (4) aviso para versiones anteriores y borrado del diario. Desactivar verifica primero que todos los archivos cifrados se descifran sin errores (si alguno está alterado no toca nada y los nombra), y luego hace lo mismo al revés y borra `datakey.ntk` al final. Cada paso es idempotente: tras un corte de energía o un pendrive extraído, al abrir se pide la contraseña y la app ofrece «Terminar» o «Revertir» antes de montarse (un diario sin llave se descarta solo: no se alcanzó a cifrar nada o ya estaba todo en claro). Si al convertir existe ya la otra versión con distinto contenido, ninguna se pierde: un claro que choca con un cifrado se cifra aparte como `<nombre>.encontrado-<fecha>.<ext>`, y al descifrar un claro con el mismo nombre se aparta como `<nombre>.antes-de-descifrar-<fecha>`. Borrar el original en claro de un pendrive o SSD no garantiza que desaparezca físicamente (nivelación de desgaste): lo dicen el diálogo y SECURITY.md.
+
+**Archivos en claro encontrados.** Con el modo activo un archivo cubierto en claro (lo dejó una versión anterior u otra herramienta) no se lee en silencio: la capa no lo ve y Ajustes › Credenciales lo lista con «Cifrar estos archivos» (mismo procedimiento que la conversión, con el apartado `.encontrado-` si choca con su versión cifrada). El aviso para versiones anteriores no cuenta.
+
+**Versiones anteriores.** Verificado con el código actual ante un archivo que no es JSON: `sessions.json` ilegible se copia como `*.corrupt-<fecha>.json`, se busca un respaldo y, si no hay, se reescribe con la sesión local de ejemplo; un `settings.json` ilegible termina reemplazado por los valores por defecto al guardar, y una nota ilegible puede sobrescribirse al editarla. Por eso los archivos cifrados usan otro nombre (`.nte`) y la carpeta lleva tres marcas: `datakey.ntk` (la reconoce esta versión y las siguientes; una versión de formato mayor da un mensaje claro sin tocar nada), `LEEME-DATOS-CIFRADOS.txt` y un `sessions.json` en claro con una sola sesión local llamada «Carpeta cifrada: ábrela con la versión de NetTerminal que la cifró o una posterior». Una versión anterior muestra esa sesión, no ve los datos cifrados y no los modifica; lo que cree en claro (ajustes, notas, logs) aparece después como archivo en claro encontrado.
+
+**Exportar descifrado y visor.** Buscar en logs, Respaldos (comparación incluida), el visor de la app y las herramientas MCP de lectura funcionan con archivos cifrados: se descifra en memoria, bloque a bloque, sin temporales en claro. «Abrir archivo» con otra aplicación no se ofrece con la carpeta cifrada (habría que escribirlo en claro); en su lugar están «Ver» (hasta 4 MB) y «Exportar descifrado…», que abre el diálogo de guardado del sistema desde Rust y rechaza un destino dentro de la carpeta de datos o de una carpeta cifrada. El archivo .ntx sigue igual (sus datos se leen y escriben por la misma capa).
+
+**Rendimiento** (Apple M2, compilación de release, `cargo test --release --lib -- --ignored --nocapture bench_datacrypt`): log con hora en fragmentos de 1 KB, 128 a 148 MB/s en claro y 79 a 84 MB/s cifrado (bloques de 1 KB: 145 MB/s; de 16 KB: 350 MB/s; de 256 KB: 417 MB/s), muy por encima de lo que entrega una sesión SSH, Telnet o serial. Guardar ajustes de unos 30 KB con fsync: 6,3 ms en claro y 7,2 ms cifrado; 200 sesiones: 6,4 y 7,2 ms; leer ajustes: 0,14 y 0,30 ms. Desbloqueo (Argon2id 64 MiB, t = 3): 101 ms solo los datos y 114 ms datos y bóveda en paralelo. Buscar en 64 MB de logs: 186 ms en claro y 317 ms cifrados. Con el modo apagado no hay costo medible: mismas funciones de `std::fs` tras un `AtomicBool`.
+
+**Pruebas.** Rust (`datacrypt/tests.rs` e `integration_tests.rs`, más `credentials.rs`): ida y vuelta de varios tamaños, byte alterado en cada zona, truncado (sin cierre, a mitad de bloque, sin un bloque del medio), bloques reordenados, de otro archivo y cabecera o cierre ajenos, contraseña incorrecta y ranuras, anexar tras un corte y concurrencia de 8 hilos, la capa bloqueada y en conversión, activar y desactivar, corte en cada paso de la conversión (al cifrar y al descifrar) con retomar y revertir sin pérdida, desactivar con un archivo alterado, archivos en claro encontrados, carpeta de logs propia, lo que ve una versión anterior, cada módulo de datos sobre la carpeta cifrada (sin dejar nada en claro), la carpeta bloqueada que no lee ni escribe nada, el log en curso que sigue tras bloquear, el bloqueo automático que borra la DEK y el cambio de maestra con cortes. Node: `scripts/tests/dataCrypt.test.mjs`. Escenas del backend simulado: `?scene=data-enable&vault=portable` (activación) y `?data=encrypted` (desbloqueo; `?scene=data-lock` bloquea con una sesión abierta).
 
 Pendiente para distribución corporativa: firmar con Developer ID + notarización (macOS) y certificado de firma de código (Windows). Las limitaciones conocidas están en [SECURITY.md](../SECURITY.md#limitaciones-conocidas). Sin firma, AppLocker o Intune pueden bloquear la app. Los scripts Python ejecutan código local por diseño: en una carpeta portable compartida, revisa los scripts antes de ejecutarlos.
 
@@ -874,6 +924,7 @@ src-tauri/src/
   ftpserver.rs, ftpclient.rs Servidor FTP de la carpeta compartida y cliente FTP/FTPS
   snmp.rs                 Cliente SNMP v1/v2c/v3 y receptor de traps (con tests)
   credentials.rs, seal.rs Bóveda cifrada y notas protegidas (XChaCha20-Poly1305, Argon2id) y escritura atómica común
+  datacrypt.rs, datamode.rs Modo portable cifrado: formato, llave de datos, capa de archivos, conversión y comandos (con tests)
   plugins.rs, updates.rs  Plugins con verificación SHA-256, aviso de versiones y actualización firmada
   scripts.rs, netterminal.py Scripts Python: destinos, control de riesgo, secretos y API (con tests)
 ```
