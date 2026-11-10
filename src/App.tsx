@@ -1,6 +1,27 @@
 import { type ReactNode, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { moveItem } from "./lib/tabDrag";
-import { invoke } from "@tauri-apps/api/core";
+import {
+  addSessions,
+  cmdHistoryAdd,
+  cmdpackDelete,
+  cmdpackSave,
+  cmdpacksList,
+  credDelete,
+  credSet,
+  deleteSession as apiDeleteSession,
+  importScript,
+  listSessions,
+  logsDirSet,
+  mcpConfigure,
+  mcpDecide,
+  runScript as apiRunScript,
+  saveSession as apiSaveSession,
+  sendBreak,
+  serverRunning,
+  setLogging,
+  stopScript,
+  updateSessions as apiUpdateSessions,
+} from "./lib/api";
 import { Sidebar } from "./components/Sidebar";
 import { TabBar, type TabBarProps } from "./components/TabBar";
 import { VerticalTabs } from "./components/VerticalTabs";
@@ -15,17 +36,14 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { hopCloseNote, runningHops } from "./lib/hopTab";
 import { CloseManyMessage } from "./components/CloseManyMessage";
 import { CloseScope, summarizeClose, tabsToClose } from "./lib/closeAll";
-import { minTermFor, panelLayout } from "./lib/panelLayout";
 import { NotesPanel } from "./components/NotesPanel";
 import { CommandsPanel } from "./components/CommandsPanel";
 import { vendorFor } from "./lib/commands";
-import { DeviceInfo, detectDeviceInfo, deviceKey, promptHost, rememberDevice } from "./lib/lifecycle";
-import { CatalogEntry, Pack, PackCommand, Risk, buildCatalog, computeRisk, detectPlatform, orderPacks, riskLabel, validatePack } from "./lib/packs";
+import { CatalogEntry, Pack, PackCommand, Risk, buildCatalog, computeRisk, orderPacks, riskLabel, validatePack } from "./lib/packs";
 import type { ScpRequest } from "./components/tools/FileManager";
-import { runOnDevice } from "./lib/deviceRun";
 
 import { TemplateDialog, templateVars } from "./components/TemplateDialog";
-import { compile, effectiveRules, schemeForVendor } from "./lib/highlight";
+import { compile, effectiveRules } from "./lib/highlight";
 import { allFolders } from "./lib/folders";
 import { useMonitors } from "./lib/monitors";
 import { ButtonBar } from "./components/ButtonBar";
@@ -33,15 +51,19 @@ import type { ApprovalRequest } from "./components/ApprovalDialog";
 import { ScriptPrompts } from "./components/ScriptPrompts";
 import type { ScriptLaunch } from "./components/ScriptLaunchDialog";
 import type { Section } from "./components/SettingsModal";
-import type { Macro, UpdateInfo } from "./lib/settings";
+import type { Macro } from "./lib/settings";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BookOpen, NotebookPen, Pin, Search as SearchIcon, Sparkles, SquareTerminal, Wrench, X as XIcon, Zap, Plus } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { ConnStatus, Session, Tab, TabState, historyKey, tabTitle } from "./types";
-import { closeAllLabel, focusLabel, historyLabel, isMac, localOsVendor, modLabel, shortcutFor } from "./lib/platform";
+import { closeAllLabel, focusLabel, historyLabel, isMac, localOsVendor, modLabel } from "./lib/platform";
 import { presets, resolvePreset, useSystemDark } from "./lib/theme";
 import { Settings, logOptions, useSettings } from "./lib/settings";
 import { useAlerts } from "./lib/alerts";
+import { useUpdater } from "./lib/useUpdater";
+import { useShortcuts } from "./lib/useShortcuts";
+import { useAppLayout } from "./lib/useAppLayout";
+import { useTabPlatform } from "./lib/useTabPlatform";
 import { BroadcastBar, BroadcastDialog } from "./components/BroadcastDialog";
 import { Resolved, getBroadcastRun, isBroadcastRunning, publishWorkspace, stopBroadcast, resolveTargets, runBroadcast, targetLabel, useBroadcastTarget, useWorkspace } from "./lib/broadcast";
 import { closeLab, isLabRunning, labOwns, openLab, useLabOpen } from "./lib/cliLab";
@@ -178,92 +200,31 @@ function Workspace({
   const labOpen = useLabOpen();
   /** Exportar sesiones: undefined cerrado, "" todas, o la carpeta preseleccionada. */
   const [exportFolder, setExportFolder] = useState<string | undefined>(undefined);
-  const [sidebarOpen, setSidebarOpen] = useState(() => stored("sidebar", true));
+  const {
+    sidebarWidth,
+    focusMode,
+    setFocusMode,
+    peek,
+    setPeek,
+    peekRef,
+    notesOpen,
+    setNotesOpen,
+    commandsOpen,
+    setCommandsOpen,
+    rootRef,
+    rowRef,
+    areaRef,
+    sidebarAutoHidden,
+    sidebarHiddenBy,
+    sidebarShown,
+    panelOverlay,
+    panelWidth,
+    actions: layoutActions,
+  } = useAppLayout({ fontSize: settings.fontSize, floatingSidebar: settings.floatingSidebar, activeId });
   const controllers = useRef(new Map<string, TermController>());
 
-  useEffect(() => persist("sidebar", sidebarOpen), [sidebarOpen]);
-  // Ancho de la barra de sesiones: 256 px por defecto (w-64), entre 180 y 480 px.
-  const [sidebarWidth, setSidebarWidth] = useState(() => stored("sidebarWidth", 256));
-  // Se guarda al soltar (300 ms sin cambios), no en cada movimiento del arrastre.
-  useEffect(() => {
-    const t = window.setTimeout(() => persist("sidebarWidth", sidebarWidth), 300);
-    return () => window.clearTimeout(t);
-  }, [sidebarWidth]);
-  // Un solo cambio de ancho por cuadro: el arrastre emite mousemove más rápido que el refresco.
-  const sidebarPending = useRef<number | null>(null);
-  /** Modo foco: solo pestañas y terminal (sin barra de actividad, sesiones, paneles, botones ni estado). Se recuerda. */
-  const [focusMode, setFocusMode] = useState(() => stored("focusMode", false));
-  useEffect(() => persist("focusMode", focusMode), [focusMode]);
-  /** Barra de sesiones flotante abierta (solo con el ajuste activo y la barra acoplada cerrada). */
-  const [peek, setPeek] = useState(false);
-  const peekTimer = useRef<number | undefined>(undefined);
-  const peekRef = useRef<HTMLDivElement>(null);
-  /** Abierta con teclado o clic (no por el mouse encima): el foco entra al filtro y se cierra al salir de ella. */
-  const peekKb = useRef(false);
-  const [peekFocusReq, setPeekFocusReq] = useState(0);
   /** La barra de botones se oculta sola sin botones; esto la muestra igual (scripts) desde la paleta. */
   const [barForced, setBarForced] = useState(false);
-  const [notesOpen, setNotesOpenRaw] = useState(() => stored("notesOpen", false));
-  const [commandsOpen, setCommandsOpenRaw] = useState(() => stored("commandsOpen", false));
-  useEffect(() => persist("commandsOpen", commandsOpen), [commandsOpen]);
-  // Notas y Comandos comparten el lado derecho: abrir uno cierra el otro.
-  const setNotesOpen = (v: boolean | ((o: boolean) => boolean)) =>
-    setNotesOpenRaw((o) => {
-      const next = typeof v === "function" ? v(o) : v;
-      if (next) setCommandsOpenRaw(false);
-      return next;
-    });
-  const setCommandsOpen = (v: boolean | ((o: boolean) => boolean)) =>
-    setCommandsOpenRaw((o) => {
-      const next = typeof v === "function" ? v(o) : v;
-      if (next) setNotesOpenRaw(false);
-      return next;
-    });
-  const [notesWidth, setNotesWidth] = useState(() =>
-    stored("notesWidth", Math.round(Math.max(300, Math.min(380, window.innerWidth * 0.3)))),
-  );
-  // Paneles derechos (Comandos y Notas). Orden de preferencia cuando la terminal se angosta:
-  // 1) el panel se acopla y la terminal se reajusta; 2) si no cabe el mínimo, se oculta la barra de
-  // sesiones acoplada mientras el panel está abierto (la preferencia del usuario no cambia: al cerrar
-  // el panel vuelve sola); 3) si aun así no cabe, el panel se superpone con un ancho reducido.
-  // Mínimo de terminal: ~60 columnas del tamaño de letra actual más el relleno de xterm.
-  const minTerm = minTermFor(settings.fontSize);
-  const [rootW, setRootW] = useState(0);
-  const [vtabsW, setVtabsW] = useState(0);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const rowRef = useRef<HTMLDivElement | null>(null);
-  const areaRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const root = rootRef.current;
-    const row = rowRef.current;
-    if (!root || !row) return;
-    const measure = () => {
-      setRootW(root.clientWidth);
-      // Las pestañas verticales ocupan el borde izquierdo de la fila: el área de terminal empieza tras ellas.
-      setVtabsW(areaRef.current?.offsetLeft ?? 0);
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(root);
-    ro.observe(row);
-    // El área cambia sola al arrastrar el borde de las pestañas verticales (la fila no cambia de ancho).
-    if (areaRef.current) ro.observe(areaRef.current);
-    return () => ro.disconnect();
-  }, []);
-  const { sidebarAutoHidden, sidebarHiddenBy, sidebarShown, panelOverlay, panelWidth } = panelLayout({
-    rootW,
-    vtabsW,
-    focusMode,
-    sidebarOpen,
-    sidebarW: sidebarWidth,
-    toolsActive: activeId === "tools",
-    panelOpen: commandsOpen || notesOpen,
-    panelW: notesWidth,
-    minTerm,
-  });
-  useEffect(() => persist("notesOpen", notesOpen), [notesOpen]);
-  useEffect(() => persist("notesWidth", notesWidth), [notesWidth]);
-
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = dark ? "dark" : "light";
@@ -273,7 +234,7 @@ function Workspace({
 
   // Servidor MCP: se (re)configura cuando cambian sus ajustes.
   useEffect(() => {
-    invoke<string>("mcp_configure", {
+    mcpConfigure({
       enabled: settings.mcpEnabled,
       port: settings.mcpPort,
       token: settings.mcpToken,
@@ -298,13 +259,13 @@ function Workspace({
   // Si no está disponible (pendrive o unidad de red sin montar al abrir) se usa la
   // predeterminada solo en esta ejecución: el ajuste se conserva para la próxima vez.
   useEffect(() => {
-    invoke("logs_dir_set", { path: settings.logsDir || null }).catch((e) =>
+    logsDirSet(settings.logsDir || null).catch((e) =>
       toast(failText("usar la carpeta de logs", e) + " En esta ejecución se usa la predeterminada.", "error"),
     );
   }, [settings.logsDir, toast]);
 
   useEffect(() => {
-    invoke<Session[]>("list_sessions").then(setSessions).catch(console.error);
+    listSessions().then(setSessions).catch(console.error);
   }, []);
 
   /**
@@ -404,54 +365,12 @@ function Workspace({
     (msg) => toast(msg, "error"),
   );
 
-  // Actualizaciones: el latest.json firmado del repositorio de la app, al abrir y cada 6 h.
-  // Lo que se anuncia es lo que se instala, y siempre con confirmación.
-  const [update_, setUpdate] = useState<UpdateInfo | null>(null);
-  const [showNotes, setShowNotes] = useState(false);
-  const [installing, setInstalling] = useState<number | null>(null);
-  const dismissedRef = useRef(settings.updateDismissed);
-  dismissedRef.current = settings.updateDismissed;
-  useEffect(() => {
-    const check = () =>
-      invoke<UpdateInfo>("update_check")
-        .then((u) => {
-          if (u.newer && u.latest !== dismissedRef.current) setUpdate(u);
-        })
-        .catch(() => {});
-    // Unos segundos después de abrir, para no competir con el arranque.
-    const first = window.setTimeout(check, 4000);
-    const every = window.setInterval(check, 6 * 3600 * 1000);
-    // "Buscar ahora" en Ajustes muestra el aviso al instante.
-    const onFound = (e: Event) => setUpdate((e as CustomEvent<UpdateInfo>).detail);
-    window.addEventListener("nt-update-found", onFound);
-    const un = listen<{ downloaded: number; total: number | null }>("update-progress", ({ payload }) =>
-      setInstalling(payload.total ? Math.round((payload.downloaded / payload.total) * 100) : 0),
-    );
-    return () => {
-      window.clearTimeout(first);
-      window.clearInterval(every);
-      window.removeEventListener("nt-update-found", onFound);
-      un.then((f) => f());
-    };
-  }, []);
-  const installUpdate = () => {
-    const run = () => {
-      setInstalling(0);
-      invoke("update_install").catch((e) => {
-        setInstalling(null);
-        toastFail("instalar la actualización", e);
-      });
-    };
-    const open = Object.values(states).filter((x) => x.status === "connected").length;
-    if (open)
-      setConfirm({
-        title: "¿Actualizar y reiniciar?",
-        message: `Se cerrarán ${open} ${open === 1 ? "sesión abierta" : "sesiones abiertas"}. Las sesiones guardadas, notas y ajustes se conservan.`,
-        label: "Actualizar y reiniciar",
-        action: run,
-      });
-    else run();
-  };
+  const { update_, setUpdate, showNotes, setShowNotes, installing, installUpdate } = useUpdater({
+    dismissed: settings.updateDismissed,
+    states,
+    setConfirm,
+    toastFail,
+  });
   const lastTermRef = useRef<string | null>(null);
   useEffect(() => {
     if (activeId && activeId !== "tools") lastTermRef.current = activeId;
@@ -477,7 +396,7 @@ function Workspace({
    * mediciones, un SNMP en curso). Los servidores activos sí se pueden consultar: se avisa por ellos.
    */
   const requestCloseTools = async () => {
-    const running = await invoke<string[]>("server_running").catch(() => [] as string[]);
+    const running = await serverRunning().catch(() => [] as string[]);
     const hops = runningHops();
     if (!running.length && !hops.length) return closeTab("tools");
     const names: Record<string, string> = { tftp: "TFTP", http: "HTTP", ftp: "FTP", syslog: "Syslog", snmptrap: "traps SNMP" };
@@ -753,10 +672,11 @@ function Workspace({
     });
     if (!targets.length) return toast("Conecta una sesión antes de ejecutar el script", "error");
     try {
-      const run = await invoke<string>("run_script", {
-        script,
-        targets,
-        options: { allowChanges: l.allowChanges, parallel: l.parallel, maxMinutes: l.maxMinutes, vaultType: l.vaultType },
+      const run = await apiRunScript(script, targets, {
+        allowChanges: l.allowChanges,
+        parallel: l.parallel,
+        maxMinutes: l.maxMinutes,
+        vaultType: l.vaultType,
       });
       setScriptRun({ run, script, targets: targets.length });
       const modes = [l.allowChanges ? "permite cambios" : "", l.vaultType ? "puede escribir contraseñas guardadas" : ""].filter(Boolean);
@@ -770,44 +690,8 @@ function Workspace({
   const [userPacks, setUserPacks] = useState<Pack[]>([]);
   const [packsOpen, setPacksOpen] = useState(false);
   const [cmdEdit, setCmdEdit] = useState<{ vendor: string; initial?: PackCommand } | null>(null);
-  const [detecting, setDetecting] = useState(false);
-  /** Modelo y versión vistos en cada pestaña (barra de estado: ciclo de vida). */
-  const [tabDevice, setTabDevice] = useState<Record<string, DeviceInfo>>({});
-  /** Prompt con que se conectó cada pestaña: lo leído tras saltar a otro equipo no se guarda para su host. */
-  const tabHome = useRef(new Map<string, string>());
-
-  // Al activar el ciclo de vida se lee lo que ya muestra la pestaña activa (sin esperar otro show version).
-  useEffect(() => {
-    if (!settings?.lifecycleInfo || !activeTab || activeTab.session.type === "local") return;
-    const text = controllers.current.get(activeTab.id)?.recentText(150);
-    if (text) noteDevice(activeTab, text);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings?.lifecycleInfo]);
-
-  /** Sin enviar nada: modelo y versión de lo que muestra la pantalla, o lo recordado para el host. */
-  const noteDevice = (tab: Tab, text: string) => {
-    const here = promptHost(text);
-    let home = tabHome.current.get(tab.id);
-    if (!home && here) tabHome.current.set(tab.id, (home = here));
-    const key = deviceKey(tab.session);
-    const info = detectDeviceInfo(text);
-    if (info.model || info.version) {
-      setTabDevice((m) => {
-        const prev = m[tab.id];
-        return { ...m, [tab.id]: prev && prev.name === here ? { ...prev, ...info } : { ...info, name: here } };
-      });
-      if (key && here && here === home) {
-        const next = rememberDevice(settings.deviceInfo, key, { ...info, name: here });
-        if (next !== settings.deviceInfo) update({ deviceInfo: next });
-      }
-    } else if (key && !tabDevice[tab.id]) {
-      const saved = settings.deviceInfo[key];
-      if (saved?.model && (!saved.name || !here || saved.name === here)) setTabDevice((m) => ({ ...m, [tab.id]: saved }));
-    }
-  };
-
   const loadPacks = useCallback(() => {
-    invoke<unknown[]>("cmdpacks_list")
+    cmdpacksList()
       .then((raw) =>
         setUserPacks(
           raw
@@ -841,68 +725,28 @@ function Workspace({
   );
   const catalog = useMemo(() => buildCatalog(allPacks, settings.disabledPacks), [allPacks, settings.disabledPacks]);
 
-  /**
-   * Fija la plataforma de la pestaña (y de la sesión guardada). Con `vendor`, si la sesión
-   * resalta "Según ajustes", la pestaña toma el resaltado de ese fabricante (no se guarda).
-   */
-  const setTabPlatform = (tabId: string, platform: string | null, vendor?: string) => {
-    const tab = tabs.find((t) => t.id === tabId);
-    if (!tab) return;
-    const highlight = tab.session.highlight ?? (vendor ? schemeForVendor(vendor) : undefined);
-    const session = { ...tab.session, platform: platform ?? undefined, highlight };
-    setTabs((ts) => ts.map((t) => (t.id === tabId ? { ...t, session } : t)));
-    if (sessions.some((x) => x.id === session.id)) updateSessions([{ ...sessions.find((x) => x.id === session.id)!, platform: session.platform }]);
-  };
-
-  const detectPlatformNow = async () => {
-    const ctrl = activeCtrl();
-    const vendor = catalog.find((v) => v.id === settings.catalogVendor);
-    if (!ctrl || !activeTab || !vendor?.detectCommand) return toast("Este fabricante no tiene comando de detección", "error");
-    setDetecting(true);
+  const updateSessions = async (changed: Session[]) => {
     try {
-      const output = await runOnDevice(ctrl.connId(), vendor.detectCommand, 30);
-      const found = detectPlatform(vendor, output);
-      if (found) {
-        setTabPlatform(activeTab.id, found.id, vendor.id);
-        toast(`Plataforma detectada: ${found.label}`);
-      } else {
-        // Puede ser otro fabricante: se prueba con los demás.
-        for (const other of catalog.filter((v) => v.id !== vendor.id && v.detectCommand === vendor.detectCommand)) {
-          const p = detectPlatform(other, output);
-          if (p) {
-            update({ catalogVendor: other.id });
-            setTabPlatform(activeTab.id, p.id, other.id);
-            toast(`Plataforma detectada: ${other.name} ${p.label}`);
-            return;
-          }
-        }
-        // Muestra la versión que informó el equipo para que se elija la plataforma más cercana.
-        const ver = output.split(/\r?\n/).find((l) => /version/i.test(l))?.trim().slice(0, 80);
-        toast(`No se reconoció la plataforma${ver ? ` (${ver})` : ""}; elige la más cercana a mano`, "error");
-      }
-    } catch (e) {
-      toastFail("detectar la plataforma", e);
-    } finally {
-      setDetecting(false);
+      setSessions(await apiUpdateSessions(changed));
+    } catch (err) {
+      toastFail("guardar los cambios de las sesiones", err);
     }
   };
 
-  /**
-   * Sin enviar nada al equipo: busca en lo que ya muestra la pantalla (un show version,
-   * display version o get system status previo) la plataforma de algún fabricante.
-   */
-  const detectFromScreen = (tabId: string, preferred?: string) => {
-    // Las últimas 150 líneas bastan para un show version reciente y caben en los 20.000
-    // caracteres que revisa detectPlatform.
-    const text = controllers.current.get(tabId)?.recentText(150);
-    if (!text) return null;
-    const order = [...catalog].sort((a, b) => Number(b.id === preferred) - Number(a.id === preferred));
-    for (const v of order) {
-      const p = detectPlatform(v, text);
-      if (p) return { vendor: v, platform: p };
-    }
-    return null;
-  };
+  const { detecting, tabDevice, setTabDevice, tabHome, noteDevice, setTabPlatform, detectPlatformNow, detectFromScreen } = useTabPlatform({
+    settings,
+    update,
+    controllers,
+    tabs,
+    setTabs,
+    activeTab,
+    activeCtrl,
+    sessions,
+    updateSessions,
+    catalog,
+    toast,
+    toastFail,
+  });
 
   /** Agrega, edita o borra un comando en "Mis comandos" del fabricante. */
   const saveUserCommand = async (vendorId: string, cmd: PackCommand | null, replace?: string) => {
@@ -924,8 +768,8 @@ function Workspace({
       commands,
     };
     try {
-      if (commands.length) await invoke("cmdpack_save", { pack });
-      else await invoke("cmdpack_delete", { id });
+      if (commands.length) await cmdpackSave(pack);
+      else await cmdpackDelete(id);
       loadPacks();
       setCmdEdit(null);
     } catch (e) {
@@ -987,7 +831,7 @@ function Workspace({
       if (target.id !== activeId) setActiveId(target.id);
       ctrl.focus();
       // Historial por equipo: solo envíos explícitos (Notas, catálogo, botones), nunca teclas.
-      if (!session.scp) invoke("cmd_history_add", { key: historyKey(session), command: trimmed }).catch(() => {});
+      if (!session.scp) cmdHistoryAdd(historyKey(session), trimmed).catch(() => {});
     };
     const remote = session.type !== "local";
     // Notas y botones pasan por el mismo motor de riesgo que el catálogo. Lo que puede
@@ -1012,85 +856,46 @@ function Workspace({
   };
 
   // Atajos globales
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const action = shortcutFor(e);
-      if (!action) return;
-      e.preventDefault();
-      const cycle = (step: number) => {
-        if (!tabs.length) return;
-        const i = tabs.findIndex((t) => t.id === activeId);
-        setActiveId(tabs[(i + step + tabs.length) % tabs.length].id);
-      };
-      if (typeof action === "object") {
-        if (tabs[action.tab]) setActiveId(tabs[action.tab].id);
-        return;
-      }
-      switch (action) {
-        case "palette":
-          return setPaletteOpen((o) => !o);
-        case "newTab":
-          return newLocal();
-        case "closeTab":
-          return activeId && requestClose(activeId);
-        case "closeAll":
-          return requestCloseMany("all");
-        case "settings":
-          return setSettingsOpen(true);
-        case "notes":
-          return setNotesOpen((o) => !o);
-        case "commands":
-          return toggleCommands();
-        case "tools":
-          return toggleTools();
-        case "duplicateTab":
-          return activeTab && openTab(activeTab.session);
-        case "newSession":
-          return setModal({});
-        case "quickConnect":
-          return setQuickOpen(true);
-        case "cliLab":
-          return openLab();
-        case "toggleSidebar":
-          return h.toggleSidebar();
-        case "focusMode":
-          return setFocusMode((f) => !f);
-        case "find":
-          return activeCtrl()?.openFind();
-        case "history":
-          return activeTab && !activeTab.session.scp && h.openHistory();
-        case "nextTab":
-          return cycle(1);
-        case "prevTab":
-          return cycle(-1);
-        case "zoomIn":
-          return update((s) => ({ fontSize: Math.min(s.fontSize + 1, 28) }));
-        case "zoomOut":
-          return update((s) => ({ fontSize: Math.max(s.fontSize - 1, 9) }));
-        case "zoomReset":
-          return update({ fontSize: 13 });
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+  useShortcuts({
+    tabs,
+    activeId,
+    activeTab,
+    setActiveId,
+    update,
+    onPalette: () => setPaletteOpen((o) => !o),
+    onNewTab: newLocal,
+    onCloseTab: requestClose,
+    onCloseAll: () => requestCloseMany("all"),
+    onSettings: () => setSettingsOpen(true),
+    onNotes: () => setNotesOpen((o) => !o),
+    onCommands: toggleCommands,
+    onTools: toggleTools,
+    onDuplicateTab: (t) => openTab(t.session),
+    onNewSession: () => setModal({}),
+    onQuickConnect: () => setQuickOpen(true),
+    onCliLab: () => openLab(),
+    onToggleSidebar: () => h.toggleSidebar(),
+    onFocusMode: () => setFocusMode((f) => !f),
+    onFind: () => activeCtrl()?.openFind(),
+    onHistory: () => h.openHistory(),
   });
 
   const saveSession = async (session: Session, connect: boolean, cred: CredChange = { action: "keep" }) => {
     try {
-      let saved = await invoke<Session>("save_session", { session });
+      let saved = await apiSaveSession(session);
       // La contraseña va directo a la bóveda del backend; la sesión solo guarda el indicador.
       if (cred.action === "set") {
         try {
-          await invoke("cred_set", { sessionId: saved.id, password: cred.password });
+          await credSet(saved.id, cred.password);
         } catch (err) {
           toast(`La sesión se guardó, pero no la contraseña. Motivo: ${errText(err)}`, "error");
           // Sin una contraseña previa, el indicador no debe quedar activo.
           const before = sessions.find((x) => x.id === saved.id);
           if (!before?.save_password)
-            saved = await invoke<Session>("save_session", { session: { ...saved, save_password: undefined } });
+            saved = await apiSaveSession({ ...saved, save_password: undefined });
         }
       } else if (cred.action === "delete") {
-        await invoke("cred_delete", { sessionId: saved.id }).catch((err) =>
+        await credDelete(saved.id).catch((err) =>
           toastFail("borrar la contraseña guardada", err),
         );
       }
@@ -1124,20 +929,20 @@ function Workspace({
       existing.add(key(s));
     }
     if (updates.length) {
-      await invoke<Session[]>("update_sessions", { sessions: updates });
+      await apiUpdateSessions(updates);
       // Cambió el destino: la contraseña guardada no debe seguir al host nuevo.
       for (const u of updates) {
         if (!u.save_password && sessions.find((s) => s.id === u.id)?.save_password)
-          await invoke("cred_delete", { sessionId: u.id }).catch(() => {});
+          await credDelete(u.id).catch(() => {});
       }
     }
     // Una sola escritura aunque sean cientos de sesiones.
-    setSessions(await invoke<Session[]>(fresh.length ? "add_sessions" : "list_sessions", { sessions: fresh }));
+    setSessions(await addSessions(fresh));
     return fresh.length;
   };
 
   const deleteSession = async (id: string) => {
-    await invoke("delete_session", { id }).catch(console.error);
+    await apiDeleteSession(id).catch(console.error);
     setSessions((prev) => prev.filter((s) => s.id !== id));
   };
 
@@ -1152,11 +957,7 @@ function Workspace({
       return;
     }
     try {
-      const path = await invoke<string | null>("set_logging", {
-        id: ctrl.connId(),
-        enabled,
-        ...logOptions(settings),
-      });
+      const path = await setLogging(ctrl.connId(), enabled, logOptions(settings));
       const id = activeId;
       setStates((s) => (s[id] ? { ...s, [id]: { ...s[id], logPath: path } } : s));
     } catch (err) {
@@ -1178,19 +979,9 @@ function Workspace({
     return out;
   }, [tabs, states]);
 
-  const updateSessions = async (changed: Session[]) => {
-    try {
-      setSessions(await invoke<Session[]>("update_sessions", { sessions: changed }));
-    } catch (err) {
-      toastFail("guardar los cambios de las sesiones", err);
-    }
-  };
-
   const duplicateSession = async (s: Session) => {
     try {
-      const saved = await invoke<Session>("save_session", {
-        session: { ...s, id: "", name: `${s.name} (copia)`, created_at: "", save_password: undefined },
-      });
+      const saved = await apiSaveSession({ ...s, id: "", name: `${s.name} (copia)`, created_at: "", save_password: undefined });
       setSessions((prev) => [...prev, saved]);
       setModal({ session: saved });
     } catch (err) {
@@ -1225,14 +1016,6 @@ function Workspace({
   const focusTab = useCallback((tabId: string) => setActiveId(tabId), []);
   const reconnectTab = useCallback((tabId: string) => controllers.current.get(tabId)?.reconnect(), []);
 
-  /** Alterna la barra superpuesta con teclado o clic: al abrirla, el foco va a su filtro. */
-  const togglePeek = () => {
-    if (peek) return setPeek(false);
-    peekKb.current = true;
-    setPeek(true);
-    setPeekFocusReq((n) => n + 1);
-  };
-
   const h = useHandlers({
     // En tandas de 5 cada 1,5 s: abrir 40 sesiones de golpe satura AAA/TACACS y la CPU.
     openMany: (list: Session[]) =>
@@ -1251,50 +1034,8 @@ function Workspace({
     setSidebarOrder: (sidebarOrder: Record<string, string[]>) => update({ sidebarOrder }),
     requestClose,
     requestCloseMany,
-    toggleSidebar: () => {
-      // Con un panel derecho abierto en ventana angosta la barra queda oculta por la app: el atajo la
-      // muestra superpuesta (sin tocar la preferencia) en vez de alternar algo que no se ve.
-      if (sidebarAutoHidden) return togglePeek();
-      setPeek(false);
-      setSidebarOpen((o) => !o);
-    },
-
-    toggleFocus: () => setFocusMode((f) => !f),
+    ...layoutActions,
     newButton: () => setMacroEdit(null),
-    /**
-     * Clic en Sesiones: con el modo flotante y la barra cerrada deja abierta la superpuesta (el
-     * mouseenter ya la abrió: alternar aquí la cerraba justo al hacer clic; se cierra con Esc, un
-     * clic fuera o al salir el mouse); si no, acopla u oculta.
-     */
-    clickSessions: () => {
-      if (sidebarAutoHidden) togglePeek();
-      else if (settings.floatingSidebar && !sidebarOpen) {
-        window.clearTimeout(peekTimer.current);
-        peekKb.current = true;
-        setPeek(true);
-        setPeekFocusReq((n) => n + 1);
-      } else {
-        setPeek(false);
-        setSidebarOpen((o) => !o);
-      }
-    },
-    peekEnter: () => {
-      window.clearTimeout(peekTimer.current);
-      if (settings.floatingSidebar && !sidebarShown && !focusMode) setPeek(true);
-    },
-    peekLeave: () => {
-      window.clearTimeout(peekTimer.current);
-      peekTimer.current = window.setTimeout(() => {
-        // No se cierra con un menú contextual abierto ni mientras se escribe en el filtro.
-        const box = peekRef.current;
-        if (document.querySelector('[role="menu"]') || (box && box.contains(document.activeElement) && (peekKb.current || document.activeElement?.tagName === "INPUT"))) return;
-        setPeek(false);
-      }, 300);
-    },
-    pinSessions: () => {
-      setPeek(false);
-      setSidebarOpen(true);
-    },
     setTabLayout: (tabLayout: Settings["tabLayout"]) => update({ tabLayout }),
     reorderTab: (from: string, to: string, after: boolean) => setTabs((ts) => moveItem(ts, from, to, after)),
     renameTab: (id: string, title: string | undefined) => setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, title } : t))),
@@ -1360,16 +1101,6 @@ function Workspace({
     addCommand: (vendor: string) => setCmdEdit({ vendor }),
     editCommand: (c: CatalogEntry) => setCmdEdit({ vendor: settings.catalogVendor, initial: c }),
     openPacks: () => setPacksOpen(true),
-    resizeNotes: (w: number) => setNotesWidth(Math.max(260, Math.min(w, window.innerWidth * 0.7))),
-    resizeSidebar: (w: number) => {
-      const first = sidebarPending.current === null;
-      sidebarPending.current = Math.max(180, Math.min(w, 480));
-      if (first)
-        requestAnimationFrame(() => {
-          if (sidebarPending.current !== null) setSidebarWidth(sidebarPending.current);
-          sidebarPending.current = null;
-        });
-    },
     closeNotes: () => {
       setNotesOpen(false);
       activeCtrl()?.focus();
@@ -1382,19 +1113,19 @@ function Workspace({
     /** Copia un .py elegido en el equipo a la carpeta de scripts (el diálogo lo abre el backend). */
     addScript: async () => {
       try {
-        const name = await invoke<string | null>("import_script");
+        const name = await importScript();
         if (name) toast(`${name} quedó en la carpeta de scripts`);
       } catch (err) {
         toastFail("agregar el script", err);
       }
     },
-    stopScript: () => scriptRun && invoke("stop_script", { run: scriptRun.run }).catch(() => {}),
+    stopScript: () => scriptRun && stopScript(scriptRun.run).catch(() => {}),
     deleteMacro: (m: Macro) => update((s) => ({ macros: s.macros.filter((x) => x.id !== m.id) })),
     toggleLog,
     sendBreak: (id: string | undefined = activeId ?? undefined) => {
       const ctrl = id ? controllers.current.get(id) : undefined;
       if (!ctrl) return;
-      invoke("send_break", { id: ctrl.connId() }).catch((e) => toastFail("enviar Break", e));
+      sendBreak(ctrl.connId()).catch((e) => toastFail("enviar Break", e));
       ctrl.focus();
     },
     reconnect: () => activeCtrl()?.reconnect(),
@@ -1491,62 +1222,6 @@ function Workspace({
     tabLayout: settings.tabLayout,
     onTabLayout: h.setTabLayout,
   };
-
-  // Con la barra acoplada a la vista no queda barra flotante pendiente.
-  useEffect(() => {
-    if (sidebarShown) setPeek(false);
-  }, [sidebarShown]);
-
-  // Abierta con teclado o clic: el foco entra al filtro de sesiones (flecha abajo pasa al árbol).
-  useEffect(() => {
-    if (!peekFocusReq || !peek) return;
-    const id = requestAnimationFrame(() =>
-      peekRef.current?.querySelector<HTMLElement>('input[aria-label^="Filtrar sesiones"]')?.focus({ preventScroll: true }),
-    );
-    return () => cancelAnimationFrame(id);
-  }, [peekFocusReq, peek]);
-  useEffect(() => {
-    if (!peek) peekKb.current = false;
-  }, [peek]);
-
-  // Barra flotante: Esc o un clic fuera la cierran. Con el foco dentro, Esc la cierra y devuelve el foco al botón
-  // Sesiones (con texto en el filtro, el primer Esc lo limpia); desde fuera no consume la tecla (la terminal la recibe).
-  useEffect(() => {
-    if (!peek) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      const a = document.activeElement as HTMLElement | null;
-      if (a && peekRef.current?.contains(a)) {
-        if (a instanceof HTMLInputElement && a.value) return;
-        if (document.querySelector('[role="menu"]')) return;
-        e.preventDefault();
-        setPeek(false);
-        document.querySelector<HTMLElement>("[data-sessions-btn]")?.focus({ preventScroll: true });
-        return;
-      }
-      setPeek(false);
-    };
-    // Con el foco puesto por teclado, salir de la barra (Tab) la cierra: es un panel emergente, no un modal.
-    const onOut = (e: FocusEvent) => {
-      const to = e.relatedTarget as Element | null;
-      if (!peekKb.current || !to || peekRef.current?.contains(to) || to.closest('[role="menu"], [data-sessions-btn]')) return;
-      setPeek(false);
-    };
-    peekRef.current?.addEventListener("focusout", onOut);
-    const box = peekRef.current;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Element | null;
-      if (t?.closest('[role="menu"], [data-sessions-btn]') || peekRef.current?.contains(t)) return;
-      setPeek(false);
-    };
-    window.addEventListener("keydown", onKey, true);
-    window.addEventListener("mousedown", onDown, true);
-    return () => {
-      box?.removeEventListener("focusout", onOut);
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("mousedown", onDown, true);
-    };
-  }, [peek]);
 
   const sidebarEl = (extra: Partial<React.ComponentProps<typeof Sidebar>> = {}) => (
     <Sidebar
@@ -1910,7 +1585,7 @@ function Workspace({
           request={approvals[0]}
           pending={approvals.length}
           onDecide={(approved) => {
-            invoke("mcp_decide", { id: approvals[0].id, approved }).catch((e) => toastFail("registrar la decisión sobre la solicitud MCP", e));
+            mcpDecide(approvals[0].id, approved).catch((e) => toastFail("registrar la decisión sobre la solicitud MCP", e));
             setApprovals((a) => a.slice(1));
           }}
         />

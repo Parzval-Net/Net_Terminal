@@ -579,6 +579,14 @@ Las pruebas de Node importan los `.ts` de `src/lib` directamente y requieren Nod
 - **Pantalla de recuperación**: `ErrorBoundary` en la raíz (`src/main.tsx`) muestra el error, «Recargar la interfaz» y «Copiar detalle» (nombre y mensaje del error, pila y componentes: nunca contenido de terminales, notas ni ajustes) y registra el error en la consola. Recargar solo reinicia la interfaz: las conexiones viven en el proceso de la app (Rust) y no se cortan, pero la interfaz nueva empieza sin pestañas y no puede retomarlas; siguen activas en segundo plano hasta cerrar NetTerminal. Solo captura errores al dibujar, no los de manejadores de eventos ni de promesas.
 - **Escritura atómica**: `settings.json`, la topología, `sessions.json`, los packs de comandos, las notas `.txt` y el historial de comandos y destinos recientes se guardan con `seal::write_atomic`, igual que la bóveda y las notas protegidas: temporal único por escritura (`<archivo>.<aleatorio>.tmp`), fsync del archivo, rename y fsync de la carpeta, permisos 600 en Unix. Dos guardados simultáneos no se pisan y un corte de energía deja el archivo anterior o el nuevo completos. Al iniciar, un hilo aparte borra los temporales huérfanos (corte entre crear y renombrar) que calcen exactamente `<archivo>.<16 hex>.tmp` y tengan más de 1 hora, solo en la carpeta de datos, `notes` y `command-packs` (sin subcarpetas); otros `.tmp` no se tocan. Los formatos y nombres de archivo no cambian.
 
+### Organización del código de la interfaz
+
+`App.tsx` y `components/tools/TopologyTool.tsx` son contenedores: guardan el estado y reparten props; la lógica vive en hooks con interfaz explícita y las vistas en componentes. Al partir un hook o un componente se conservan las identidades que alimentan componentes memorizados (por eso `TopoLayers`, `LinkView` y `NodeView` reciben los mismos callbacks y mapas estables de siempre) y la ficha del enlace (`TipStore`) sigue fuera de React.
+
+- **`App.tsx`**: `lib/api.ts` agrupa las llamadas al backend (`invoke`) con nombre y tipo; `lib/useShortcuts.ts` (atajos globales), `lib/useUpdater.ts` (aviso y actualización), `lib/useTabPlatform.ts` (plataforma y ciclo de vida por pestaña) y `lib/useAppLayout.ts` (barra de sesiones, paneles de Notas y Comandos, modo foco y barra flotante, sobre `lib/panelLayout.ts`).
+- **Topología** (`components/tools/topology/`): `useTopoSnapshots`, `useTopoSelection` (equipo y ruta), `useTopoZoom` (con `useTopoSize`, sobre `lib/mapZoom.ts`), `useTopoHops` (saltos, rutas y credenciales, sobre `lib/hopTab.ts`) y `useTopoDiscovery` (consola y SNMP). Vistas: `TopoToolbar`, `TopoCanvas` (`TopoLayers`, `LinkTip`, `MapSummary`, `MapLegend`, `ZoomControls`) y `TopoPanel` con sus secciones (`PanelConfig`, `PanelStatus`, `PanelItem`). Constantes, tipos, estilos y persistencia de la interfaz: `topoConst`, `topoTypes`, `topoStyle`, `topoUi`.
+- Una prueba de rendimiento manual al tocar Topología: con `?scene=topology-big` (400 equipos) del backend simulado, arrastrar un equipo debe volver a dibujar solo sus enlaces y él (≈2 `LinkView` y 1 `NodeView` por movimiento) y el zoom y el arrastre del fondo no deben dibujar ninguna capa del mapa.
+
 ### Regenerar las capturas
 
 Con `npx vite --port 1430` en marcha, ejecuta `node scripts/screenshots/shoot.mjs` (requiere Google Chrome; acepta nombres de captura como argumentos y las variables `PORT`, `OUT`, `BASE` y `CDP_PORT`). Usa un backend simulado (`scripts/screenshots/mock.js`) con datos ficticios, nunca tus sesiones reales.
@@ -599,7 +607,9 @@ La narración usa Kokoro TTS local, con la voz de macOS como respaldo. El entorn
 assets/icon.svg           Fuente del ícono (regenerar con: npx tauri icon assets/icon.png)
 src/                      Frontend React
   components/             Sidebar, barra de actividad, pestañas, terminal, modal, paleta, barra de estado, controles de Ajustes (controls.tsx)
+    tools/topology/       Topología: hooks (useTopo*), vistas (TopoToolbar, TopoCanvas, TopoPanel) y capas del mapa
   lib/                    Atajos, temas, ajustes y motor de resaltado; accesibilidad: kbNav, useModal, useTabKeys
+                          api.ts (llamadas al backend), useShortcuts, useUpdater, useTabPlatform, useAppLayout
 src-tauri/src/
   connection.rs           Conexiones: PTY (local/SSH), Telnet, Serial y logs
   telnet.rs               Protocolo Telnet (con tests)
