@@ -52,6 +52,7 @@ const MODULES: [ModuleId, string, string][] = [
   ["snmp", "SNMP", "Consultas v1/v2c/v3, conjuntos de OIDs y receptor de traps"],
   ["plugins", "Plugins", "Extensiones instalables en Python"],
   ["backup", "Respaldos", "Respaldo de configuración por fabricante y comparación de versiones"],
+  ["logsearch", "Buscar en logs", "Búsqueda de texto o regex en los logs de sesión, los respaldos y las notas"],
 ];
 
 /**

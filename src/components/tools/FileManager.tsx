@@ -22,6 +22,7 @@ import type { Session } from "../../types";
 import { Btn, Console, Label, fmtBytes } from "./ui";
 
 import { plural } from "../../lib/plural";
+import { operationBind, serverOpts } from "../../lib/serverGuard";
 import { SCP_EXIT_EVENT, type ScpExit, type ScpJob, busyRetry, isBusyError, scpOutcome } from "../../lib/scpVerify";
 export interface TerminalRef {
   connId: string;
@@ -230,11 +231,11 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
     if (kind === "http") {
       if (!on) {
         remember("http", { ran: false });
-        await invoke("server_start", { kind: "http", port: s.httpPort });
+        await invoke("server_start", { kind: "http", port: s.httpPort, opts: serverOpts(s.serverGuard, "http", operationBind(s.serverGuard, "http", ip)) });
       }
     } else if (!on) {
       remember("tftp", { ran: false });
-      await invoke("server_start", { kind: "tftp", port: s.tftpPort, allowWrite: write });
+      await invoke("server_start", { kind: "tftp", port: s.tftpPort, allowWrite: write, opts: serverOpts(s.serverGuard, "tftp", operationBind(s.serverGuard, "tftp", ip)) });
     } else if (write) {
       const before = await invoke<boolean>("server_set_write", { kind: "tftp", allow: true });
       remember("tftp", { ran: true, write: before });
@@ -248,7 +249,11 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
     let info = await invoke<{ user: string; pass: string; write: boolean } | null>("ftp_server_info");
     if (!info) {
       remember("ftp", { ran: false });
-      info = await invoke<{ user: string; pass: string; write: boolean }>("ftp_server_start", { port: s.ftpPort, allowWrite: write });
+      info = await invoke<{ user: string; pass: string; write: boolean }>("ftp_server_start", {
+        port: s.ftpPort,
+        allowWrite: write,
+        opts: serverOpts(s.serverGuard, "ftp", operationBind(s.serverGuard, "ftp", ip)),
+      });
       refreshRunning();
     } else if (write && !info.write) {
       const before = await invoke<boolean>("server_set_write", { kind: "ftp", allow: true });

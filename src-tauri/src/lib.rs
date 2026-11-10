@@ -11,6 +11,7 @@ mod ftpserver;
 mod history;
 mod importers;
 mod logfile;
+mod logsearch;
 mod updates;
 mod mcp;
 mod monitor;
@@ -18,6 +19,7 @@ mod nettools;
 mod plugins;
 mod servers;
 mod snmp;
+mod srvguard;
 mod scripts;
 mod seal;
 mod models;
@@ -765,20 +767,29 @@ fn server_start(
     port: u16,
     allow_write: Option<bool>,
     save: Option<bool>,
+    opts: Option<srvguard::ServerOpts>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let root = state.data_dir.join("tftp");
+    let opts = opts.unwrap_or_default();
     match kind.as_str() {
-        "tftp" => state.servers.start_tftp(app.clone(), root, port, allow_write.unwrap_or(false)),
-        "http" => state.servers.start_http(app.clone(), root, port),
+        "tftp" => state.servers.start_tftp(app.clone(), root, port, allow_write.unwrap_or(false), &opts),
+        "http" => state.servers.start_http(app.clone(), root, port, &opts),
         "syslog" => state.servers.start_syslog(
             app.clone(),
             port,
             save.unwrap_or(false).then(|| state.data_dir.join("syslog")),
+            &opts,
         ),
         _ => Err("Servidor desconocido".into()),
     }
+}
+
+/// Clientes rechazados y límites de los servidores en marcha.
+#[tauri::command]
+fn server_guard(state: State<'_, AppState>) -> Vec<srvguard::GuardStats> {
+    state.servers.guard_stats()
 }
 
 #[tauri::command]
@@ -1320,6 +1331,9 @@ pub fn run() {
             server_set_write,
             server_write,
             server_running,
+            server_guard,
+            logsearch::logsearch_start,
+            logsearch::logsearch_open,
             tftp_files,
             tftp_add,
             tftp_delete,

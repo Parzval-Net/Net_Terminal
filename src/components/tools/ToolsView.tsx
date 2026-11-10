@@ -1,6 +1,7 @@
-import { Suspense, lazy, memo, useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Activity, ArrowDownUp, Calculator, DatabaseBackup, Gauge, Network, Puzzle, Radar, ScrollText, SquareTerminal, Waypoints, Wrench, X } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { Activity, ArrowDownUp, Calculator, DatabaseBackup, FileSearch, Gauge, Network, Puzzle, Radar, ScrollText, SquareTerminal, Waypoints, Wrench, X } from "lucide-react";
 import { TopologyTool } from "./TopologyTool";
 import type { Session } from "../../types";
 import { ModuleId, Settings, SpeedResult } from "../../lib/settings";
@@ -15,11 +16,14 @@ import { PluginsTool } from "./PluginsTool";
 import type { ScpRequest, TabBrief, TerminalRef } from "./FileManager";
 import { persist, stored } from "../../lib/prefs";
 import { modLabel } from "../../lib/platform";
+import { idleStopMessage } from "../../lib/serverGuard";
 
 // Respaldos y diff: se cargan al abrir el módulo.
 const BackupTool = lazy(() => import("./BackupTool"));
 // SNMP: cliente, conjuntos de OIDs y receptor de traps, también bajo demanda.
 const SnmpTool = lazy(() => import("./SnmpTool"));
+// Búsqueda en logs y respaldos: solo se descarga al abrir el módulo.
+const LogSearchTool = lazy(() => import("./LogSearchTool"));
 
 const NAV: { id: ModuleId; label: string; Icon: typeof Activity }[] = [
   { id: "monitor", label: "Monitoreo", Icon: Activity },
@@ -31,6 +35,7 @@ const NAV: { id: ModuleId; label: string; Icon: typeof Activity }[] = [
   { id: "perf", label: "Velocidad", Icon: Gauge },
   { id: "transfer", label: "Transferencias", Icon: ArrowDownUp },
   { id: "backup", label: "Respaldos", Icon: DatabaseBackup },
+  { id: "logsearch", label: "Buscar en logs", Icon: FileSearch },
   { id: "plugins", label: "Plugins", Icon: Puzzle },
 ];
 
@@ -38,7 +43,7 @@ const NAV: { id: ModuleId; label: string; Icon: typeof Activity }[] = [
 const GROUPS: { label: string; ids: ModuleId[] }[] = [
   { label: "Monitorear", ids: ["monitor", "diag", "syslog", "snmp"] },
   { label: "Red", ids: ["topology", "subnet", "perf"] },
-  { label: "Operar", ids: ["transfer", "backup", "plugins"] },
+  { label: "Operar", ids: ["transfer", "backup", "logsearch", "plugins"] },
 ];
 
 /** Último módulo usado, para volver donde se estaba al reabrir Herramientas. */
@@ -70,13 +75,15 @@ interface Props {
   onFocusTab: (tabId: string) => void;
   onReconnectTab: (tabId: string) => void;
   onConfirm: (req: { title: string; message: string; label: string; danger?: boolean; action: () => void }) => void;
+  /** Aviso breve (por ejemplo, un servidor que se detuvo por inactividad). */
+  onToast?: (text: string, kind?: "info" | "error") => void;
 }
 
 /**
  * Pestaña de herramientas. Cada módulo se monta al visitarlo y luego se mantiene
  * vivo oculto, para no perder servidores, logs ni mediciones al cambiar de sección.
  */
-export const ToolsView = memo(function ToolsView({ active, onBack, onClose, settings, update, monitors, connId, terminals, tabs, sessions, onConfirm, onScp, onOpenSession, onFocusTab, onReconnectTab }: Props) {
+export const ToolsView = memo(function ToolsView({ active, onBack, onClose, settings, update, monitors, connId, terminals, tabs, sessions, onConfirm, onScp, onOpenSession, onFocusTab, onReconnectTab, onToast }: Props) {
   const enabled = NAV.filter((n) => settings.modules[n.id] !== false);
   const [current, setCurrent] = useState<ModuleId>(() => {
     const last = stored<ModuleId | null>(LAST_KEY, null);
@@ -89,6 +96,19 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     invoke<string[]>("server_running").then(setRunning);
   }, []);
   useEffect(refreshRunning, [refreshRunning]);
+
+  // Un servidor que se detiene solo por inactividad: se actualiza el estado y se avisa aunque Herramientas esté oculta.
+  const toast = useRef(onToast);
+  toast.current = onToast;
+  useEffect(() => {
+    const un = listen<{ kind: string; reason: string; minutes?: number | null }>("server-stopped", ({ payload }) => {
+      refreshRunning();
+      if (payload.reason === "idle") toast.current?.(idleStopMessage(payload.kind, payload.minutes), "info");
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, [refreshRunning]);
 
   const go = (id: ModuleId) => {
     persist(LAST_KEY, id);
@@ -173,6 +193,12 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         return (
           <Suspense fallback={null}>
             <BackupTool terminals={terminals} />
+          </Suspense>
+        );
+      case "logsearch":
+        return (
+          <Suspense fallback={null}>
+            <LogSearchTool visible={active && current === "logsearch"} />
           </Suspense>
         );
     }

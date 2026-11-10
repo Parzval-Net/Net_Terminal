@@ -43,7 +43,7 @@ pub fn sanitize_device(name: &str) -> Result<String, String> {
     Ok(clean)
 }
 
-fn file_re() -> &'static Regex {
+pub(crate) fn file_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^\d{4}-\d{2}-\d{2}_\d{6}(-\d{1,3})?\.txt$").unwrap())
 }

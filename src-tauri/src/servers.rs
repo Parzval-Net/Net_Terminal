@@ -6,12 +6,14 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::srvguard::{Busy, Emit, Guard, GuardStats, Resolved, ServerOpts};
 
 #[derive(Default)]
 pub struct Servers {
@@ -20,6 +22,8 @@ pub struct Servers {
     /// así no se cortan transferencias en curso ni cambian las credenciales FTP.
     writes: Mutex<HashMap<&'static str, Arc<AtomicBool>>>,
     http: Mutex<Option<Arc<tiny_http::Server>>>,
+    /// Filtro de clientes, rechazos e inactividad de cada servidor en marcha.
+    guards: Mutex<HashMap<&'static str, Arc<Guard>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -106,7 +110,12 @@ impl Servers {
         if let Some(f) = self.flags.lock().unwrap().remove(name) {
             f.store(false, Ordering::SeqCst);
         }
+        self.cleanup(name);
+    }
+
+    fn cleanup(&self, name: &str) {
         self.writes.lock().unwrap().remove(name);
+        self.guards.lock().unwrap().remove(name);
         if name == "http" {
             if let Some(s) = self.http.lock().unwrap().take() {
                 s.unblock();
@@ -114,109 +123,90 @@ impl Servers {
         }
     }
 
-    pub fn running(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.flags.lock().unwrap().keys().map(|k| k.to_string()).collect();
-        if self.http.lock().unwrap().is_some() {
-            v.push("http".into());
+    /// Detención por inactividad: solo si `flag` sigue siendo la del servidor registrado (si el
+    /// usuario lo reinició mientras tanto, no se toca el nuevo).
+    pub(crate) fn release(&self, name: &str, flag: &Arc<AtomicBool>) {
+        let mut flags = self.flags.lock().unwrap();
+        if flags.get(name).is_some_and(|f| Arc::ptr_eq(f, flag)) {
+            flags.remove(name);
+            drop(flags);
+            self.cleanup(name);
         }
-        v
+    }
+
+    pub fn running(&self) -> Vec<String> {
+        self.flags.lock().unwrap().keys().map(|k| k.to_string()).collect()
+    }
+
+    /// Rechazos y límites de los servidores en marcha.
+    pub fn guard_stats(&self) -> Vec<GuardStats> {
+        self.guards.lock().unwrap().values().map(|g| g.stats()).collect()
+    }
+
+    /// Crea y registra la guardia de un servidor: avisa a la interfaz de rechazos y detenciones
+    /// y, al vencer el plazo sin actividad, libera el servidor.
+    pub(crate) fn guard(&self, app: &AppHandle, kind: &'static str, r: &Resolved, flag: &Arc<AtomicBool>) -> Arc<Guard> {
+        let emitter = app.clone();
+        let emit: Emit = Arc::new(move |ev, payload| {
+            let _ = emitter.emit(ev, payload);
+        });
+        let (h, f) = (app.clone(), flag.clone());
+        let g = Guard::new(kind, r, emit, Box::new(move || h.state::<crate::AppState>().servers.release(kind, &f)));
+        self.guards.lock().unwrap().insert(kind, g.clone());
+        g
     }
 
     // ---------- TFTP ----------
 
-    pub fn start_tftp(&self, app: AppHandle, root: PathBuf, port: u16, allow_write: bool) -> Result<String, String> {
+    pub fn start_tftp(&self, app: AppHandle, root: PathBuf, port: u16, allow_write: bool, opts: &ServerOpts) -> Result<String, String> {
+        let r = opts.resolve()?;
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         self.stop("tftp");
-        let sock = bind_udp(port).map_err(|e| bind_error("TFTP", port, e))?;
+        let sock = bind_udp(r.bind, port).map_err(|e| bind_error("TFTP", port, e))?;
         sock.set_read_timeout(Some(Duration::from_millis(400))).ok();
         let flag = self.flag("tftp");
         let allow_write = self.write_flag("tftp", allow_write);
+        let guard = self.guard(&app, "tftp", &r, &flag);
+        let (bind, run) = (r.bind, flag.clone());
         std::thread::spawn(move || {
-            let mut buf = [0u8; 2048];
-            // Sesiones activas por equipo: descarta pedidos retransmitidos (el mismo RRQ dos
-            // veces abriría dos envíos en paralelo) y limita los hilos ante un flood UDP.
-            let active: Arc<Mutex<std::collections::HashSet<SocketAddr>>> = Arc::default();
-            while flag.load(Ordering::SeqCst) {
-                let Ok((n, peer)) = sock.recv_from(&mut buf) else { continue };
-                {
-                    let mut set = active.lock().unwrap();
-                    if set.contains(&peer) || set.len() >= TFTP_MAX_SESSIONS {
-                        continue;
-                    }
-                    set.insert(peer);
-                }
-                let req = buf[..n].to_vec();
-                let (app, root, flag, active, write) = (app.clone(), root.clone(), flag.clone(), active.clone(), allow_write.clone());
-                std::thread::spawn(move || {
-                    tftp_session(app, root, write.load(Ordering::SeqCst), peer, req, flag);
-                    active.lock().unwrap().remove(&peer);
-                });
-            }
+            tftp_loop(sock, flag, guard, move |peer, req| {
+                tftp_session(app.clone(), root.clone(), allow_write.load(Ordering::SeqCst), bind, peer, req, run.clone());
+            });
         });
-        Ok(format!("TFTP escuchando en UDP {port}"))
+        Ok(format!("TFTP escuchando en UDP {}", listen_label(r.bind, port)))
     }
 
     // ---------- HTTP ----------
 
-    pub fn start_http(&self, app: AppHandle, root: PathBuf, port: u16) -> Result<String, String> {
+    pub fn start_http(&self, app: AppHandle, root: PathBuf, port: u16, opts: &ServerOpts) -> Result<String, String> {
+        let r = opts.resolve()?;
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         self.stop("http");
-        let server = Arc::new(
-            tiny_http::Server::http(("0.0.0.0", port)).map_err(|e| format!("No se pudo abrir el puerto HTTP {port}: {e}"))?,
-        );
+        let server = Arc::new(tiny_http::Server::http(SocketAddr::new(r.bind, port)).map_err(|e| format!("No se pudo abrir el puerto HTTP {port}: {e}"))?);
         *self.http.lock().unwrap() = Some(server.clone());
+        let flag = self.flag("http");
+        let guard = self.guard(&app, "http", &r, &flag);
         std::thread::spawn(move || {
-            let active = Arc::new(AtomicUsize::new(0));
-            for req in server.incoming_requests() {
-                let (app, root) = (app.clone(), root.clone());
-                if let Err(req) = spawn_limited(&active, HTTP_MAX_CLIENTS, req, move |req| http_serve(app, root, req)) {
-                    let _ = req.respond(tiny_http::Response::empty(503));
-                }
-            }
+            http_loop(server, flag, guard, move |req| http_serve(app.clone(), root.clone(), req));
         });
-        Ok(format!("HTTP escuchando en TCP {port} (solo lectura)"))
+        Ok(format!("HTTP escuchando en TCP {} (solo lectura)", listen_label(r.bind, port)))
     }
 
     // ---------- Syslog ----------
 
-    pub fn start_syslog(&self, app: AppHandle, port: u16, save_dir: Option<PathBuf>) -> Result<String, String> {
+    pub fn start_syslog(&self, app: AppHandle, port: u16, save_dir: Option<PathBuf>, opts: &ServerOpts) -> Result<String, String> {
+        let r = opts.resolve()?;
         self.stop("syslog");
-        let sock = bind_udp(port).map_err(|e| bind_error("Syslog", port, e))?;
+        let sock = bind_udp(r.bind, port).map_err(|e| bind_error("Syslog", port, e))?;
         sock.set_read_timeout(Some(Duration::from_millis(200))).ok();
         let flag = self.flag("syslog");
+        let guard = self.guard(&app, "syslog", &r, &flag);
         std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            let mut batch: Vec<SyslogMsg> = Vec::new();
-            let mut last_flush = Instant::now();
-            let mut file: Option<(String, File)> = None;
-            while flag.load(Ordering::SeqCst) {
-                if let Ok((n, peer)) = sock.recv_from(&mut buf) {
-                    let msg = parse_syslog(&String::from_utf8_lossy(&buf[..n]), peer);
-                    if let Some(dir) = &save_dir {
-                        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
-                        if file.as_ref().map(|(d, _)| d != &day).unwrap_or(true) {
-                            let _ = fs::create_dir_all(dir);
-                            file = fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(dir.join(format!("syslog_{day}.log")))
-                                .ok()
-                                .map(|f| (day, f));
-                        }
-                        if let Some((_, f)) = file.as_mut() {
-                            let _ = writeln!(f, "{} {} <{}.{}> {}", chrono::Local::now().format("%H:%M:%S"), msg.src, msg.facility, msg.severity, one_line(&msg.msg));
-                        }
-                    }
-                    batch.push(msg);
-                }
-                // Envío por lotes para no saturar la interfaz con ráfagas de logs.
-                if !batch.is_empty() && (last_flush.elapsed() > Duration::from_millis(250) || batch.len() >= 500) {
-                    let _ = app.emit("syslog", std::mem::take(&mut batch));
-                    last_flush = Instant::now();
-                }
-            }
+            syslog_loop(sock, flag, guard, save_dir, move |batch| {
+                let _ = app.emit("syslog", batch);
+            });
         });
-        Ok(format!("Syslog escuchando en UDP {port}"))
+        Ok(format!("Syslog escuchando en UDP {}", listen_label(r.bind, port)))
     }
 
     // ---------- Receptor de traps SNMP ----------
@@ -269,6 +259,100 @@ impl Servers {
     }
 }
 
+/// "puerto (todas las interfaces)" o "IP:puerto", para el mensaje de inicio.
+pub(crate) fn listen_label(ip: IpAddr, port: u16) -> String {
+    if ip.is_unspecified() {
+        format!("{port} (todas las interfaces)")
+    } else {
+        SocketAddr::new(ip, port).to_string()
+    }
+}
+
+/// Recepción de TFTP: ignora pedidos de orígenes no permitidos, retransmisiones del mismo equipo
+/// (un RRQ repetido abriría dos envíos en paralelo) y lo que exceda el tope de sesiones (flood
+/// UDP). `session` atiende el pedido en un hilo propio; mientras dura, el servidor no está inactivo.
+fn tftp_loop(sock: UdpSocket, flag: Arc<AtomicBool>, guard: Arc<Guard>, session: impl Fn(SocketAddr, Vec<u8>) + Send + Sync + 'static) {
+    let mut buf = [0u8; 2048];
+    let active: Arc<Mutex<std::collections::HashSet<SocketAddr>>> = Arc::default();
+    let session = Arc::new(session);
+    while flag.load(Ordering::SeqCst) && guard.pulse(&flag) {
+        let Ok((n, peer)) = sock.recv_from(&mut buf) else { continue };
+        if !guard.admit(peer.ip()) {
+            continue;
+        }
+        {
+            let mut set = active.lock().unwrap();
+            if set.contains(&peer) || set.len() >= TFTP_MAX_SESSIONS {
+                continue;
+            }
+            set.insert(peer);
+        }
+        let req = buf[..n].to_vec();
+        let (active, session, busy) = (active.clone(), session.clone(), guard.busy());
+        std::thread::spawn(move || {
+            let _busy: Busy = busy;
+            session(peer, req);
+            active.lock().unwrap().remove(&peer);
+        });
+    }
+}
+
+/// Recepción de HTTP con espera acotada (así revisa rechazos e inactividad sin hilos extra).
+fn http_loop(server: Arc<tiny_http::Server>, flag: Arc<AtomicBool>, guard: Arc<Guard>, handler: impl Fn(tiny_http::Request) + Send + Sync + 'static) {
+    let active = Arc::new(AtomicUsize::new(0));
+    let handler = Arc::new(handler);
+    while flag.load(Ordering::SeqCst) && guard.pulse(&flag) {
+        let req = match server.recv_timeout(Duration::from_millis(500)) {
+            Ok(Some(r)) => r,
+            Ok(None) => continue,
+            Err(_) => break,
+        };
+        if !req.remote_addr().is_some_and(|a| guard.admit(a.ip())) {
+            let _ = req.respond(tiny_http::Response::empty(403));
+            continue;
+        }
+        let (h, busy) = (handler.clone(), guard.busy());
+        let job = move |(req, _busy): (tiny_http::Request, Busy)| h(req);
+        if let Err((req, _)) = spawn_limited(&active, HTTP_MAX_CLIENTS, (req, busy), job) {
+            let _ = req.respond(tiny_http::Response::empty(503));
+        }
+    }
+}
+
+/// Recepción de Syslog (UDP): los mensajes de orígenes no permitidos no se procesan ni se guardan.
+fn syslog_loop(sock: UdpSocket, flag: Arc<AtomicBool>, guard: Arc<Guard>, save_dir: Option<PathBuf>, emit: impl Fn(Vec<SyslogMsg>)) {
+    let mut buf = [0u8; 8192];
+    let mut batch: Vec<SyslogMsg> = Vec::new();
+    let mut last_flush = Instant::now();
+    let mut file: Option<(String, File)> = None;
+    while flag.load(Ordering::SeqCst) && guard.pulse(&flag) {
+        if let Ok((n, peer)) = sock.recv_from(&mut buf) {
+            if guard.admit(peer.ip()) {
+                let msg = parse_syslog(&String::from_utf8_lossy(&buf[..n]), peer);
+                if let Some(dir) = &save_dir {
+                    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    if file.as_ref().map(|(d, _)| d != &day).unwrap_or(true) {
+                        let _ = fs::create_dir_all(dir);
+                        file = fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("syslog_{day}.log"))).ok().map(|f| (day, f));
+                    }
+                    if let Some((_, f)) = file.as_mut() {
+                        let _ = writeln!(f, "{} {} <{}.{}> {}", chrono::Local::now().format("%H:%M:%S"), msg.src, msg.facility, msg.severity, one_line(&msg.msg));
+                    }
+                }
+                batch.push(msg);
+            }
+        }
+        // Envío por lotes para no saturar la interfaz con ráfagas de logs.
+        if !batch.is_empty() && (last_flush.elapsed() > Duration::from_millis(250) || batch.len() >= 500) {
+            emit(std::mem::take(&mut batch));
+            last_flush = Instant::now();
+        }
+    }
+    if !batch.is_empty() {
+        emit(batch);
+    }
+}
+
 /// Descargas HTTP simultáneas como máximo (un hilo por cliente).
 const HTTP_MAX_CLIENTS: usize = 32;
 
@@ -299,10 +383,10 @@ pub fn spawn_limited<T: Send + 'static>(
 }
 
 /// Al reiniciar un servidor, el hilo anterior suelta el puerto en hasta ~400 ms.
-fn bind_udp(port: u16) -> std::io::Result<UdpSocket> {
+fn bind_udp(ip: IpAddr, port: u16) -> std::io::Result<UdpSocket> {
     let mut last = None;
     for _ in 0..10 {
-        match UdpSocket::bind(("0.0.0.0", port)) {
+        match UdpSocket::bind((ip, port)) {
             Ok(s) => return Ok(s),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 last = Some(e);
@@ -383,8 +467,10 @@ const TFTP_MAX_TIMEOUT: u64 = 30;
 /// Tamaño máximo de un archivo recibido por TFTP (imágenes de firmware grandes incluidas).
 pub(crate) const TFTP_MAX_UPLOAD: u64 = 8 * 1024 * 1024 * 1024;
 
-fn tftp_session(app: AppHandle, root: PathBuf, allow_write: bool, peer: SocketAddr, req: Vec<u8>, flag: Arc<AtomicBool>) {
-    let Ok(sock) = UdpSocket::bind(("0.0.0.0", 0)) else { return };
+fn tftp_session(app: AppHandle, root: PathBuf, allow_write: bool, bind: IpAddr, peer: SocketAddr, req: Vec<u8>, flag: Arc<AtomicBool>) {
+    // El socket de la transferencia sale por la misma IP que recibió el pedido (RFC 1350: el
+    // cliente espera la respuesta de esa dirección); con todas las interfaces, la del sistema.
+    let Ok(sock) = UdpSocket::bind((bind, 0)) else { return };
     if req.len() < 4 {
         return;
     }
@@ -928,5 +1014,168 @@ mod tests {
         }
         assert_eq!(got, data);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    // ---------- Filtro de clientes, interfaz de escucha e inactividad ----------
+
+    fn loop_guard(allow: &[&str], idle_ms: Option<u64>) -> Arc<Guard> {
+        crate::srvguard::test_guard(allow, idle_ms)
+    }
+
+    #[test]
+    fn syslog_drops_messages_from_disallowed_sources_and_counts_them() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let dir = std::env::temp_dir().join(format!("nt-syslog-{}", uuid::Uuid::new_v4()));
+        let guard = loop_guard(&["10.9.8.0/24"], None);
+        let flag = Arc::new(AtomicBool::new(true));
+        let got: Arc<Mutex<Vec<SyslogMsg>>> = Arc::default();
+        let (g, f, sink, d) = (guard.clone(), flag.clone(), got.clone(), dir.clone());
+        let t = std::thread::spawn(move || syslog_loop(sock, f, g, Some(d), move |b| sink.lock().unwrap().extend(b)));
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        for _ in 0..3 {
+            client.send_to(b"<14>no debe verse", addr).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        flag.store(false, Ordering::SeqCst);
+        t.join().unwrap();
+        assert!(got.lock().unwrap().is_empty(), "no se procesa nada de orígenes no permitidos");
+        assert!(!dir.exists(), "tampoco se guarda en archivo");
+        assert_eq!(guard.stats().rejected, 3);
+    }
+
+    #[test]
+    fn syslog_accepts_allowed_sources_and_stops_when_idle() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let guard = loop_guard(&["127.0.0.0/8"], Some(400));
+        let flag = Arc::new(AtomicBool::new(true));
+        let got: Arc<Mutex<Vec<SyslogMsg>>> = Arc::default();
+        let (g, f, sink) = (guard.clone(), flag.clone(), got.clone());
+        let t = std::thread::spawn(move || syslog_loop(sock, f, g, None, move |b| sink.lock().unwrap().extend(b)));
+        UdpSocket::bind("127.0.0.1:0").unwrap().send_to(b"<187>hola", addr).unwrap();
+        // Se detiene sola tras el plazo y entrega lo pendiente antes de salir.
+        t.join().unwrap();
+        assert!(!flag.load(Ordering::SeqCst));
+        let msgs = got.lock().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!((msgs[0].src.as_str(), msgs[0].severity, msgs[0].msg.as_str()), ("127.0.0.1", 3, "hola"));
+        assert_eq!(guard.stats().rejected, 0);
+    }
+
+    fn run_tftp_loop(allow: &[&str]) -> (SocketAddr, Arc<AtomicBool>, Arc<Guard>, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let guard = loop_guard(allow, None);
+        let flag = Arc::new(AtomicBool::new(true));
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (g, f, n) = (guard.clone(), flag.clone(), seen.clone());
+        let t = std::thread::spawn(move || {
+            tftp_loop(sock, f, g, move |_, _| {
+                n.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+        (addr, flag, guard, seen, t)
+    }
+
+    #[test]
+    fn tftp_loop_filters_sources_and_serves_allowed_ones() {
+        let rrq = b"\0\x01fw.bin\0octet\0";
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        let (addr, flag, guard, seen, t) = run_tftp_loop(&["10.9.8.0/24"]);
+        client.send_to(rrq, addr).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!((seen.load(Ordering::SeqCst), guard.stats().rejected), (0, 1));
+        flag.store(false, Ordering::SeqCst);
+        t.join().unwrap();
+
+        // Con el origen en la lista, el pedido llega a la sesión.
+        let (addr, flag, guard, seen, t) = run_tftp_loop(&["127.0.0.1"]);
+        client.send_to(rrq, addr).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!((seen.load(Ordering::SeqCst), guard.stats().rejected), (1, 0));
+        flag.store(false, Ordering::SeqCst);
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn tftp_loop_stops_when_idle() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let flag = Arc::new(AtomicBool::new(true));
+        let (g, f) = (loop_guard(&[], Some(200)), flag.clone());
+        std::thread::spawn(move || tftp_loop(sock, f, g, |_, _| {})).join().unwrap();
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    fn http_get(addr: SocketAddr) -> String {
+        use std::io::BufRead;
+        let mut c = std::net::TcpStream::connect(addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        c.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(c).read_line(&mut line).unwrap();
+        line
+    }
+
+    #[test]
+    fn http_loop_answers_403_to_disallowed_clients() {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let addr = server.server_addr().to_ip().unwrap();
+        let flag = Arc::new(AtomicBool::new(true));
+        let guard = loop_guard(&["10.9.8.0/24"], None);
+        let (f, g) = (flag.clone(), guard.clone());
+        let t = std::thread::spawn(move || {
+            http_loop(server, f, g, |req| {
+                let _ = req.respond(tiny_http::Response::from_string("ok"));
+            })
+        });
+        assert!(http_get(addr).contains("403"));
+        assert_eq!(guard.stats().rejected, 1);
+        flag.store(false, Ordering::SeqCst);
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn http_loop_serves_allowed_clients_then_stops_when_idle() {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let addr = server.server_addr().to_ip().unwrap();
+        let flag = Arc::new(AtomicBool::new(true));
+        let (f, g) = (flag.clone(), loop_guard(&["127.0.0.1"], Some(1500)));
+        let t = std::thread::spawn(move || {
+            http_loop(server, f, g, |req| {
+                let _ = req.respond(tiny_http::Response::from_string("ok"));
+            })
+        });
+        assert!(http_get(addr).contains("200"));
+        t.join().unwrap();
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn binds_only_to_the_chosen_ip() {
+        let s = bind_udp(IpAddr::from([127, 0, 0, 1]), 0).unwrap();
+        assert_eq!(s.local_addr().unwrap().ip(), IpAddr::from([127, 0, 0, 1]));
+        let all = bind_udp(IpAddr::from([0, 0, 0, 0]), 0).unwrap();
+        assert!(all.local_addr().unwrap().ip().is_unspecified());
+        assert_eq!(listen_label(IpAddr::from([0, 0, 0, 0]), 69), "69 (todas las interfaces)");
+        assert_eq!(listen_label(IpAddr::from([127, 0, 0, 1]), 69), "127.0.0.1:69");
+    }
+
+    #[test]
+    fn release_only_stops_the_registered_server() {
+        let s = Servers::default();
+        let old = s.flag("tftp");
+        let new = s.flag("tftp"); // reinicio: el anterior queda apagado
+        s.write_flag("tftp", true);
+        s.release("tftp", &old);
+        assert_eq!(s.running(), vec!["tftp".to_string()], "una liberación tardía no toca el servidor nuevo");
+        s.release("tftp", &new);
+        assert!(s.running().is_empty());
+        assert_eq!(s.write_allowed("tftp"), None);
     }
 }

@@ -3278,7 +3278,7 @@
       "cmd": "terminal monitor",
       "desc": "Envía logs y salida de debug a la sesión SSH/Telnet actual.",
       "cat": "Diagnóstico",
-      "risk": "change",
+      "risk": "read",
       "platforms": [
         "ios",
         "iosxe",
@@ -3297,15 +3297,17 @@
         "iosxe",
         "nxos"
       ],
-      "variants": [
-        {
-          "platforms": [
-            "iosxr"
-          ],
-          "cmd": "terminal monitor disable"
-        }
-      ],
       "source": "https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/fundamentals/command/cf_command_ref/slave_auto-sync_config_through_terminal-type.html"
+    },
+    {
+      "cmd": "terminal monitor disable",
+      "desc": "Deja de mostrar logs y debug en la sesión actual de IOS XR.",
+      "cat": "Diagnóstico",
+      "risk": "read",
+      "platforms": [
+        "iosxr"
+      ],
+      "source": "https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/system-monitoring/b-system-monitoring-cr-cisco8k/logging_services_commands.html"
     },
     {
       "cmd": "show debugging",
