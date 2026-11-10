@@ -3,6 +3,13 @@ use super::*;
 /// Argon2id liviano para las pruebas (el real es de 64 MiB).
 pub(crate) const KDF: Kdf = Kdf { m: 64, t: 1, p: 1 };
 
+/// `enable` con el Argon2id liviano de las pruebas; devuelve la DEK junto al informe.
+pub(crate) fn en(layout: &Layout, pw: &str, hook: Hook, progress: &mut dyn FnMut(&Progress)) -> Result<(DataKey, Report), String> {
+    let mut key = None;
+    let r = enable(layout, pw, KDF, hook, progress, &mut key)?;
+    Ok((key.expect("llave escrita"), r))
+}
+
 pub(crate) fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("nt-datacrypt-{tag}-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&d).unwrap();
@@ -349,7 +356,7 @@ fn enable_and_disable_round_trip() {
     let files = fixture(&d);
     let layout = Layout::new(&d, None);
     let mut seen = Vec::new();
-    let (dk, rep) = enable(&layout, "maestra-de-prueba", KDF, &no_hook, &mut |p| seen.push(p.clone())).unwrap();
+    let (dk, rep) = en(&layout, "maestra-de-prueba", &no_hook, &mut |p| seen.push(p.clone())).unwrap();
     assert_eq!(rep.converted, files.len());
     assert!(seen.last().is_some_and(|p| p.done == p.total && p.bytes == p.total_bytes));
     assert_encrypted(&d, &dk, &files);
@@ -387,7 +394,7 @@ fn interrupted_conversion_resumes_or_reverts_at_every_step() {
                     }
                     Ok(())
                 };
-                let r = enable(&layout, "maestra-de-prueba", KDF, &hook, &mut |_| {});
+                let r = en(&layout, "maestra-de-prueba", &hook, &mut |_| {});
                 if r.is_ok() {
                     // El paso no se alcanzó `nth` veces (Journal, KeyFile y Finish ocurren una vez).
                     let _ = fs::remove_dir_all(d);
@@ -430,7 +437,7 @@ fn interrupted_decryption_resumes_or_reverts() {
             let d = tmp("dcut");
             let files = fixture(&d);
             let layout = Layout::new(&d, None);
-            let (dk, _) = enable(&layout, "maestra-de-prueba", KDF, &no_hook, &mut |_| {}).unwrap();
+            let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
             let count = std::cell::Cell::new(0usize);
             let hook = |s: Step| {
                 if s == step {
@@ -484,7 +491,7 @@ fn plaintext_found_in_encrypted_folder_is_reported_and_fixed_without_loss() {
     let d = tmp("found");
     let files = fixture(&d);
     let layout = Layout::new(&d, None);
-    let (dk, _) = enable(&layout, "maestra-de-prueba", KDF, &no_hook, &mut |_| {}).unwrap();
+    let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
     // Una versión anterior abrió la carpeta: creó ajustes y una nota en claro, y rotó el aviso.
     fs::write(d.join("settings.json"), br#"{"fontSize":20}"#).unwrap();
     fs::write(d.join("notes/nueva.txt"), b"nota nueva").unwrap();
@@ -521,7 +528,7 @@ fn disable_refuses_when_a_file_was_tampered() {
     let d = tmp("tamper");
     let files = fixture(&d);
     let layout = Layout::new(&d, None);
-    let (dk, _) = enable(&layout, "maestra-de-prueba", KDF, &no_hook, &mut |_| {}).unwrap();
+    let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
     let p = d.join("notes/red.txt.nte");
     let mut b = fs::read(&p).unwrap();
     let n = b.len();
@@ -545,7 +552,7 @@ fn custom_logs_folder_is_converted_too() {
     fs::write(ext.join("sub/y.txt"), b"y").unwrap();
     fs::write(ext.join("z.bin"), b"no es log").unwrap();
     let layout = Layout::new(&d, Some(&ext));
-    let (dk, rep) = enable(&layout, "maestra-de-prueba", KDF, &no_hook, &mut |_| {}).unwrap();
+    let (dk, rep) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
     assert_eq!(rep.converted, 2);
     assert_eq!(decrypt_all(&dk, &fs::read(ext.join("x.log.nte")).unwrap()).unwrap(), b"externo");
     assert_eq!(fs::read(ext.join("z.bin")).unwrap(), b"no es log");
@@ -564,7 +571,7 @@ fn previous_versions_see_the_stub_and_never_the_encrypted_files() {
     assert!(s[0].name.contains("cifrada"));
     let d = tmp("old");
     fixture(&d);
-    enable(&Layout::new(&d, None), "maestra-de-prueba", KDF, &no_hook, &mut |_| {}).unwrap();
+    en(&Layout::new(&d, None), "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
     // El SessionStore actual sin registro (como una versión anterior) lee el aviso y no reescribe nada.
     let before = fs::read(d.join("sessions.json.nte")).unwrap();
     let store = crate::session_store::SessionStore::new(&d);

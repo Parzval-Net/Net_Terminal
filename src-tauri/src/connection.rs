@@ -705,6 +705,23 @@ impl ConnectionManager {
         &self.triggers
     }
 
+    /// Pestañas con grabación de log activa (cifrar o descifrar la carpeta exige que no haya).
+    pub fn logging_count(&self) -> usize {
+        lock(&self.conns).values().filter(|c| !c.sink.exited.load(Ordering::SeqCst) && lock(&c.sink.log).is_some()).count()
+    }
+
+    /// Detiene todas las grabaciones de log (al bloquear, si así se pidió). Devuelve los ids.
+    pub fn stop_all_logging(&self) -> Vec<String> {
+        let map = lock(&self.conns);
+        let mut ids = Vec::new();
+        for (id, c) in map.iter() {
+            if lock(&c.sink.log).take().is_some() {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
     /// Activa o desactiva el log. Devuelve la ruta del archivo cuando se activa.
     pub fn set_logging(
         &self,

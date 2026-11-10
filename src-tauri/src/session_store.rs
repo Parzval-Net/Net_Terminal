@@ -97,10 +97,6 @@ impl SessionStore {
         Self { file_path: data_dir.join("sessions.json"), inner: Mutex::default(), notice: Mutex::new(None) }
     }
 
-    pub fn loaded(&self) -> bool {
-        self.lock().loaded
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, StoreInner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -163,7 +159,7 @@ impl SessionStore {
                 rewrite = lost;
                 if lost {
                     // Respaldo del archivo original antes de reescribirlo.
-                    backup_corrupt(&file_path);
+                    backup_corrupt(file_path);
                     notice.corrupt = parsed.is_err();
                     if let Ok(items) = &parsed {
                         notice.dropped = items
@@ -178,7 +174,7 @@ impl SessionStore {
                 if parsed.is_err() {
                     // Ni siquiera es un arreglo JSON: se intenta el último respaldo válido antes de
                     // caer en las sesiones de ejemplo.
-                    match crate::datafiles::first_valid_backup(&file_path, &crate::datafiles::valid_sessions) {
+                    match crate::datafiles::first_valid_backup(file_path, &crate::datafiles::valid_sessions) {
                         Some((name, bytes)) => {
                             let restored: Vec<Session> = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
                                 .unwrap_or_default()

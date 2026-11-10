@@ -5,6 +5,7 @@ mod cmdpacks;
 mod connection;
 mod datacrypt;
 mod datafiles;
+mod datamode;
 mod credentials;
 mod expect;
 mod filexfer;
@@ -58,6 +59,8 @@ struct AppState {
     logs_root: std::sync::Mutex<Option<PathBuf>>,
     /// Importación de un archivo cifrado (.ntx) a la espera de que se confirme la vista previa.
     bundle: bundle::PendingSlot,
+    /// Modo portable cifrado (carpeta de datos cifrada con la contraseña maestra).
+    crypt: datamode::DataMode,
 }
 
 impl AppState {
@@ -243,6 +246,7 @@ fn arm_autolock(app: &tauri::AppHandle) {
             credentials::Tick::Locked => {
                 // Una importación pendiente (con contraseñas descifradas en memoria) no sobrevive al bloqueo.
                 app.state::<AppState>().bundle.clear();
+                datamode::on_locked(&app);
                 let _ = app.emit("creds-changed", ());
                 break;
             }
@@ -272,6 +276,10 @@ fn vault_create(master: String, app: tauri::AppHandle, state: State<'_, AppState
 fn vault_unlock(master: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let master = zeroize::Zeroizing::new(master);
     let r = creds_changed(&app, state.creds.unlock(&master));
+    if r.is_ok() {
+        // Con la carpeta cifrada, la misma contraseña abrió también los datos.
+        datamode::after_unlock(&app);
+    }
     arm_autolock(&app);
     r
 }
@@ -280,6 +288,7 @@ fn vault_unlock(master: String, app: tauri::AppHandle, state: State<'_, AppState
 fn vault_lock(app: tauri::AppHandle, state: State<'_, AppState>) {
     state.creds.lock();
     state.bundle.clear();
+    datamode::on_locked(&app);
     let _ = creds_changed(&app, Ok(()));
 }
 
@@ -529,6 +538,7 @@ fn logs_dir_set(path: Option<String>, state: State<'_, AppState>) -> Result<Logs
         Some(p) => Some(logfile::validate_dir(p)?),
         None => None,
     };
+    datamode::on_logs_dir(&state, dir.as_ref());
     *state.logs_root.lock().unwrap_or_else(|e| e.into_inner()) = dir;
     Ok(logs_dir_info(&state))
 }
@@ -1115,8 +1125,12 @@ fn data_dir(state: State<'_, AppState>) -> String {
 /// esquema, respaldos y validación (ver `datafiles`). La respuesta trae `__datafiles` con lo que pasó
 /// al leer (migración, archivo más nuevo, restauración desde respaldo, datos descartados).
 #[tauri::command(async)]
-fn get_settings(state: State<'_, AppState>) -> serde_json::Value {
-    state.files.load_merged(state.store.take_notice())
+fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    // Carpeta cifrada bloqueada: no hay ajustes que mostrar (la interfaz primero pide la contraseña).
+    if let Some(why) = datacrypt::unavailable(&state.data_dir) {
+        return Err(why.into());
+    }
+    Ok(state.files.load_merged(state.store.take_notice()))
 }
 
 /// La topología y sus snapshots viven en su propio archivo (topology.json): pueden pesar varios MB
@@ -1322,23 +1336,35 @@ pub fn run() {
                     seal::cleanup_orphan_temps(&[&data, &notes, &packs], std::time::Duration::from_secs(3600));
                 });
             }
-            // Respaldo del último estado válido (a lo más uno por día), en un hilo aparte.
-            datafiles::spawn_rotation(data_dir.clone());
+            // Carpeta cifrada: queda registrada y bloqueada; nada se lee hasta desbloquear.
+            let crypt = datamode::DataMode::detect(&data_dir);
+            let encrypted = crypt.active();
+            if !encrypted {
+                // Respaldo del último estado válido (a lo más uno por día), en un hilo aparte. Con la
+                // carpeta cifrada corre al desbloquear (tiene que leer los archivos).
+                datafiles::spawn_rotation(data_dir.clone());
+                crypt.mark_started();
+            }
+            let creds = credentials::Credentials::new(&data_dir, session_store::is_portable());
+            if let Some(sh) = crypt.shared() {
+                creds.attach_data(sh);
+            }
             app.manage(updates::Pending::default());
             app.manage(AppState {
-                store: SessionStore::new(&data_dir),
+                store: if encrypted { SessionStore::deferred(&data_dir) } else { SessionStore::new(&data_dir) },
                 conns: ConnectionManager::default(),
                 scripts: scripts::ScriptRunner::default(),
                 mcp: mcp::McpServer::default(),
                 monitor: monitor::Monitor::default(),
                 jobs: nettools::Jobs::default(),
                 servers: servers::Servers::default(),
-                creds: credentials::Credentials::new(&data_dir, session_store::is_portable()),
+                creds,
                 secure_notes: notes::SecureNotes::default(),
                 files: datafiles::DataFiles::new(&data_dir),
                 data_dir,
                 logs_root: std::sync::Mutex::new(None),
                 bundle: bundle::PendingSlot::default(),
+                crypt,
             });
             // Bloqueo automático de la bóveda según los ajustes guardados, sin esperar a la interfaz
             // (que lo vuelve a enviar al cargar; si no llega, igual queda aplicado).
@@ -1423,6 +1449,17 @@ pub fn run() {
             server_guard,
             logsearch::logsearch_start,
             logsearch::logsearch_open,
+            logsearch::logsearch_view,
+            logsearch::logsearch_export,
+            datamode::datacrypt_status,
+            datamode::data_unlock,
+            datamode::data_lock,
+            datamode::data_touch,
+            datamode::datacrypt_set_policy,
+            datamode::datacrypt_enable,
+            datamode::datacrypt_disable,
+            datamode::datacrypt_resume,
+            datamode::datacrypt_fix_plaintext,
             tftp_files,
             tftp_add,
             tftp_delete,

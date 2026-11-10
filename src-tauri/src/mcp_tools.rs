@@ -63,6 +63,10 @@ pub trait Host {
     fn logs_dir(&self) -> PathBuf;
     fn notes_dir(&self) -> PathBuf;
     fn topology_path(&self) -> PathBuf;
+    /// Datos no disponibles (carpeta cifrada bloqueada o convirtiéndose): el motivo.
+    fn blocked(&self) -> Option<&'static str> {
+        None
+    }
     /// Consulta a la interfaz (datos vivos, catálogo, diff, riesgo). None si no respondió a tiempo.
     fn query_ui(&self, kind: &str, args: Value) -> Option<Value>;
     fn ask(&self, req: &ApprovalReq) -> Verdict;

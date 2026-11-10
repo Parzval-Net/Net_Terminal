@@ -864,12 +864,6 @@ impl Entry {
     pub fn is_dir(&self) -> bool {
         self.file_type.is_dir()
     }
-    pub fn is_file(&self) -> bool {
-        self.file_type.is_file()
-    }
-    pub fn physical(&self) -> &Path {
-        &self.phys
-    }
 }
 
 /// Lista una carpeta con nombres lógicos. En una carpeta cifrada los archivos `x.nte` aparecen como
@@ -1505,8 +1499,9 @@ fn finish(layout: &Layout, op: Op, hook: Hook) -> Result<(), String> {
 }
 
 /// Activa el cifrado: diario, llave de datos (verificada al releerla), conversión y aviso para
-/// versiones anteriores. Devuelve la DEK (para dejar la carpeta desbloqueada) y el informe.
-pub fn enable(layout: &Layout, password: &str, kdf: Kdf, hook: Hook, progress: &mut dyn FnMut(&Progress)) -> Result<(DataKey, Report), String> {
+/// versiones anteriores. La DEK queda en `key` apenas está escrita en disco, también si la conversión
+/// falla después (para retomarla o revertirla sin pedir de nuevo la contraseña).
+pub fn enable(layout: &Layout, password: &str, kdf: Kdf, hook: Hook, progress: &mut dyn FnMut(&Progress), key: &mut Option<DataKey>) -> Result<Report, String> {
     if layout.data.join(KEY_FILE).exists() {
         return Err("La carpeta ya está cifrada".into());
     }
@@ -1520,10 +1515,11 @@ pub fn enable(layout: &Layout, password: &str, kdf: Kdf, hook: Hook, progress: &
     if k2.id != dk.id || *k2.key != *dk.key {
         return Err("La llave de datos escrita no coincide".into());
     }
+    let dk = key.insert(dk);
     hook(Step::KeyFile).map_err(|e| e.to_string())?;
-    let rep = convert(layout, Op::Encrypt, &dk, hook, progress)?;
+    let rep = convert(layout, Op::Encrypt, dk, hook, progress)?;
     finish(layout, Op::Encrypt, hook)?;
-    Ok((dk, rep))
+    Ok(rep)
 }
 
 /// Retoma (o revierte, con la operación contraria) una conversión interrumpida.
@@ -1538,6 +1534,7 @@ pub fn resume(layout: &Layout, op: Op, dk: &DataKey, hook: Hook, progress: &mut 
 }
 
 /// Desactiva el cifrado: verifica todo antes de tocar nada, descifra y borra la llave de datos.
+#[cfg(test)]
 pub fn disable(layout: &Layout, dk: &DataKey, hook: Hook, progress: &mut dyn FnMut(&Progress)) -> Result<Report, String> {
     resume(layout, Op::Decrypt, dk, hook, progress)
 }
@@ -1555,3 +1552,5 @@ pub fn fix_plaintext(layout: &Layout, dk: &DataKey) -> Result<Report, String> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod integration_tests;
