@@ -140,6 +140,7 @@ function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit) => void }) {
               <span key={i}>{s.text}</span>
             ),
           )}
+          {hit.extra ? <span className="ml-1.5 text-muted select-none">+{hit.extra.toLocaleString("es-CL")} más</span> : null}
         </span>
         <button
           type="button"

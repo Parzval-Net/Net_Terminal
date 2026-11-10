@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::srvguard::{Busy, Emit, Guard, GuardStats, Resolved, ServerOpts};
+use crate::srvguard::{Emit, Guard, GuardStats, Resolved, ServerOpts};
 
 #[derive(Default)]
 pub struct Servers {
@@ -48,7 +48,23 @@ pub struct SyslogMsg {
     msg: String,
 }
 
-/// Ruta segura dentro de `root`: sin "..", sin rutas absolutas ni unidades.
+/// ¿Es un nombre que Windows trata como dispositivo (CON, PRN, AUX, NUL, COM0-9, LPT0-9, CONIN$,
+/// CONOUT$), con o sin extensión ("nul.txt", "COM1.bin"), o que termina en punto o espacio
+/// (Windows los recorta: "ios.bin." es "ios.bin")? Abrir un dispositivo bloquea o escribe en
+/// él en vez de en un archivo. Se rechazan en todas las plataformas: una carpeta compartida
+/// se copia entre sistemas y un archivo así no se podría usar en Windows.
+pub fn reserved_device_name(name: &str) -> bool {
+    if name.ends_with('.') || name.ends_with(' ') {
+        return true;
+    }
+    // El dispositivo se determina por lo que va antes del primer punto, sin espacios finales.
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || ["COM", "LPT"].iter().any(|p| stem.strip_prefix(p).is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit()))
+}
+
+/// Ruta segura dentro de `root`: sin "..", sin rutas absolutas ni unidades y sin nombres de
+/// dispositivo de Windows (ver `reserved_device_name`).
 pub fn safe_path(root: &Path, requested: &str) -> Option<PathBuf> {
     let req = requested.replace('\\', "/");
     let mut out = root.to_path_buf();
@@ -57,6 +73,7 @@ pub fn safe_path(root: &Path, requested: &str) -> Option<PathBuf> {
             // En Windows un ":" en medio ("a/C:/x") es una unidad que reemplaza toda la ruta
             // al hacer push, o un flujo alternativo NTFS ("ios.bin:oculto").
             Component::Normal(c) if cfg!(windows) && c.to_string_lossy().contains(':') => return None,
+            Component::Normal(c) if reserved_device_name(&c.to_string_lossy()) => return None,
             Component::Normal(c) => out.push(c),
             Component::CurDir => {}
             _ => return None, // ParentDir, RootDir, Prefix (C:\)
@@ -167,10 +184,10 @@ impl Servers {
         let flag = self.flag("tftp");
         let allow_write = self.write_flag("tftp", allow_write);
         let guard = self.guard(&app, "tftp", &r, &flag);
-        let (bind, run) = (r.bind, flag.clone());
+        let env = TftpEnv { bind: r.bind, flag: flag.clone(), guard: guard.clone() };
         std::thread::spawn(move || {
             tftp_loop(sock, flag, guard, move |peer, req| {
-                tftp_session(app.clone(), root.clone(), allow_write.load(Ordering::SeqCst), bind, peer, req, run.clone());
+                tftp_session(app.clone(), root.clone(), allow_write.load(Ordering::SeqCst), &env, peer, req);
             });
         });
         Ok(format!("TFTP escuchando en UDP {}", listen_label(r.bind, port)))
@@ -187,7 +204,8 @@ impl Servers {
         let flag = self.flag("http");
         let guard = self.guard(&app, "http", &r, &flag);
         std::thread::spawn(move || {
-            http_loop(server, flag, guard, move |req| http_serve(app.clone(), root.clone(), req));
+            let g = guard.clone();
+            http_loop(server, flag, guard, move |req| http_serve(app.clone(), root.clone(), g.clone(), req));
         });
         Ok(format!("HTTP escuchando en TCP {} (solo lectura)", listen_label(r.bind, port)))
     }
@@ -270,7 +288,9 @@ pub(crate) fn listen_label(ip: IpAddr, port: u16) -> String {
 
 /// Recepción de TFTP: ignora pedidos de orígenes no permitidos, retransmisiones del mismo equipo
 /// (un RRQ repetido abriría dos envíos en paralelo) y lo que exceda el tope de sesiones (flood
-/// UDP). `session` atiende el pedido en un hilo propio; mientras dura, el servidor no está inactivo.
+/// UDP). `session` atiende el pedido en un hilo propio y es quien marca la actividad válida en
+/// la guardia (`Guard::busy`) cuando el pedido es una transferencia real: recibir datagramas, aun de
+/// un origen permitido, no mantiene vivo el servidor.
 fn tftp_loop(sock: UdpSocket, flag: Arc<AtomicBool>, guard: Arc<Guard>, session: impl Fn(SocketAddr, Vec<u8>) + Send + Sync + 'static) {
     let mut buf = [0u8; 2048];
     let active: Arc<Mutex<std::collections::HashSet<SocketAddr>>> = Arc::default();
@@ -288,16 +308,16 @@ fn tftp_loop(sock: UdpSocket, flag: Arc<AtomicBool>, guard: Arc<Guard>, session:
             set.insert(peer);
         }
         let req = buf[..n].to_vec();
-        let (active, session, busy) = (active.clone(), session.clone(), guard.busy());
+        let (active, session) = (active.clone(), session.clone());
         std::thread::spawn(move || {
-            let _busy: Busy = busy;
             session(peer, req);
             active.lock().unwrap().remove(&peer);
         });
     }
 }
 
-/// Recepción de HTTP con espera acotada (así revisa rechazos e inactividad sin hilos extra).
+/// Recepción de HTTP con espera acotada (así revisa rechazos e inactividad sin hilos extra). El
+/// `handler` marca la actividad válida (`Guard::busy`) solo al servir una respuesta 2xx/3xx.
 fn http_loop(server: Arc<tiny_http::Server>, flag: Arc<AtomicBool>, guard: Arc<Guard>, handler: impl Fn(tiny_http::Request) + Send + Sync + 'static) {
     let active = Arc::new(AtomicUsize::new(0));
     let handler = Arc::new(handler);
@@ -311,9 +331,8 @@ fn http_loop(server: Arc<tiny_http::Server>, flag: Arc<AtomicBool>, guard: Arc<G
             let _ = req.respond(tiny_http::Response::empty(403));
             continue;
         }
-        let (h, busy) = (handler.clone(), guard.busy());
-        let job = move |(req, _busy): (tiny_http::Request, Busy)| h(req);
-        if let Err((req, _)) = spawn_limited(&active, HTTP_MAX_CLIENTS, (req, busy), job) {
+        let h = handler.clone();
+        if let Err(req) = spawn_limited(&active, HTTP_MAX_CLIENTS, req, move |req| h(req)) {
             let _ = req.respond(tiny_http::Response::empty(503));
         }
     }
@@ -327,7 +346,9 @@ fn syslog_loop(sock: UdpSocket, flag: Arc<AtomicBool>, guard: Arc<Guard>, save_d
     let mut file: Option<(String, File)> = None;
     while flag.load(Ordering::SeqCst) && guard.pulse(&flag) {
         if let Ok((n, peer)) = sock.recv_from(&mut buf) {
-            if guard.admit(peer.ip()) {
+            if guard.admit(peer.ip()) && buf[..n].iter().any(|b| !b.is_ascii_whitespace() && *b != 0) {
+                // Mensaje aceptado: único tráfico de syslog que cuenta como actividad.
+                guard.touch();
                 let msg = parse_syslog(&String::from_utf8_lossy(&buf[..n]), peer);
                 if let Some(dir) = &save_dir {
                     let day = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -467,7 +488,16 @@ const TFTP_MAX_TIMEOUT: u64 = 30;
 /// Tamaño máximo de un archivo recibido por TFTP (imágenes de firmware grandes incluidas).
 pub(crate) const TFTP_MAX_UPLOAD: u64 = 8 * 1024 * 1024 * 1024;
 
-fn tftp_session(app: AppHandle, root: PathBuf, allow_write: bool, bind: IpAddr, peer: SocketAddr, req: Vec<u8>, flag: Arc<AtomicBool>) {
+/// Contexto fijo de las sesiones TFTP de un servidor en marcha.
+struct TftpEnv {
+    bind: IpAddr,
+    flag: Arc<AtomicBool>,
+    guard: Arc<Guard>,
+}
+
+fn tftp_session(app: AppHandle, root: PathBuf, allow_write: bool, env: &TftpEnv, peer: SocketAddr, req: Vec<u8>) {
+    let TftpEnv { bind, flag, guard } = env;
+    let bind = *bind;
     // El socket de la transferencia sale por la misma IP que recibió el pedido (RFC 1350: el
     // cliente espera la respuesta de esa dirección); con todas las interfaces, la del sistema.
     let Ok(sock) = UdpSocket::bind((bind, 0)) else { return };
@@ -516,6 +546,8 @@ fn tftp_session(app: AppHandle, root: PathBuf, allow_write: bool, bind: IpAddr, 
             let Ok(mut file) = File::open(&path) else {
                 return tftp_error(&sock, peer, 2, "Acceso denegado");
             };
+            // Transferencia válida de un cliente permitido: recién aquí cuenta como actividad.
+            let _act = guard.busy();
             let total = file.metadata().map(|m| m.len()).ok();
             // Opciones aceptadas -> OACK y esperar ACK 0
             let mut oack = Vec::new();
@@ -585,6 +617,7 @@ fn tftp_session(app: AppHandle, root: PathBuf, allow_write: bool, bind: IpAddr, 
             let Ok(mut file) = File::create(&tmp) else {
                 return tftp_error(&sock, peer, 2, "No se pudo crear el archivo");
             };
+            let _act = guard.busy();
             let mut oack = Vec::new();
             if let Some(b) = blksize {
                 oack.push(("blksize".to_string(), b.to_string()));
@@ -719,40 +752,43 @@ fn send_and_wait_ack(sock: &UdpSocket, peer: SocketAddr, pkt: &[u8], blockno: u1
 
 // ---------- HTTP de solo lectura ----------
 
-fn http_serve(app: AppHandle, root: PathBuf, req: tiny_http::Request) {
-    let peer = req.remote_addr().map(|a| a.to_string()).unwrap_or_default();
-    if *req.method() != tiny_http::Method::Get && *req.method() != tiny_http::Method::Head {
-        let _ = req.respond(tiny_http::Response::empty(405));
-        return;
+/// Qué hacer con una petición HTTP.
+#[derive(Debug, PartialEq)]
+enum Route {
+    Index,
+    File(PathBuf),
+    /// Respuesta sin cuerpo (405, 404).
+    Status(u16),
+}
+
+/// Decide la respuesta de una petición (método y URL), sin tocar la red.
+fn http_route(root: &Path, method: &tiny_http::Method, url: &str) -> (Route, String) {
+    if *method != tiny_http::Method::Get && *method != tiny_http::Method::Head {
+        return (Route::Status(405), String::new());
     }
-    let url = req.url().split('?').next().unwrap_or("/").to_string();
-    let decoded = percent_decode(&url);
+    let decoded = percent_decode(url.split('?').next().unwrap_or("/"));
     if decoded == "/" {
-        let mut names: Vec<String> = fs::read_dir(&root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_file())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        let items: String = names
-            .iter()
-            .map(|n| {
-                let esc = n.replace('&', "&amp;").replace('<', "&lt;").replace('"', "&quot;");
-                format!("<li><a href=\"/{}\">{esc}</a></li>", percent_encode(n))
-            })
-            .collect();
-        let html = format!("<!doctype html><meta charset=utf-8><title>NetTerminal</title><h3>Archivos</h3><ul>{items}</ul>");
-        let resp = tiny_http::Response::from_string(html)
-            .with_header(tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
-        let _ = req.respond(resp);
-        return;
+        return (Route::Index, decoded);
     }
-    let path = match safe_path(&root, &decoded) {
-        Some(p) if p.is_file() && inside_root(&root, &p) => p,
-        _ => {
-            let _ = req.respond(tiny_http::Response::empty(404));
+    match safe_path(root, &decoded) {
+        Some(p) if p.is_file() && inside_root(root, &p) => (Route::File(p), decoded),
+        _ => (Route::Status(404), decoded),
+    }
+}
+
+/// Atiende una petición. Solo las respuestas 2xx (índice o archivo servido) cuentan como
+/// actividad en `guard`; un 404, 405 o 403 (escáner) no mantiene vivo el servidor.
+fn http_serve(app: AppHandle, root: PathBuf, guard: Arc<Guard>, req: tiny_http::Request) {
+    let peer = req.remote_addr().map(|a| a.to_string()).unwrap_or_default();
+    let (route, decoded) = http_route(&root, req.method(), req.url());
+    let path = match route {
+        Route::Status(code) => {
+            let _ = req.respond(tiny_http::Response::empty(code));
+            return;
+        }
+        Route::File(p) => p,
+        Route::Index => {
+            http_index(&root, &guard, req);
             return;
         }
     };
@@ -760,6 +796,33 @@ fn http_serve(app: AppHandle, root: PathBuf, req: tiny_http::Request) {
         let _ = req.respond(tiny_http::Response::empty(403));
         return;
     };
+    http_send_file(&app, &guard, req, file, &decoded, peer);
+}
+
+fn http_index(root: &Path, guard: &Arc<Guard>, req: tiny_http::Request) {
+    let _act = guard.busy();
+    let mut names: Vec<String> = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let items: String = names
+        .iter()
+        .map(|n| {
+            let esc = n.replace('&', "&amp;").replace('<', "&lt;").replace('"', "&quot;");
+            format!("<li><a href=\"/{}\">{esc}</a></li>", percent_encode(n))
+        })
+        .collect();
+    let html = format!("<!doctype html><meta charset=utf-8><title>NetTerminal</title><h3>Archivos</h3><ul>{items}</ul>");
+    let resp = tiny_http::Response::from_string(html).with_header(tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
+    let _ = req.respond(resp);
+}
+
+fn http_send_file(app: &AppHandle, guard: &Arc<Guard>, req: tiny_http::Request, file: File, decoded: &str, peer: String) {
+    let _act = guard.busy();
     let total = file.metadata().map(|m| m.len()).ok();
     let id = uuid::Uuid::new_v4().to_string();
     let name = decoded.trim_start_matches('/').to_string();
@@ -1154,6 +1217,160 @@ mod tests {
         assert!(http_get(addr).contains("200"));
         t.join().unwrap();
         assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    /// Servidor HTTP de prueba con la misma política de actividad que `http_serve`: solo el
+    /// índice y los archivos (2xx) llaman a `guard.busy()`.
+    fn run_http_policy(root: PathBuf, idle_ms: u64) -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let addr = server.server_addr().to_ip().unwrap();
+        let flag = Arc::new(AtomicBool::new(true));
+        let guard = loop_guard(&["127.0.0.1"], Some(idle_ms));
+        let (f, g) = (flag.clone(), guard.clone());
+        let t = std::thread::spawn(move || {
+            http_loop(server, f, guard, move |req| match http_route(&root, req.method(), req.url()) {
+                (Route::Status(code), _) => {
+                    let _ = req.respond(tiny_http::Response::empty(code));
+                }
+                _ => {
+                    let _act = g.busy();
+                    let _ = req.respond(tiny_http::Response::from_string("ok"));
+                }
+            })
+        });
+        (addr, flag, t)
+    }
+
+    /// Primera línea de la respuesta; vacía si el servidor ya no atiende.
+    fn http_status(addr: SocketAddr, path: &str) -> String {
+        use std::io::BufRead;
+        let Ok(mut c) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else { return String::new() };
+        let _ = c.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = c.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes());
+        let mut line = String::new();
+        let _ = std::io::BufReader::new(c).read_line(&mut line);
+        line
+    }
+
+    #[test]
+    fn http_404_scanner_does_not_keep_the_server_alive_but_a_served_file_does() {
+        let root = std::env::temp_dir().join(format!("nt-http-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("fw.bin"), b"x").unwrap();
+        // Escáner: pide rutas inexistentes cada 150 ms; el plazo de 700 ms vence igual.
+        let (addr, flag, t) = run_http_policy(root.clone(), 700);
+        let t0 = Instant::now();
+        while flag.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(4) {
+            let st = http_status(addr, "/no-existe.bin");
+            assert!(st.is_empty() || st.contains("404"), "{st}");
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        t.join().unwrap();
+        assert!(!flag.load(Ordering::SeqCst), "las peticiones 404 no mantienen vivo el servidor");
+        assert!(t0.elapsed() < Duration::from_secs(3), "se detuvo en {:?}", t0.elapsed());
+
+        // Cliente legítimo: pide el archivo (200) cada 300 ms durante 1,5 s: sigue activo pasado el plazo.
+        let (addr, flag, t) = run_http_policy(root.clone(), 700);
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(1500) {
+            assert!(http_status(addr, "/fw.bin").contains("200"), "servido");
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        assert!(flag.load(Ordering::SeqCst), "peticiones servidas mantienen el servidor");
+        t.join().unwrap();
+        assert!(!flag.load(Ordering::SeqCst), "sin más peticiones se detiene");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn http_route_decisions() {
+        let root = std::env::temp_dir().join(format!("nt-route-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("fw.bin"), b"x").unwrap();
+        let get = tiny_http::Method::Get;
+        assert_eq!(http_route(&root, &get, "/").0, Route::Index);
+        assert_eq!(http_route(&root, &get, "/fw.bin?x=1").0, Route::File(root.join("fw.bin")));
+        assert_eq!(http_route(&root, &get, "/no.bin").0, Route::Status(404));
+        assert_eq!(http_route(&root, &get, "/%2e%2e/etc/passwd").0, Route::Status(404));
+        assert_eq!(http_route(&root, &tiny_http::Method::Post, "/fw.bin").0, Route::Status(405));
+        // Nombres de dispositivo de Windows: se rechazan aunque existan (404).
+        assert_eq!(http_route(&root, &get, "/NUL").0, Route::Status(404));
+        assert_eq!(http_route(&root, &get, "/com1.txt").0, Route::Status(404));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reserved_device_names_are_rejected_everywhere() {
+        for n in [
+            "CON", "con", "PRN", "Aux", "NUL", "nul.txt", "COM1", "com9.bin", "LPT1", "lpt9.cfg", "COM0", "LPT0", "CONIN$", "conout$", "CON.tar.gz", "nul .txt", "x.", "x ", "a.b.", "...", "ios.bin ",
+        ] {
+            assert!(reserved_device_name(n), "{n:?} debía rechazarse");
+        }
+        for n in ["console", "COM10", "COMx", "LPT", "ios.bin", "nul-1.txt", "xcon", "a.con", ".hidden", "icom1", "co", "config.txt", "COM1x"] {
+            assert!(!reserved_device_name(n), "{n:?} no debía rechazarse");
+        }
+        let root = Path::new("/srv/tftp");
+        // En lectura y escritura (TFTP y HTTP usan safe_path), en cualquier nivel de la ruta.
+        for p in ["NUL", "nul.txt", "flash/COM1", "con/x.bin", "a/lpt3.log", "ios.bin.", "ios.bin ", "dir/aux", "\\prn"] {
+            assert_eq!(safe_path(root, p), None, "{p:?}");
+        }
+        assert_eq!(safe_path(root, "flash/ios.bin"), Some(root.join("flash/ios.bin")));
+        assert_eq!(safe_path(root, "console.log"), Some(root.join("console.log")));
+    }
+
+    #[test]
+    fn syslog_blank_datagrams_do_not_keep_the_server_alive() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let guard = loop_guard(&["127.0.0.0/8"], Some(500));
+        let flag = Arc::new(AtomicBool::new(true));
+        let got: Arc<Mutex<Vec<SyslogMsg>>> = Arc::default();
+        let (g, f, sink) = (guard.clone(), flag.clone(), got.clone());
+        let t = std::thread::spawn(move || syslog_loop(sock, f, g, None, move |b| sink.lock().unwrap().extend(b)));
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let t0 = Instant::now();
+        while flag.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(4) {
+            let _ = client.send_to(b" \r\n\0", addr);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        t.join().unwrap();
+        assert!(!flag.load(Ordering::SeqCst), "datagramas vacíos no mantienen vivo el servidor");
+        assert!(got.lock().unwrap().is_empty());
+        assert!(t0.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn tftp_datagrams_alone_do_not_keep_the_server_alive() {
+        // Un escáner permitido que manda pedidos que la sesión descarta (sin transferencia válida).
+        let (addr, flag, _guard, seen, t) = {
+            let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = sock.local_addr().unwrap();
+            sock.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+            let guard = loop_guard(&["127.0.0.1"], Some(500));
+            let flag = Arc::new(AtomicBool::new(true));
+            let seen = Arc::new(AtomicUsize::new(0));
+            let (g, f, n) = (guard.clone(), flag.clone(), seen.clone());
+            let t = std::thread::spawn(move || {
+                tftp_loop(sock, f, g, move |_, _| {
+                    n.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+            (addr, flag, guard, seen, t)
+        };
+        let t0 = Instant::now();
+        let mut n = 0u16;
+        while flag.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(4) {
+            // Origen distinto en cada pedido (puerto efímero nuevo).
+            let c = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let _ = c.send_to(b"\0\x01basura\0octet\0", addr);
+            n += 1;
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        t.join().unwrap();
+        assert!(n > 0 && seen.load(Ordering::SeqCst) > 0, "los pedidos sí llegaron a la sesión");
+        assert!(!flag.load(Ordering::SeqCst));
+        assert!(t0.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

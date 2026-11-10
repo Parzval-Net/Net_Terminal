@@ -34,6 +34,12 @@ const DEFAULT_FILE_MB: u64 = 64;
 const MAX_FILE_MB: u64 = 1024;
 /// Línea más larga que se examina: el resto de una línea gigante (sin saltos) se descarta.
 const MAX_LINE: usize = 64 * 1024;
+/// Coincidencias resaltadas por línea; el resto se informa como "+N más" (`Hit::extra`).
+const MAX_RANGES_PER_LINE: usize = 50;
+/// La marca de cancelación se revisa al leer esta cantidad de bytes o cuando pasa este tiempo,
+/// lo que ocurra primero (no por cantidad de líneas: una línea puede ser de 64 KB).
+const CANCEL_EVERY_BYTES: usize = 256 * 1024;
+const CANCEL_EVERY: Duration = Duration::from_millis(50);
 /// Caracteres visibles de una coincidencia y de una línea de contexto.
 const SHOW_CHARS: usize = 600;
 const SHOW_CONTEXT_CHARS: usize = 300;
@@ -314,8 +320,26 @@ fn collect(roots: &Roots, q: &Prepared, cancel: &AtomicBool) -> (Vec<Cand>, bool
     (all, truncated)
 }
 
+/// Carpetas de otros tipos que un archivo de `kind` no puede tocar: los logs no pueden salir
+/// por una carpeta de logs que contenga los respaldos o las notas.
+fn excluded_for(roots: &Roots, kind: Kind) -> Vec<PathBuf> {
+    if kind != Kind::Logs {
+        return Vec::new();
+    }
+    [roots.backups.canonicalize().ok(), roots.notes.canonicalize().ok()].into_iter().flatten().collect()
+}
+
+/// Carpeta (canónica) y exclusiones con las que se valida cada archivo al abrirlo.
+struct Scope<'a> {
+    root: &'a Path,
+    excluded: &'a [PathBuf],
+}
+
 /// Ruta real de un archivo elegible de `kind`, validada contra recorridos fuera de la carpeta
-/// (".." o rutas absolutas en `rel`), enlaces simbólicos y archivos que la búsqueda no lee.
+/// (".." o rutas absolutas en `rel`), enlaces simbólicos, FIFOs y archivos que la búsqueda no lee
+/// (incluidas las notas protegidas y las carpetas de respaldos o notas dentro de la de logs).
+/// El archivo se abre sin seguir enlaces y sin bloquear, se verifica sobre el descriptor que sea
+/// regular y se revalida la ruta canónica.
 pub fn resolve_file(roots: &Roots, kind: Kind, rel: &str) -> Result<PathBuf, String> {
     let comps: Vec<String> = Path::new(rel)
         .components()
@@ -333,8 +357,9 @@ pub fn resolve_file(roots: &Roots, kind: Kind, rel: &str) -> Result<PathBuf, Str
     if !meta.is_file() {
         return Err("Ruta no permitida".into());
     }
-    let real = path.canonicalize().map_err(|e| e.to_string())?;
-    if !real.starts_with(&root) || !file_ok(kind, &comps, &real) {
+    let excluded = excluded_for(roots, kind);
+    let (_file, real) = open_checked(&path, &root, &excluded)?;
+    if !file_ok(kind, &comps, &real) {
         return Err("Ruta no permitida".into());
     }
     Ok(real)
@@ -348,10 +373,17 @@ pub struct Hit {
     pub text: String,
     /// Rangos de la coincidencia dentro de `text`, en caracteres (inicio, fin).
     pub ranges: Vec<[usize; 2]>,
+    /// Coincidencias de esta línea que no se resaltan (tope por línea o fuera del texto mostrado).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub extra: usize,
     pub before: Vec<String>,
     pub after: Vec<String>,
     #[serde(skip)]
     need_after: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -397,15 +429,68 @@ pub struct Update {
 
 // ---------- Texto visible ----------
 
-/// Texto acotado a `max` caracteres y los rangos de coincidencia (en bytes de `text`) pasados
-/// a caracteres del texto mostrado. Si la coincidencia está lejos del inicio, se muestra la zona.
+/// Convierte posiciones en bytes (no decrecientes) a caracteres en una sola pasada: un cursor
+/// avanza por el texto y nunca recorre dos veces la misma zona (antes cada rango contaba los
+/// caracteres desde el inicio de la línea: costo cuadrático con miles de coincidencias).
+struct CharCursor<'a> {
+    text: &'a str,
+    byte: usize,
+    chars: usize,
+}
+
+impl<'a> CharCursor<'a> {
+    fn new(text: &'a str) -> Self {
+        CharCursor { text, byte: 0, chars: 0 }
+    }
+
+    /// Posición en caracteres del byte `b`. Si `b` retrocede o no cae en un límite de carácter,
+    /// se reubica desde el inicio (no ocurre con rangos de `Regex`, pero no debe fallar).
+    fn at(&mut self, b: usize) -> usize {
+        let mut b = b.min(self.text.len());
+        while !self.text.is_char_boundary(b) {
+            b -= 1;
+        }
+        if b < self.byte {
+            self.byte = 0;
+            self.chars = 0;
+        }
+        self.chars += self.text[self.byte..b].chars().count();
+        self.byte = b;
+        self.chars
+    }
+}
+
+/// Coincidencias de `text`: las primeras `MAX_RANGES_PER_LINE` (inicio y fin en bytes) y el total.
+/// El resto solo se cuenta, sin guardarlo.
+fn find_ranges(re: &Regex, text: &str) -> (Vec<(usize, usize)>, usize) {
+    let mut ranges = Vec::new();
+    let mut total = 0usize;
+    for m in re.find_iter(text).filter(|m| m.end() > m.start()) {
+        total += 1;
+        if ranges.len() < MAX_RANGES_PER_LINE {
+            ranges.push((m.start(), m.end()));
+        }
+    }
+    (ranges, total)
+}
+
+/// Texto acotado a `max` caracteres y los rangos de coincidencia (en bytes de `text`, en orden)
+/// pasados a caracteres del texto mostrado. Si la coincidencia está lejos del inicio, se muestra
+/// la zona. Costo lineal en el largo del texto.
 fn display(text: &str, ranges: &[(usize, usize)], max: usize) -> (String, Vec<[usize; 2]>) {
     let total = text.chars().count();
-    let to_char = |b: usize| text[..b].chars().count();
+    let mut cur = CharCursor::new(text);
+    let chars: Vec<(usize, usize)> = ranges
+        .iter()
+        .map(|&(s, e)| {
+            let s = cur.at(s);
+            (s, cur.at(e))
+        })
+        .collect();
     if total <= max {
-        return (text.to_string(), ranges.iter().map(|&(s, e)| [to_char(s), to_char(e)]).collect());
+        return (text.to_string(), chars.iter().map(|&(s, e)| [s, e]).collect());
     }
-    let first = ranges.first().map(|&(s, _)| to_char(s)).unwrap_or(0);
+    let first = chars.first().map(|&(s, _)| s).unwrap_or(0);
     let start = first.saturating_sub(max / 4).min(total - max);
     let end = start + max;
     let body: String = text.chars().skip(start).take(max).collect();
@@ -420,12 +505,10 @@ fn display(text: &str, ranges: &[(usize, usize)], max: usize) -> (String, Vec<[u
     }
     let shown = out.chars().count();
     let shift = usize::from(pre);
-    let mapped = ranges
+    let mapped = chars
         .iter()
-        .filter_map(|&(s, e)| {
-            let (s, e) = (to_char(s), to_char(e));
-            (e > start && s < end).then(|| [s.max(start) - start + shift, (e.min(end) - start + shift).min(shown)])
-        })
+        .filter(|&&(s, e)| e > start && s < end)
+        .map(|&(s, e)| [s.max(start) - start + shift, (e.min(end) - start + shift).min(shown)])
         .collect();
     (out, mapped)
 }
@@ -437,16 +520,16 @@ fn trim_eol(buf: &mut Vec<u8>) {
 }
 
 /// Lee una línea guardando como mucho `MAX_LINE` bytes; el resto de una línea más larga se
-/// descarta sin acumularlo. false al llegar al final del archivo.
-fn read_line_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>) -> std::io::Result<bool> {
+/// descarta sin acumularlo. Devuelve los bytes leídos del archivo (incluidos los descartados) o
+/// `None` al llegar al final.
+fn read_line_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>) -> std::io::Result<Option<usize>> {
     buf.clear();
-    let mut got = false;
+    let mut read = 0usize;
     loop {
         let chunk = r.fill_buf()?;
         if chunk.is_empty() {
-            return Ok(got);
+            return Ok((read > 0).then_some(read));
         }
-        got = true;
         let (used, done) = match chunk.iter().position(|&b| b == b'\n') {
             Some(i) => (i + 1, true),
             None => (chunk.len(), false),
@@ -454,10 +537,63 @@ fn read_line_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>) -> std::io::Result
         let room = MAX_LINE.saturating_sub(buf.len());
         buf.extend_from_slice(&chunk[..used.min(room)]);
         r.consume(used);
+        read += used;
         if done {
-            return Ok(true);
+            return Ok(Some(read));
         }
     }
+}
+
+/// Abre sin seguir enlaces y sin bloquear (un FIFO o dispositivo no deja la búsqueda colgada en
+/// el `open`), y comprueba sobre el descriptor ya abierto que sea un archivo regular. Además la
+/// ruta canónica debe seguir dentro de la carpeta, sin pasar por `excluded`, y apuntar al mismo
+/// archivo que se abrió (en Unix, mismo dispositivo e inodo): si algo se cambió entre el recorrido
+/// y la apertura, se rechaza. Devuelve el archivo y su ruta canónica.
+fn open_checked(path: &Path, root: &Path, excluded: &[PathBuf]) -> Result<(File, PathBuf), String> {
+    let file = open_nofollow(path).map_err(|_| "No se puede abrir".to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Ruta no permitida".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT: enlace simbólico o unión.
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err("Ruta no permitida".into());
+        }
+    }
+    let real = path.canonicalize().map_err(|e| e.to_string())?;
+    if !real.starts_with(root) || excluded.iter().any(|x| real.starts_with(x)) {
+        return Err("Ruta no permitida".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let now = fs::metadata(&real).map_err(|e| e.to_string())?;
+        if (now.dev(), now.ino()) != (meta.dev(), meta.ino()) {
+            return Err("El archivo cambió".into());
+        }
+    }
+    Ok((file, real))
+}
+
+#[cfg(unix)]
+fn open_nofollow(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)
+}
+
+#[cfg(windows)]
+fn open_nofollow(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_FLAG_OPEN_REPARSE_POINT: abre el enlace mismo, no su destino (se rechaza después).
+    fs::OpenOptions::new().read(true).custom_flags(0x0020_0000).open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_nofollow(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 enum Skip {
@@ -466,17 +602,15 @@ enum Skip {
 }
 
 /// Busca en un archivo. Devuelve las coincidencias (posiblemente ninguna) o el motivo de omisión.
-fn search_file(c: &Cand, root: &Path, q: &Prepared, budget: &mut usize, cancel: &AtomicBool) -> Result<FileHits, Skip> {
-    // El archivo debe seguir dentro de la carpeta (un enlace creado después del recorrido no lo saca).
-    let real = c.path.canonicalize().map_err(|_| Skip::Error)?;
-    if !real.starts_with(root) {
+fn search_file(c: &Cand, scope: &Scope, q: &Prepared, budget: &mut usize, cancel: &AtomicBool) -> Result<FileHits, Skip> {
+    // El archivo debe seguir siendo elegible y dentro de la carpeta al abrirlo (un enlace, un FIFO
+    // o un cambio posterior al recorrido no lo saca de ahí ni cuelga la búsqueda).
+    let (file, real) = open_checked(&c.path, scope.root, scope.excluded).map_err(|_| Skip::Error)?;
+    let comps: Vec<String> = c.rel.split('/').map(str::to_string).collect();
+    if !file_ok(c.kind, &comps, &real) {
         return Err(Skip::Error);
     }
-    let file = File::open(&real).map_err(|_| Skip::Error)?;
     let meta = file.metadata().map_err(|_| Skip::Error)?;
-    if !meta.is_file() {
-        return Err(Skip::Error);
-    }
     let partial = meta.len() > q.max_file_bytes;
     let mut r = BufReader::with_capacity(64 * 1024, file.take(q.max_file_bytes));
     // Un NUL en el primer bloque: archivo binario (también UTF-16), no se lee como texto.
@@ -494,19 +628,23 @@ fn search_file(c: &Cand, root: &Path, q: &Prepared, budget: &mut usize, cancel: 
     let mut open: Vec<usize> = Vec::new();
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     let mut line_no = 0usize;
+    // Cancelación: por bytes leídos y por tiempo desde la última revisión.
+    let (mut since_check, mut last_check) = (0usize, Instant::now());
     loop {
         // Con el tope de coincidencias alcanzado solo se termina de completar el contexto pendiente.
         if (more || *budget == 0) && open.is_empty() {
             break;
         }
         match read_line_capped(&mut r, &mut buf) {
-            Ok(true) => {}
-            Ok(false) => break,
-            Err(_) => break,
+            Ok(Some(n)) => since_check += n,
+            Ok(None) | Err(_) => break,
         }
         line_no += 1;
-        if line_no.is_multiple_of(4096) && cancel.load(Ordering::SeqCst) {
-            break;
+        if since_check >= CANCEL_EVERY_BYTES || last_check.elapsed() >= CANCEL_EVERY {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            (since_check, last_check) = (0, Instant::now());
         }
         trim_eol(&mut buf);
         let text = String::from_utf8_lossy(&buf);
@@ -520,14 +658,15 @@ fn search_file(c: &Cand, root: &Path, q: &Prepared, budget: &mut usize, cancel: 
             });
         }
         if !more && *budget > 0 {
-            let ranges: Vec<(usize, usize)> = q.re.find_iter(&text).filter(|m| m.end() > m.start()).map(|m| (m.start(), m.end())).collect();
+            let (ranges, total) = find_ranges(&q.re, &text);
             if !ranges.is_empty() {
                 if hits.len() >= cap {
                     more = true;
                 } else {
                     let (shown, mapped) = display(&text, &ranges, SHOW_CHARS);
+                    let extra = total - mapped.len();
                     let before = ring.iter().map(|b| display(&String::from_utf8_lossy(b), &[], SHOW_CONTEXT_CHARS).0).collect();
-                    hits.push(Hit { line: line_no, text: shown, ranges: mapped, before, after: Vec::new(), need_after: ctx });
+                    hits.push(Hit { line: line_no, text: shown, ranges: mapped, extra, before, after: Vec::new(), need_after: ctx });
                     if ctx > 0 {
                         open.push(hits.len() - 1);
                     }
@@ -553,7 +692,7 @@ pub fn search(roots: &Roots, q: &Prepared, cancel: &AtomicBool, sink: &mut dyn F
     let t0 = Instant::now();
     let (cands, walk_truncated) = collect(roots, q, cancel);
     let mut sum = Summary { total: cands.len(), walk_truncated, ..Default::default() };
-    let canon: Vec<(Kind, PathBuf)> = q.kinds.iter().filter_map(|&k| roots.of(k).canonicalize().ok().map(|p| (k, p))).collect();
+    let canon: Vec<(Kind, PathBuf, Vec<PathBuf>)> = q.kinds.iter().filter_map(|&k| roots.of(k).canonicalize().ok().map(|p| (k, p, excluded_for(roots, k)))).collect();
     let mut budget = q.max_results;
     let mut pending: Vec<FileHits> = Vec::new();
     let mut last = Instant::now();
@@ -569,9 +708,9 @@ pub fn search(roots: &Roots, q: &Prepared, cancel: &AtomicBool, sink: &mut dyn F
             sum.truncated = true;
             break;
         }
-        let Some((_, root)) = canon.iter().find(|(k, _)| *k == c.kind) else { continue };
+        let Some((_, root, excluded)) = canon.iter().find(|(k, _, _)| *k == c.kind) else { continue };
         let before = budget;
-        match search_file(c, root, q, &mut budget, cancel) {
+        match search_file(c, &Scope { root, excluded }, q, &mut budget, cancel) {
             Ok(f) => {
                 sum.partial += usize::from(f.partial);
                 if f.more {
@@ -638,6 +777,9 @@ pub fn logsearch_start(params: SearchParams, app: tauri::AppHandle, state: tauri
     let (job, cancel, finish) = state.jobs.cancelable();
     let id = job.clone();
     std::thread::spawn(move || {
+        // Guard RAII: aunque la búsqueda termine por un pánico, se libera el cupo (`Slot`), se da de
+        // baja la tarea y la interfaz recibe "done" (no queda esperando una búsqueda que no existe).
+        let _end = JobEnd { app: app.clone(), id: id.clone(), finish: Some(Box::new(finish)) };
         let _slot = slot;
         let sum = search(&roots, &q, &cancel, &mut |u| {
             if u.files.is_empty() && u.scanned == 0 {
@@ -652,10 +794,25 @@ pub fn logsearch_start(params: SearchParams, app: tauri::AppHandle, state: tauri
             );
         });
         emit(&app, &id, "result", String::new(), serde_json::to_value(&sum).ok());
-        finish();
-        emit(&app, &id, "done", String::new(), None);
     });
     Ok(job)
+}
+
+/// Al soltarse (fin normal, cancelación o pánico) da de baja la tarea y avisa "done". Se declara
+/// antes que `Slot`, así que se suelta después y el cupo ya está libre cuando la interfaz lo sabe.
+struct JobEnd {
+    app: tauri::AppHandle,
+    id: String,
+    finish: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl Drop for JobEnd {
+    fn drop(&mut self) {
+        if let Some(f) = self.finish.take() {
+            f();
+        }
+        crate::nettools::emit(&self.app, &self.id, "done", String::new(), None);
+    }
 }
 
 /// Abre un archivo encontrado con la aplicación del sistema, o lo muestra en su carpeta.
@@ -928,12 +1085,88 @@ mod tests {
         let q = params("no-existe").prepare().unwrap();
         let cancel = AtomicBool::new(true);
         let t = Instant::now();
-        // La marca se revisa cada 4096 líneas, no solo entre archivos (collect ya la respeta).
+        // La marca se revisa por bytes leídos y por tiempo, no solo entre archivos.
         let cands = Cand { kind: Kind::Logs, rel: "a.log".into(), path: p.clone(), size: 0, time: 0 };
         let mut budget = 10;
         let root = fx.roots.logs.canonicalize().unwrap();
-        let r = search_file(&cands, &root, &q, &mut budget, &cancel).ok().unwrap();
+        let r = search_file(&cands, &Scope { root: &root, excluded: &[] }, &q, &mut budget, &cancel).ok().unwrap();
         assert!(r.hits.is_empty() && t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn cancellation_mid_file_is_checked_by_bytes_not_by_lines() {
+        let fx = Fx::new();
+        let p = fx.put("logs/a.log", b"");
+        let mut f = std::io::BufWriter::new(fs::OpenOptions::new().append(true).open(&p).unwrap());
+        // 30 MB de líneas de 64 KB (4096 líneas no llegan ni a la mitad) y la coincidencia al final.
+        let line = vec![b'a'; MAX_LINE - 1];
+        for _ in 0..480 {
+            f.write_all(&line).unwrap();
+            f.write_all(b"\n").unwrap();
+        }
+        f.write_all(b"AGUJA\n").unwrap();
+        drop(f);
+        let q = params("aguja").prepare().unwrap();
+        let root = fx.roots.logs.canonicalize().unwrap();
+        let cand = Cand { kind: Kind::Logs, rel: "a.log".into(), path: p, size: 0, time: 0 };
+        let scope = Scope { root: &root, excluded: &[] };
+        let mut budget = 10;
+        assert_eq!(search_file(&cand, &scope, &q, &mut budget, &AtomicBool::new(false)).ok().unwrap().hits.len(), 1, "sin cancelar se llega al final");
+        // Cancelada desde otro hilo a los pocos milisegundos: se detiene antes del final.
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            c2.store(true, Ordering::SeqCst);
+        });
+        let mut budget = 10;
+        let t = Instant::now();
+        let r = search_file(&cand, &scope, &q, &mut budget, &cancel).ok().unwrap();
+        stopper.join().unwrap();
+        assert!(r.hits.is_empty(), "se canceló a mitad del archivo");
+        assert!(t.elapsed() < Duration::from_millis(500), "tardó {:?}", t.elapsed());
+        // Con la marca ya puesta, la primera revisión (a los 256 KB) corta la lectura.
+        let mut budget = 10;
+        let r = search_file(&cand, &scope, &q, &mut budget, &AtomicBool::new(true)).ok().unwrap();
+        assert!(r.hits.is_empty());
+    }
+
+    #[test]
+    fn adversarial_long_line_is_linear_and_caps_highlights() {
+        let fx = Fx::new();
+        // 64 KB de "!": 65.536 coincidencias de un carácter en una sola línea.
+        fx.put("logs/a.log", "!".repeat(MAX_LINE).as_bytes());
+        fx.put("logs/b.log", "ñ!".repeat(MAX_LINE / 4).as_bytes());
+        let mut p = params("!");
+        p.context = Some(0);
+        let t = Instant::now();
+        let (files, sum) = run(&fx, &p);
+        let el = t.elapsed();
+        println!("línea adversa de 64 KB (2 archivos): {el:?}");
+        assert!(el < Duration::from_millis(200), "tardó {el:?}");
+        assert_eq!(sum.matches, 2);
+        for f in &files {
+            let h = &f.hits[0];
+            assert_eq!(h.ranges.len(), MAX_RANGES_PER_LINE, "{}", f.rel);
+            assert!(h.extra > 0, "se informa cuántas coincidencias no se resaltan");
+        }
+        let a = files.iter().find(|f| f.rel == "a.log").unwrap();
+        assert_eq!(a.hits[0].extra, MAX_LINE - MAX_RANGES_PER_LINE);
+        // Los rangos de la línea con multibyte siguen apuntando a "!".
+        let b = files.iter().find(|f| f.rel == "b.log").unwrap();
+        let chars: Vec<char> = b.hits[0].text.chars().collect();
+        assert!(b.hits[0].ranges.iter().all(|&[s, e]| e - s == 1 && chars[s] == '!'));
+    }
+
+    #[test]
+    fn char_cursor_matches_naive_conversion() {
+        let s = "añb€c😀d!ñ";
+        let ranges: Vec<(usize, usize)> = s.char_indices().filter(|(_, c)| *c == '!' || *c == 'ñ' || *c == '😀').map(|(i, c)| (i, i + c.len_utf8())).collect();
+        let (t, r) = display(s, &ranges, 100);
+        assert_eq!(t, s);
+        for (&(bs, be), [cs, ce]) in ranges.iter().zip(&r) {
+            assert_eq!((*cs, *ce), (s[..bs].chars().count(), s[..be].chars().count()));
+        }
     }
 
     #[test]
@@ -1069,7 +1302,50 @@ mod tests {
         let root = fx.roots.logs.canonicalize().unwrap();
         let cand = Cand { kind: Kind::Logs, rel: "enlace.log".into(), path: fx.dir.join("logs/enlace.log"), size: 0, time: 0 };
         let mut budget = 5;
-        assert!(matches!(search_file(&cand, &root, &q, &mut budget, &AtomicBool::new(false)), Err(Skip::Error)));
+        let scope = Scope { root: &root, excluded: &[] };
+        assert!(matches!(search_file(&cand, &scope, &q, &mut budget, &AtomicBool::new(false)), Err(Skip::Error)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_is_rejected_without_blocking() {
+        let fx = Fx::new();
+        let fifo = fx.dir.join("logs/cola.log");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let root = fx.roots.logs.canonicalize().unwrap();
+        let t = Instant::now();
+        let cand = Cand { kind: Kind::Logs, rel: "cola.log".into(), path: fifo, size: 0, time: 0 };
+        let q = params("x").prepare().unwrap();
+        let mut budget = 5;
+        let scope = Scope { root: &root, excluded: &[] };
+        assert!(matches!(search_file(&cand, &scope, &q, &mut budget, &AtomicBool::new(false)), Err(Skip::Error)));
+        assert!(resolve_file(&fx.roots, Kind::Logs, "cola.log").is_err());
+        assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn resolve_file_excludes_protected_notes_and_other_kinds_inside_logs() {
+        let fx = Fx::new();
+        fx.put("notes/abierta.txt", b"x");
+        fx.put("notes/protegida.txt", b"x");
+        fx.put("notes/protegida.ntenc", b"cifrado");
+        assert!(resolve_file(&fx.roots, Kind::Notes, "abierta.txt").is_ok());
+        assert!(resolve_file(&fx.roots, Kind::Notes, "protegida.txt").is_err(), "resto de una nota protegida");
+        assert!(resolve_file(&fx.roots, Kind::Notes, "protegida.ntenc").is_err());
+        // Carpeta de logs elegida por el usuario que contiene notas y respaldos.
+        fx.put("backups/sw/2026-01-02_101010.txt", b"x");
+        fx.put("otros/app.log", b"x");
+        let roots = Roots { logs: fx.dir.clone(), backups: fx.roots.backups.clone(), notes: fx.roots.notes.clone() };
+        assert!(resolve_file(&roots, Kind::Logs, "otros/app.log").is_ok());
+        assert!(resolve_file(&roots, Kind::Logs, "notes/abierta.txt").is_err());
+        assert!(resolve_file(&roots, Kind::Logs, "notes/protegida.txt").is_err());
+        assert!(resolve_file(&roots, Kind::Logs, "backups/sw/2026-01-02_101010.txt").is_err());
+        // Un respaldo ajeno al formato de la app o de otro nivel no se abre como respaldo.
+        fx.put("backups/sw/otro.txt", b"x");
+        fx.put("backups/suelto.txt", b"x");
+        assert!(resolve_file(&fx.roots, Kind::Backups, "sw/otro.txt").is_err());
+        assert!(resolve_file(&fx.roots, Kind::Backups, "suelto.txt").is_err());
     }
 
     #[cfg(unix)]
@@ -1110,11 +1386,28 @@ mod tests {
         assert_eq!(t.chars().skip(r[0][0]).take(r[0][1] - r[0][0]).collect::<String>(), "ñu");
     }
 
+    /// `RUNNING` es global: las pruebas que lo usan no corren en paralelo entre sí.
+    static SLOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn only_one_search_runs_at_a_time() {
+        let _g = SLOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let a = Slot::take().expect("libre");
         assert!(Slot::take().is_none());
         drop(a);
         assert!(Slot::take().is_some());
+    }
+
+    #[test]
+    fn slot_is_released_when_the_search_thread_panics() {
+        let _g = SLOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        drop(Slot::take());
+        let slot = Slot::take().expect("libre");
+        let h = std::thread::spawn(move || {
+            let _slot = slot;
+            panic!("fallo simulado en la búsqueda");
+        });
+        assert!(h.join().is_err());
+        assert!(Slot::take().is_some(), "el pánico no deja la búsqueda tomada para siempre");
     }
 }

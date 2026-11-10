@@ -6,7 +6,7 @@
 //! solo con la IP que inició sesión (sin "FTP bounce", RFC 2577) y límites de clientes,
 //! intentos y tamaño. FTP no cifra: usuario, contraseña y archivos viajan en claro.
 
-use crate::servers::{bind_error, inside_root, spawn_limited, Servers, TFTP_MAX_UPLOAD};
+use crate::servers::{bind_error, inside_root, reserved_device_name, spawn_limited, Servers, TFTP_MAX_UPLOAD};
 use crate::srvguard::{Guard, ServerOpts};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -127,8 +127,9 @@ fn serve(listener: TcpListener, cfg: Arc<Config>) {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
-                let (c, busy) = (cfg.clone(), cfg.guard.busy());
-                if let Err((mut s, _)) = spawn_limited(&active, MAX_CLIENTS, (stream, busy), move |(s, _busy)| session(s, peer, c)) {
+                // Conectar no es actividad: cuenta recién con un login correcto (ver `session`).
+                let c = cfg.clone();
+                if let Err(mut s) = spawn_limited(&active, MAX_CLIENTS, stream, move |s| session(s, peer, c)) {
                     let _ = s.write_all(b"421 Demasiados clientes, intenta luego\r\n");
                 }
             }
@@ -174,7 +175,7 @@ impl Session {
                 ".." => {
                     parts.pop()?;
                 }
-                c if c.contains('\0') || (cfg!(windows) && c.contains(':')) => return None,
+                c if c.contains('\0') || (cfg!(windows) && c.contains(':')) || reserved_device_name(c) => return None,
                 c => parts.push(c.to_string()),
             }
         }
@@ -428,6 +429,9 @@ fn session(ctrl: TcpStream, peer: SocketAddr, cfg: Arc<Config>) {
     let mut s = Session { ctrl, peer, cfg: cfg.clone(), cwd: vec![], data: Data::None };
     let mut user_ok = false;
     let mut authed = false;
+    // Actividad válida: solo existe con la sesión autenticada (un escáner o un login fallido no
+    // mantienen vivo el servidor).
+    let mut _active: Option<crate::srvguard::Busy> = None;
     let mut fails = 0;
     if s.reply(220, "NetTerminal FTP").is_err() {
         return;
@@ -442,15 +446,20 @@ fn session(ctrl: TcpStream, peer: SocketAddr, cfg: Arc<Config>) {
             break;
         };
         let (cmd, arg) = line.split_once(' ').map(|(c, a)| (c.to_ascii_uppercase(), a.to_string())).unwrap_or((line.to_ascii_uppercase(), String::new()));
+        if authed {
+            cfg.guard.touch();
+        }
         let r = match cmd.as_str() {
             "USER" => {
                 user_ok = ct_eq(arg.trim().as_bytes(), cfg.user.as_bytes());
                 authed = false;
+                _active = None;
                 s.reply(331, "Contraseña")
             }
             "PASS" => {
                 if user_ok && ct_eq(arg.as_bytes(), cfg.pass.as_bytes()) {
                     authed = true;
+                    _active = Some(cfg.guard.busy());
                     s.reply(230, "Sesión iniciada")
                 } else {
                     fails += 1;
@@ -918,9 +927,55 @@ mod tests {
     fn ftp_session_in_progress_keeps_the_server_alive() {
         let (addr, root, flag, _, _) = bare_server(&[], Some(300));
         let mut f = Ftp::connect(addr);
+        assert!(f.cmd("USER nt").starts_with("331"));
+        assert!(f.cmd("PASS clave").starts_with("230"));
         std::thread::sleep(Duration::from_millis(900));
-        assert!(flag.load(Ordering::SeqCst), "con un cliente conectado no está inactivo");
+        assert!(flag.load(Ordering::SeqCst), "con una sesión autenticada no está inactivo");
         assert!(f.cmd("NOOP").starts_with("200"));
+        flag.store(false, Ordering::SeqCst);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ftp_unauthenticated_connections_and_failed_logins_do_not_keep_the_server_alive() {
+        let (addr, root, flag, _, t) = bare_server(&[], Some(900));
+        // Un escáner conectado sin credenciales y otro que falla el login, en bucle.
+        let mut idle_conn = Ftp::connect(addr);
+        let t0 = Instant::now();
+        while flag.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(6) {
+            let _ = idle_conn.ctrl.write_all(b"NOOP\r\n");
+            let mut l = String::new();
+            let _ = idle_conn.r.read_line(&mut l);
+            if let Ok(c) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+                let _ = c.set_read_timeout(Some(Duration::from_millis(300)));
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut c = c;
+                let mut l = String::new();
+                let _ = r.read_line(&mut l);
+                let _ = c.write_all(b"USER nt\r\nPASS mala\r\n");
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        t.join().unwrap();
+        assert!(!flag.load(Ordering::SeqCst), "sin login correcto el servidor se detiene");
+        assert!(t0.elapsed() < Duration::from_secs(5), "tardó {:?}", t0.elapsed());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ftp_rejects_windows_device_names() {
+        let (addr, root, flag, _) = server(true);
+        fs::write(root.join("console.log"), b"x").unwrap();
+        let mut f = Ftp::connect(addr);
+        f.cmd("USER nt");
+        assert!(f.cmd("PASS clave").starts_with("230"));
+        for n in ["NUL", "nul.txt", "COM1", "lpt9.bin", "sub/CON", "aux", "ios.bin.", "ios.bin "] {
+            assert!(f.cmd(&format!("SIZE {n}")).starts_with("550"), "SIZE {n}");
+            assert!(f.cmd(&format!("RETR {n}")).starts_with("550"), "RETR {n}");
+            assert!(f.cmd(&format!("STOR {n}")).starts_with("553"), "STOR {n}");
+            assert!(f.cmd(&format!("CWD {n}")).starts_with("550"), "CWD {n}");
+        }
+        assert!(f.cmd("SIZE console.log").starts_with("213"), "un nombre parecido sigue permitido");
         flag.store(false, Ordering::SeqCst);
         fs::remove_dir_all(root).unwrap();
     }
