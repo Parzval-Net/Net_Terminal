@@ -76,6 +76,34 @@ fn session_lock(conn: &str) -> Arc<Mutex<()>> {
     map.entry(conn.to_string()).or_default().clone()
 }
 
+/// Aviso al frontend mientras un trabajo espera el turno de su sesión (evento "wait").
+pub const WAIT_TURN: &str = "Esperando turno: la sesión está ocupada con otro trabajo (respaldo, transferencia o lectura)";
+/// El turno no llegó dentro del plazo del trabajo: se cancela sin enviar nada al equipo.
+pub const TURN_TIMEOUT: &str = "La sesión siguió ocupada con otro trabajo (respaldo, transferencia o lectura) durante todo el plazo: no se envió el comando. Reintenta cuando termine";
+
+/// Toma el turno de la sesión esperando como máximo `max`. Si está ocupada llama a `waiting` una
+/// vez (para avisar "esperando turno") y sigue intentando; pasado el plazo devuelve None. Antes un
+/// trabajo corto (descubrimiento, tráfico) quedaba en silencio detrás de uno de hasta 2 h.
+fn take_turn<'a>(lock: &'a Mutex<()>, max: Duration, mut waiting: impl FnMut()) -> Option<std::sync::MutexGuard<'a, ()>> {
+    let start = Instant::now();
+    let mut told = false;
+    loop {
+        match lock.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if !told {
+            told = true;
+            waiting();
+        }
+        if start.elapsed() >= max {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100).min(max.saturating_sub(start.elapsed()).max(Duration::from_millis(1))));
+    }
+}
+
 /// `answer = false`: no confirma nada; ante una pregunta responde que no (Ctrl+C en "[confirm]"),
 /// espera el prompt y lo informa en el resultado (`declined`).
 pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, answer: bool) -> Result<String, String> {
@@ -95,7 +123,11 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
         let conns = &app.state::<crate::AppState>().conns;
         let p = patterns();
         let lock = session_lock(&conn);
-        let _turn = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // El plazo de espera del turno es el mismo del trabajo: un descubrimiento de 60 s no espera 2 h.
+        let Some(_turn) = take_turn(&lock, deadline, || emit("wait", WAIT_TURN.into(), None)) else {
+            emit("error", TURN_TIMEOUT.into(), None);
+            return emit("done", String::new(), None);
+        };
         // La suscripción se toma recién al tocar el turno: antes acumularía la salida del trabajo anterior.
         let Some(rx) = conns.tap(&conn) else {
             emit("error", "La sesión no está conectada".into(), None);
@@ -279,6 +311,37 @@ mod tests {
         let _held = a.lock().unwrap();
         assert!(session_lock("conn-a").try_lock().is_err(), "un segundo trabajo espera su turno");
         assert!(session_lock("conn-b").try_lock().is_ok());
+    }
+
+    #[test]
+    fn busy_session_waits_with_notice_and_gives_up_at_the_deadline() {
+        let lock = Mutex::new(());
+        // Libre: sin aviso.
+        let mut told = 0;
+        assert!(take_turn(&lock, Duration::from_millis(50), || told += 1).is_some());
+        assert_eq!(told, 0);
+        // Ocupada todo el plazo: un aviso y se rinde.
+        let held = lock.lock().unwrap();
+        let t = Instant::now();
+        let mut told = 0;
+        assert!(take_turn(&lock, Duration::from_millis(250), || told += 1).is_none());
+        assert_eq!(told, 1, "se avisa una sola vez");
+        assert!(t.elapsed() >= Duration::from_millis(250) && t.elapsed() < Duration::from_secs(2));
+        drop(held);
+        // Se libera durante la espera: toma el turno.
+        let lock = Arc::new(Mutex::new(()));
+        let held = lock.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let h = std::thread::spawn(move || {
+            let _g = held.lock().unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        rx.recv().unwrap();
+        let mut told = 0;
+        assert!(take_turn(&lock, Duration::from_secs(5), || told += 1).is_some());
+        assert_eq!(told, 1);
+        h.join().unwrap();
     }
 
     #[test]

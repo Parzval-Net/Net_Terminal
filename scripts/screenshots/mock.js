@@ -719,15 +719,19 @@ const handlers = {
   cred_set: ({ sessionId }) => ((vault.exists = true), vaultIds.add(sessionId), null),
   cred_has: ({ sessionId }) => vaultIds.has(sessionId),
   cred_delete: ({ sessionId }) => (vaultIds.delete(sessionId), null),
-  vault_create: () => ((vault.exists = vault.unlocked = true), null),
+  // Como el backend: cada cambio de la bóveda avisa con "creds-changed" (Topología relee las guardadas).
+  vault_create: () => ((vault.exists = vault.unlocked = true), emit("creds-changed", null), null),
   vault_unlock: ({ master }) => {
     if (master.length < 8) throw "Contraseña maestra incorrecta o archivo de credenciales alterado";
     vault.unlocked = true;
+    emit("creds-changed", null);
     return null;
   },
-  vault_lock: () => ((vault.unlocked = false), null),
+  vault_lock: () => ((vault.unlocked = false), emit("creds-changed", null), null),
   vault_change: () => null,
-  vault_reset: () => ((vault.exists = vault.unlocked = false), vaultIds.clear(), null),
+  vault_reset: () => ((vault.exists = vault.unlocked = false), vaultIds.clear(), emit("creds-changed", null), null),
+  // Desarme del autocompletado antes de un salto (window.__disarms: conexiones desarmadas, en orden).
+  disarm_autofill: ({ conn }) => ((window.__disarms ??= []).push(conn), true),
   set_logging: ({ enabled }) => (enabled ? "~/NetTerminal/data/logs/core-sw01_20261021-101500.log" : null),
   // ?alert: simula un aviso de la primera alerta activa sobre la última sesión abierta.
   alerts_configure: ({ rules }) => {
@@ -744,7 +748,11 @@ const handlers = {
     // El nombre de la sesión de esa pestaña es la ruta completa "pivote › h1 › … › N": al conectar se llega al pivote.
     const session = / › /.test(sess.name ?? "") ? { ...sess, name: sess.name.split(" › ")[0] } : / vía /.test(sess.name ?? "") ? { ...sess, name: sess.name.replace(/^.* vía /, "") } : sess;
     connSessions.set(id, session);
-    const text = terminalFor(session).replace(/\r?\n/g, "\r\n");
+    // Pestaña de salto (o ?fewlines=1 en todas): login corto, unas pocas líneas en un viewport grande. Así
+    // queda en blanco todo lo que está bajo el cursor, como en una pestaña recién abierta de verdad.
+    const full = terminalFor(session);
+    const few = / › /.test(sess.name ?? "") || new URLSearchParams(location.search).has("fewlines");
+    const text = (few && session.type !== "local" ? `\nUnauthorized access prohibited.\n\n${full.trimEnd().split("\n").pop()}` : full).replace(/\r?\n/g, "\r\n");
     const ch = { data: onData.id, index: 0 };
     channels.set(id, ch);
     const send = (t) => cbs.get(ch.data)?.({ index: ch.index++, message: enc.encode(t).buffer });
@@ -1265,9 +1273,10 @@ if (new URLSearchParams(location.search).has("video")) {
       if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip.trim())) throw "IP del vecino no válida";
       hopCreds.set(`${ip.trim()}|${user.trim()}`, { pw: password, used: hopCreds.get(`${ip.trim()}|${user.trim()}`)?.used ?? null });
       vault.exists = true;
+      emit("creds-changed", null);
       return null;
     },
-    hop_cred_delete: ({ ip, user }) => (hopCreds.delete(`${ip}|${user}`), null),
+    hop_cred_delete: ({ ip, user }) => (hopCreds.delete(`${ip}|${user}`), emit("creds-changed", null), null),
     hop_type_password: ({ conn, source, ip, user, cmd, token }) => {
       window.__hopWrites.push({ source, ip, token });
       if (usedTokens.has(token)) throw "La contraseña de este salto ya se intentó una vez: no se reintenta";

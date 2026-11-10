@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
@@ -31,6 +32,8 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { runOnDevice } from "../../lib/deviceRun";
+import { atPrompt } from "../../lib/cliText";
+import { ConfirmDialog } from "../ConfirmDialog";
 import {
   ADDRESS_COMMANDS,
   CommandOutput,
@@ -139,6 +142,7 @@ import {
   planOpen,
   reconcileRoute,
   routeNames,
+  setRunningHops,
   routeTitle,
   routeTooltip,
   stepHop,
@@ -1313,8 +1317,11 @@ export function TopologyTool({
    * "Abrir terminal" salta con esa ruta más un paso, no con otra por el diagrama. No se persiste (las pestañas tampoco).
    */
   const cameFromRef = useRef(new Map<string, CameFrom>());
-  /** Pestaña con la que se descubre (la de "Equipo", o la de un equipo con "Descubrir vecinos de X"). */
-  const discConn = useRef("");
+  /**
+   * Un descubrimiento a la vez (consola o SNMP): dos en paralelo mezclaban sus comandos y salidas.
+   * Ref además del estado: dos clics en el mismo render ven el valor al día.
+   */
+  const busyRef = useRef(false);
   const [hopUser, setHopUser] = useState("");
   /** Credencial del pivote en esta ruta: desmarcada por defecto y por cada salto (no se recuerda). */
   const [usePivotCred, setUsePivotCred] = useState(false);
@@ -1329,7 +1336,15 @@ export function TopologyTool({
       .then((l) => setSavedHops(new Set(l.map((x) => hopCredKey(x.ip, x.user)))))
       .catch(() => setSavedHops(new Set()));
   }, []);
-  useEffect(() => refreshCreds(), [refreshCreds]);
+  // Al volver a la vista y ante cada cambio de la bóveda o de las contraseñas de vecinos (desbloquear en
+  // Ajustes después de abrir Topología, guardar o borrar una): sin esto se usaba el estado del montaje.
+  useEffect(() => {
+    if (visible) refreshCreds();
+  }, [visible, refreshCreds]);
+  useEffect(() => {
+    const un = listen("creds-changed", () => refreshCreds());
+    return () => void un.then((f) => f()).catch(() => {});
+  }, [refreshCreds]);
   /** Contraseñas tecleadas por el usuario en un salto: se ofrece guardarlas (el campo oculto las pide aparte). */
   const [saveOffers, setSaveOffers] = useState<{ to: string; ip: string; user: string; update?: boolean }[]>([]);
   const [pwDialog, setPwDialog] = useState<{ to: string; ip: string; user: string; update?: boolean } | null>(null);
@@ -1397,10 +1412,12 @@ export function TopologyTool({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Por defecto la sesión más reciente.
+  // Por defecto la sesión más reciente, sin contar las que tienen un salto en curso (están cambiando de equipo).
   useEffect(() => {
-    if (!term && terminals.length) setConnId(terminals[terminals.length - 1].connId);
-  }, [terminals, term]);
+    if (term) return;
+    const free = terminals.filter((t) => !t.tabId || !hopRunning.includes(t.tabId));
+    if (free.length) setConnId(free[free.length - 1].connId);
+  }, [terminals, term, hopRunning]);
   // "Conectar y seguir la ruta": en cuanto la sesión abierta queda conectada, se elige sola en "Equipo".
   useEffect(() => {
     if (!pendingFollow) return;
@@ -1416,15 +1433,15 @@ export function TopologyTool({
     if (VENDORS.some((x) => x.id === v)) setVendor(v as TopoVendor);
   }, [term]);
 
-  /** Ejecuta un comando; si el equipo no lo reconoce, prueba la sintaxis alternativa. */
-  const run = async (cmd: string): Promise<string> => {
+  /** Ejecuta un comando en la conexión `conn`; si el equipo no lo reconoce, prueba la sintaxis alternativa. */
+  const runIn = async (conn: string, cmd: string): Promise<string> => {
     setMsg(`Ejecutando: ${cmd}`);
-    const conn = discConn.current || term!.connId;
-    const out = await runOnDevice(conn, cmd, 60);
+    const onWait = (text: string) => setMsg(`${text} (${cmd})`);
+    const out = await runOnDevice(conn, cmd, 60, onWait);
     const alt = FALLBACK_COMMANDS[cmd];
     if (alt && isCliError(out)) {
       setMsg(`Ejecutando: ${alt}`);
-      return runOnDevice(conn, alt, 60);
+      return runOnDevice(conn, alt, 60, onWait);
     }
     return out;
   };
@@ -1433,13 +1450,28 @@ export function TopologyTool({
   const macOn = sourceOn(sources, "mac");
 
   const selectedVendor = vendor;
-  const discover = async (forced?: TopoVendor, over?: TerminalRef): Promise<void> => {
+  /** Descubre con la pestaña elegida en "Equipo" o con `over`: uno a la vez, y nunca en una pestaña ocupada. */
+  const discover = async (over?: TerminalRef): Promise<void> => {
     const tab = over ?? term;
     if (!tab) return;
-    discConn.current = tab.connId;
-    const vendor = forced ?? selectedVendor;
+    if (busyRef.current) return setMsg("Ya hay un descubrimiento en curso: espera a que termine.");
+    const why = tabBlock(tab.tabId);
+    if (why) return setMsg(why);
+    busyRef.current = true;
     setBusy(true);
     setMsg("");
+    try {
+      await discoverWith(tab, tab.connId);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  /** Comandos de descubrimiento en la conexión `conn` (la de la pestaña `tab`, fija durante todo el descubrimiento). */
+  const discoverWith = async (tab: TerminalRef, conn: string, forced?: TopoVendor): Promise<void> => {
+    const vendor = forced ?? selectedVendor;
+    const run = (cmd: string) => runIn(conn, cmd);
     try {
       const outputs: string[] = [];
       for (const cmd of NEIGHBOR_COMMANDS[vendor]) {
@@ -1449,7 +1481,7 @@ export function TopologyTool({
           const seen = vendorFromPrompt(out);
           if (seen && seen !== vendor) {
             setVendor(seen);
-            return await discover(seen, over);
+            return await discoverWith(tab, conn, seen);
           }
         }
         outputs.push(out);
@@ -1543,16 +1575,17 @@ export function TopologyTool({
     } catch (e) {
       setMsg(String(e));
     }
-    discConn.current = "";
-    setBusy(false);
   };
 
   /** "Descubrir vecinos de X": con la pestaña que está en ese equipo (la deja elegida en "Equipo"). */
   const discoverFromTab = (tabId: string) => {
     const t = liveRef.current.terminals.find((x) => x.tabId === tabId);
     if (!t) return setMsg("Esa pestaña ya no está conectada.");
+    if (busyRef.current) return setMsg("Ya hay un descubrimiento en curso: espera a que termine.");
+    const why = tabBlock(tabId);
+    if (why) return setMsg(why);
     setConnId(t.connId);
-    void discover(undefined, t);
+    void discover(t);
   };
 
   /**
@@ -1566,6 +1599,8 @@ export function TopologyTool({
       setMsg(`El perfil "${p.name || p.host}" no tiene secretos guardados: guárdalos en Herramientas › SNMP (bóveda cifrada).`);
       return;
     }
+    if (busyRef.current) return setMsg("Ya hay un descubrimiento en curso: espera a que termine.");
+    busyRef.current = true;
     setBusy(true);
     setMsg(`Leyendo por SNMP ${p.host} (LLDP, CDP${routingOn ? ", OSPF, BGP" : ""}${macOn ? ", tabla MAC y ARP" : ""})…`);
     try {
@@ -1625,6 +1660,7 @@ export function TopologyTool({
     } catch (e) {
       setMsg(`SNMP: ${String(e)}`);
     }
+    busyRef.current = false;
     setBusy(false);
   };
 
@@ -2044,7 +2080,40 @@ export function TopologyTool({
 
   const liveRef = useRef({ terminals, tabs, onConfirm, onFocusTab });
   liveRef.current = { terminals, tabs, onConfirm, onFocusTab };
-  const syncRuns = () => setHopRunning([...hopRuns.current.keys()]);
+  const syncRuns = () => {
+    setHopRunning([...hopRuns.current.keys()]);
+    // Para el aviso al cerrar Herramientas (App): cerrarla corta los saltos en curso.
+    setRunningHops([...hopRuns.current.values()].map((r) => r.route.steps[r.route.steps.length - 1]?.name ?? r.route.origin));
+  };
+  useEffect(() => () => setRunningHops([]), []);
+
+  /** Pestañas que no muestran su prompt (login, paginador, comando en curso): no se les envía nada. */
+  const [notReady, setNotReady] = useState<string[]>([]);
+  useEffect(() => {
+    if (!visible) return;
+    const check = () => {
+      const ids = liveRef.current.terminals.filter((t) => t.tabId && t.screen && !atPrompt(t.screen(6))).map((t) => t.tabId!);
+      setNotReady((cur) => (cur.join("|") === ids.join("|") ? cur : ids));
+    };
+    check();
+    const timer = window.setInterval(check, 1000);
+    return () => window.clearInterval(timer);
+  }, [visible]);
+  const HOP_BUSY = "Esa pestaña tiene un salto en curso: espera a que llegue o falle.";
+  const NOT_AT_PROMPT = "La pestaña no está en su prompt (login, contraseña, paginador o un comando en curso): termina ahí primero.";
+  /** Por qué no se puede enviar nada ahora a esa pestaña (descubrir, "exit"), leyendo su pantalla en este momento. */
+  const tabBlock = (tabId?: string): string | undefined => {
+    if (!tabId) return undefined;
+    if (hopRuns.current.has(tabId)) return HOP_BUSY;
+    const t = liveRef.current.terminals.find((x) => x.tabId === tabId);
+    return t?.screen && !atPrompt(t.screen(6)) ? NOT_AT_PROMPT : undefined;
+  };
+  /** Lo mismo para pintar los botones (estado de este render), con el descubrimiento en curso primero. */
+  const blockWhy = (tabId?: string): string | undefined =>
+    busy ? "Ya hay un descubrimiento en curso: espera a que termine." : !tabId ? undefined : hopRunning.includes(tabId) ? HOP_BUSY : notReady.includes(tabId) ? NOT_AT_PROMPT : undefined;
+
+  /** Preguntas de llave de los saltos, de a una: dos saltos que la piden a la vez ya no se pisan. */
+  const [keyAsks, setKeyAsks] = useState<{ tabId: string; conn: string; cmd: string; title: string; message: string }[]>([]);
 
   /** Pestaña abierta (o caída) de la sesión con la IP del equipo: sirve de pivote candidato por IP. */
   const addrsOf = (id: string) => {
@@ -2052,8 +2121,15 @@ export function TopologyTool({
     return n ? knownAddrs(n) : [];
   };
 
+  /**
+   * El backend solo escribe contraseñas en una pestaña que es copia de una sesión guardada (la del pivote):
+   * con una conexión rápida sin guardar no se promete nada.
+   */
+  const isSavedSession = (s: Session) => !!s.id && sessions.some((x) => x.id === s.id);
+  const pivotHasPassword = (s: Session) => isSavedSession(s) && sessions.find((x) => x.id === s.id)?.save_password === true;
   /** Credencial a escribir en el "Password:" de un paso: la guardada del vecino o, si se pidió, la del pivote. */
-  const credFor = (st: { ip: string; user?: string }, pivotOk: boolean): "saved" | "pivot" | undefined => {
+  const credFor = (st: { ip: string; user?: string }, pivotSaved: boolean, pivotOk: boolean): "saved" | "pivot" | undefined => {
+    if (!pivotSaved) return undefined;
     if (!skipSavedCred && st.user && savedHops.has(hopCredKey(st.ip, st.user))) return "saved";
     if (usePivotCred && pivotOk) return "pivot";
     return undefined;
@@ -2072,9 +2148,10 @@ export function TopologyTool({
       setMsg(`Ya hay un salto a ${target.name} en curso.`);
       return;
     }
-    const pivotOk = full.session.save_password === true && !!full.session.id;
+    const pivotSaved = isSavedSession(full.session);
+    const pivotOk = full.session.save_password === true && pivotHasPassword(full.session);
     const base = tab ? Math.max(0, full.steps.length - 1) : 0;
-    const steps = full.steps.slice(base).map((st) => ({ cmd: st.cmd, to: st.prompt ?? st.name, ip: st.ip, user: st.user, cred: credFor(st, pivotOk) }));
+    const steps = full.steps.slice(base).map((st) => ({ cmd: st.cmd, to: st.prompt ?? st.name, ip: st.ip, user: st.user, cred: credFor(st, pivotSaved, pivotOk) }));
     let tabId = tab?.tabId;
     let pivot: string | undefined;
     if (tab) {
@@ -2132,6 +2209,7 @@ export function TopologyTool({
     const finish = (r: HopRun, view: Partial<HopView>) => {
       hopRuns.current.delete(r.tabId);
       syncRuns();
+      setKeyAsks((l) => (l.some((k) => k.tabId === r.tabId) ? l.filter((k) => k.tabId !== r.tabId) : l));
       setView(r, { ...view, until: Date.now() + (view.status === "failed" ? 60_000 : 20_000) });
     };
     const reached = (r: HopRun, a: { step: number; at: string }) =>
@@ -2148,7 +2226,12 @@ export function TopologyTool({
       const id = t.connId;
       const st = r.job.steps[(a as { step?: number }).step ?? r.job.index];
       if (a.kind === "send") {
-        invoke("write", { id, data: a.data }).catch((e) => setMsg(String(e)));
+        // Antes del salto se desarma el autocompletado de la conexión (la pestaña es copia de la sesión del
+        // pivote): si el pivote entró con llave, el primer "Password:" sería el del vecino y recibiría la del
+        // pivote. Esa solo llega al vecino por hop_type_password, con la casilla marcada. Sin desarme no se envía.
+        invoke("disarm_autofill", { conn: id })
+          .then(() => invoke("write", { id, data: a.data }))
+          .catch((e) => setMsg(String(e)));
         setMsg(`Enviado "${r.job.cmd}" en la pestaña "${t.name}"${r.job.steps.length > 1 ? ` (paso ${a.step + 1} de ${r.job.steps.length})` : ""}: ${st?.cred ? "se escribe la contraseña sola" : `autentícate en ${r.job.neighbor} si lo pide`}.`);
         // El pivote se registra con el nombre que mostró su prompt.
         if (a.step === 0 && !r.inplace && a.from && nodeId(a.from) !== nodeId(r.route.origin))
@@ -2156,19 +2239,17 @@ export function TopologyTool({
       } else if (a.kind === "notify") {
         setMsg(a.text);
         setView(r, { text: a.text });
-      } else if (a.kind === "ask")
-        liveRef.current.onConfirm({
+      } else if (a.kind === "ask") {
+        const ask = {
+          tabId: r.tabId,
+          conn: id,
+          cmd: r.job.cmd,
           title: `¿Aceptar la llave de ${r.job.neighbor}?`,
           message: `${a.line}\n\n${r.job.pivot ?? "El equipo de partida"} no conocía a ${r.job.neighbor} (${st?.ip ?? ""}). Compara la huella en la pestaña antes de aceptar. Si ya contestaste ahí, cancela.`,
-          label: "Aceptar y continuar",
-          defaultCancel: true,
-          action: () => {
-            // La pantalla pudo cambiar mientras se decidía: solo se contesta si la pregunta sigue ahí.
-            const cur = liveRef.current.terminals.find((x) => x.connId === id);
-            const s = classifyHopScreen(afterEcho(cur?.screen?.(30) ?? "", r.job.cmd));
-            if (s.kind === "hostkey") invoke("write", { id, data: `${s.answer}\r` }).catch((e) => setMsg(String(e)));
-          },
-        });
+        };
+        // En cola: con dos saltos pidiendo la llave a la vez, cada pregunta se responde en su pestaña.
+        setKeyAsks((l) => [...l.filter((k) => k.tabId !== r.tabId), ask]);
+      }
       else if (a.kind === "fill") {
         // La contraseña la escribe el backend directo en la conexión (nunca pasa por aquí) y solo con el pedido a la vista.
         if (!st?.ip) {
@@ -2247,7 +2328,12 @@ export function TopologyTool({
         const step = stepHop(r.job, screen, now);
         r.job = step.job;
         for (const a of step.actions) apply(r, t, a);
-        if (hopRuns.current.has(r.tabId)) setView(r, { waiting: hopWaiting(r.job, screen), step: r.job.index + 1, total: r.job.steps.length });
+        if (hopRuns.current.has(r.tabId)) {
+          const waiting = hopWaiting(r.job, screen);
+          setView(r, { waiting, step: r.job.index + 1, total: r.job.steps.length });
+          // Contestada en la pestaña (o ya no se pregunta): su diálogo pendiente sobra.
+          if (waiting !== "hostkey") setKeyAsks((l) => (l.some((k) => k.tabId === r.tabId) ? l.filter((k) => k.tabId !== r.tabId) : l));
+        }
       }
       // Los terminados se quitan solos pasado su tiempo.
       setHopViews((vs) => (vs.some((v) => v.until && v.until < now) ? vs.filter((v) => !v.until || v.until >= now) : vs));
@@ -2287,6 +2373,8 @@ export function TopologyTool({
   /** Vuelve al equipo anterior de la ruta (exit en la misma pestaña). */
   const hopBack = () => {
     if (!term?.tabId || !termRoute?.steps.length) return;
+    const why = tabBlock(term.tabId);
+    if (why) return setMsg(why);
     invoke("write", { id: term.connId, data: "exit\r" }).catch((e) => setMsg(String(e)));
     const tabId = term.tabId;
     setRoutes((m) => ({ ...m, [tabId]: truncateRoute(termRoute, termRoute.steps.length - 1) }));
@@ -2395,7 +2483,7 @@ export function TopologyTool({
   const crumbState = (name: string): { state: "connected" | "down" | "none"; tabId?: string } => {
     const id = nodeId(name);
     const { terminals: terms, tabs: briefs } = liveRef.current;
-    const hit = tabAtDevice(id, addrsOf(id), terms, routesRef.current);
+    const hit = tabAtDevice(id, addrsOf(id), terms, routesRef.current, new Set(hopRuns.current.keys()));
     if (hit?.tab.tabId) return { state: "connected", tabId: hit.tab.tabId };
     const down = briefs.find((b) => b.status === "closed" && routesRef.current[b.tabId] && nodeId(routeNames(routesRef.current[b.tabId]).slice(-1)[0]) === id);
     return down ? { state: "down", tabId: down.tabId } : { state: "none" };
@@ -2765,6 +2853,8 @@ export function TopologyTool({
       ? "En pausa (herramienta oculta)"
       : `Cada ${ui.interval} s · ${plural(linkRates.size, "enlace", "enlaces")} con datos${trafficCli ? " · también por consola" : ""}`;
   const diffCount = diff ? diff.addedLinks.length + diff.removedLinks.length + diff.addedNodes.length + diff.removedNodes.length : 0;
+  // Por qué no se puede descubrir ni enviar "exit" en la pestaña elegida en "Equipo" (se muestra bajo el botón).
+  const termWhy = term ? blockWhy(term.tabId) : undefined;
   const hint = "Descubre los vecinos del equipo conectado y sigue la ruta salto a salto: clic en un vecino y 'Abrir terminal' (o doble clic). Solo usa comandos de consulta.";
 
   return (
@@ -2793,6 +2883,7 @@ export function TopologyTool({
                     <option key={t.connId} value={t.connId}>
                       {t.name}
                       {t.host ? ` · ${t.host}` : ""}
+                      {t.tabId && hopRunning.includes(t.tabId) ? " (salto en curso)" : ""}
                     </option>
                   ))}
                 </select>
@@ -2828,7 +2919,7 @@ export function TopologyTool({
             Estado de puertos
           </label>
           {mode === "cli" ? (
-            <Btn kind="primary" disabled={!term || busy} onClick={() => void discover()} title={hint}>
+            <Btn kind="primary" disabled={!term || !!termWhy} onClick={() => void discover()} title={termWhy ?? hint}>
               <Radar size={14} className={busy ? "animate-pulse" : ""} /> {busy ? "Leyendo…" : "Descubrir vecinos"}
             </Btn>
           ) : (
@@ -2837,11 +2928,12 @@ export function TopologyTool({
             </Btn>
           )}
         </div>
+        {mode === "cli" && term && termWhy && !busy && <p className="mt-1.5 text-[11.5px] text-warn">{`"${term.name}": ${termWhy}`}</p>}
         {mode === "cli" && term && termRoute && termRoute.steps.length > 0 && (
           <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11.5px]">
             <span className="text-muted">Pestaña de salto "{term.name}":</span>
             <span className="font-medium">{routeTooltip(termRoute)}</span>
-            <Btn className="!h-6 !px-2 !text-[11.5px]" disabled={busy} onClick={hopBack} title='Envía "exit" en esa pestaña: vuelve al equipo anterior de la ruta'>
+            <Btn className="!h-6 !px-2 !text-[11.5px]" disabled={!!termWhy} onClick={hopBack} title={termWhy ?? 'Envía "exit" en esa pestaña: vuelve al equipo anterior de la ruta'}>
               Volver a {routeNames(termRoute).slice(-2)[0]}
             </Btn>
           </div>
@@ -3012,12 +3104,30 @@ export function TopologyTool({
           offers={saveOffers}
           onView={(tabId) => onFocusTab(tabId)}
           onDiscover={discoverFromTab}
+          discoverWhy={blockWhy}
           onDismiss={(tabId) => setHopViews((vs) => vs.filter((v) => v.tabId !== tabId))}
           onUpdate={(a) => setPwDialog({ to: a.to, ip: a.ip, user: a.user, update: true })}
           onAlertDone={(a) => setCredAlerts((l) => l.filter((x) => x !== a))}
           onOffer={(o) => setPwDialog(o)}
           onOfferDone={(o) => setSaveOffers((l) => l.filter((x) => x !== o))}
         />
+        {visible && keyAsks[0] && (
+          <ConfirmDialog
+            title={keyAsks[0].title}
+            message={keyAsks.length > 1 ? `${keyAsks[0].message}\n\nDespués: ${keyAsks.length - 1} pregunta${keyAsks.length > 2 ? "s" : ""} más de otros saltos.` : keyAsks[0].message}
+            confirmLabel="Aceptar y continuar"
+            defaultCancel
+            onCancel={() => setKeyAsks((l) => l.slice(1))}
+            onConfirm={() => {
+              const k = keyAsks[0];
+              setKeyAsks((l) => l.slice(1));
+              // La pantalla pudo cambiar mientras se decidía: solo se contesta si la pregunta sigue ahí.
+              const cur = liveRef.current.terminals.find((x) => x.connId === k.conn);
+              const s = classifyHopScreen(afterEcho(cur?.screen?.(30) ?? "", k.cmd));
+              if (s.kind === "hostkey") invoke("write", { id: k.conn, data: `${s.answer}\r` }).catch((e) => setMsg(String(e)));
+            }}
+          />
+        )}
         {pwDialog && (
           <HopPasswordDialog
             title={pwDialog.update ? `Actualizar la contraseña de ${pwDialog.to}` : `Guardar la contraseña de ${pwDialog.to}`}
@@ -3715,7 +3825,10 @@ export function TopologyTool({
                   onRun={runChoice}
                   onFocus={onFocusTab}
                   onDiscover={discoverFromTab}
-                  canDiscover={mode === "cli" && !busy}
+                  canDiscover={mode === "cli"}
+                  discoverWhy={blockWhy}
+                  pivotSaved={isSavedSession}
+                  pivotHasPassword={pivotHasPassword}
                   onMenu={(e, n) => {
                     const r = e.currentTarget.getBoundingClientRect();
                     setNodeMenu({ x: r.left, y: r.bottom + 4, items: openMenuItems(n) });

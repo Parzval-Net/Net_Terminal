@@ -120,10 +120,19 @@ fn cred_delete(session_id: String, state: State<'_, AppState>) -> Result<(), Str
 // Igual que las de sesión: ninguna se devuelve. Se guardan desde un campo oculto, se listan sin
 // valor y solo se escriben en una conexión con `hop_type_password`.
 
+/// Avisa al frontend que cambió la bóveda (bloqueo, desbloqueo, creación) o las contraseñas de
+/// vecinos: Topología relee qué vecinos tienen contraseña guardada. Sin datos: nunca contraseñas.
+fn creds_changed<T>(app: &tauri::AppHandle, r: Result<T, String>) -> Result<T, String> {
+    if r.is_ok() {
+        let _ = app.emit("creds-changed", ());
+    }
+    r
+}
+
 #[tauri::command(async)]
-fn hop_cred_set(ip: String, user: String, password: String, state: State<'_, AppState>) -> Result<(), String> {
+fn hop_cred_set(ip: String, user: String, password: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let password = zeroize::Zeroizing::new(password);
-    state.creds.hop_set(&ip, &user, &password)
+    creds_changed(&app, state.creds.hop_set(&ip, &user, &password))
 }
 
 #[tauri::command(async)]
@@ -132,8 +141,8 @@ fn hop_cred_has(ip: String, user: String, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command(async)]
-fn hop_cred_delete(ip: String, user: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.creds.hop_delete(&ip, &user)
+fn hop_cred_delete(ip: String, user: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    creds_changed(&app, state.creds.hop_delete(&ip, &user))
 }
 
 #[tauri::command(async)]
@@ -201,32 +210,42 @@ fn hop_type_password(
     Ok(())
 }
 
+/// Desarma el autocompletado de la contraseña guardada de una conexión. Topología lo pide antes de
+/// enviar un comando de salto: la pestaña de salto es copia de la sesión del pivote y, si el pivote
+/// entró con llave SSH, el primer "Password:" sería el del vecino. La contraseña del pivote solo
+/// llega a un vecino por `hop_type_password`, cuando el usuario lo pidió.
 #[tauri::command(async)]
-fn vault_create(master: String, state: State<'_, AppState>) -> Result<(), String> {
-    let master = zeroize::Zeroizing::new(master);
-    state.creds.create(&master)
+fn disarm_autofill(conn: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.conns.disarm_autofill(&conn)
 }
 
 #[tauri::command(async)]
-fn vault_unlock(master: String, state: State<'_, AppState>) -> Result<(), String> {
+fn vault_create(master: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let master = zeroize::Zeroizing::new(master);
-    state.creds.unlock(&master)
+    creds_changed(&app, state.creds.create(&master))
+}
+
+#[tauri::command(async)]
+fn vault_unlock(master: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let master = zeroize::Zeroizing::new(master);
+    creds_changed(&app, state.creds.unlock(&master))
 }
 
 #[tauri::command]
-fn vault_lock(state: State<'_, AppState>) {
-    state.creds.lock()
+fn vault_lock(app: tauri::AppHandle, state: State<'_, AppState>) {
+    state.creds.lock();
+    let _ = creds_changed(&app, Ok(()));
 }
 
 #[tauri::command(async)]
-fn vault_change(old: String, new: String, state: State<'_, AppState>) -> Result<(), String> {
+fn vault_change(old: String, new: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let (old, new) = (zeroize::Zeroizing::new(old), zeroize::Zeroizing::new(new));
-    state.creds.change(&old, &new)
+    creds_changed(&app, state.creds.change(&old, &new))
 }
 
 #[tauri::command(async)]
-fn vault_reset(state: State<'_, AppState>) -> Result<(), String> {
-    state.creds.reset()
+fn vault_reset(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    creds_changed(&app, state.creds.reset())
 }
 
 /// La conexión va al mismo destino que la sesión guardada: un frontend comprometido no puede
@@ -1384,6 +1403,7 @@ pub fn run() {
             hop_cred_delete,
             hop_cred_list,
             hop_type_password,
+            disarm_autofill,
             vault_create,
             vault_unlock,
             vault_lock,

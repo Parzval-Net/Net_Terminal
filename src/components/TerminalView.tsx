@@ -20,6 +20,7 @@ import { paneBodyStyle } from "../lib/split";
 import { credStatus, needsUnlock } from "../lib/credentials";
 import { VaultUnlock } from "./VaultUnlock";
 import { SCP_EXIT_EVENT, type ScpExit } from "../lib/scpVerify";
+import { recentRows } from "../lib/termBuffer";
 
 /** Avisa al gestor de archivos que terminó (o se cerró) una pestaña de transferencia. */
 const notifyScpExit = (transfer: string, reason: string | null, closed = false) =>
@@ -987,9 +988,11 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       clearScrollback: () => term.clear(),
       reset: () => term.reset(),
       recentText: (n) => {
+        // Hasta la fila del cursor: las filas en blanco del viewport bajo él no cuentan (ver recentRows).
         const buf = term.buffer.active;
+        const [start, end] = recentRows(buf, n);
         const out: string[] = [];
-        for (let i = Math.max(0, buf.length - n); i < buf.length; i++) out.push(buf.getLine(i)?.translateToString(true) ?? "");
+        for (let i = start; i < end; i++) out.push(buf.getLine(i)?.translateToString(true) ?? "");
         return out.join("\n");
       },
       copyAll: async () => {

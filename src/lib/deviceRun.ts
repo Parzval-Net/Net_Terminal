@@ -21,12 +21,16 @@ export interface DeviceResult {
  * su salida cuando vuelve el prompt. Los eventos que llegan antes de conocer el id del
  * trabajo se guardan y se procesan después, para no perder respuestas rápidas.
  */
-export async function runOnDevice(conn: string, command: string, timeoutSecs = 60): Promise<string> {
-  return (await runOnDeviceResult(conn, command, timeoutSecs)).output;
+export async function runOnDevice(conn: string, command: string, timeoutSecs = 60, onWait?: (text: string) => void): Promise<string> {
+  return (await runOnDeviceResult(conn, command, timeoutSecs, true, onWait)).output;
 }
 
-/** Igual que runOnDevice, con el veredicto. `answer = false`: no confirma preguntas del equipo. */
-export async function runOnDeviceResult(conn: string, command: string, timeoutSecs = 60, answer = true): Promise<DeviceResult> {
+/**
+ * Igual que runOnDevice, con el veredicto. `answer = false`: no confirma preguntas del equipo.
+ * `onWait`: la sesión está ocupada con otro trabajo (respaldo, transferencia) y este espera su turno
+ * (evento "wait" del backend, con el motivo); si el turno no llega en el plazo, termina con error.
+ */
+export async function runOnDeviceResult(conn: string, command: string, timeoutSecs = 60, answer = true, onWait?: (text: string) => void): Promise<DeviceResult> {
   let job: string | null = null;
   const early: JobEvent[] = [];
   let output = "";
@@ -43,6 +47,7 @@ export async function runOnDeviceResult(conn: string, command: string, timeoutSe
       declined = e.data.declined ?? undefined;
     }
     if (e.kind === "error") failure = e.text;
+    if (e.kind === "wait") onWait?.(e.text);
     if (e.kind === "done") resolveDone();
   };
 

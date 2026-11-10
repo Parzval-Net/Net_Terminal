@@ -4,6 +4,7 @@ import type { HopWaiting, OpenChoice, OpenPlan } from "../../lib/hopTab";
 import { hopCredKey } from "../../lib/hopCred";
 import { CredStatus, needsUnlock } from "../../lib/credentials";
 import type { TopoNode } from "../../lib/topology";
+import type { Session } from "../../types";
 import { VaultUnlock } from "../VaultUnlock";
 import { Btn } from "./ui";
 
@@ -64,6 +65,7 @@ export function HopCards({
   offers,
   onView,
   onDiscover,
+  discoverWhy,
   onDismiss,
   onUpdate,
   onAlertDone,
@@ -76,6 +78,8 @@ export function HopCards({
   onView: (tabId: string) => void;
   /** Descubre los vecinos del equipo alcanzado con su pestaña. */
   onDiscover: (tabId: string) => void;
+  /** Por qué no se puede descubrir ahora con esa pestaña (otro descubrimiento, salto en curso, sin prompt). */
+  discoverWhy: (tabId: string) => string | undefined;
   onDismiss: (tabId: string) => void;
   onUpdate: (a: CredAlert) => void;
   onAlertDone: (a: CredAlert) => void;
@@ -88,6 +92,7 @@ export function HopCards({
       {views.map((v) => {
         const via = v.route.slice(0, -1).join(" › ");
         const go = v.status === "running" ? GO[v.waiting] : undefined;
+        const why = v.status === "done" ? discoverWhy(v.tabId) : undefined;
         return (
           <div
             key={v.tabId}
@@ -99,9 +104,16 @@ export function HopCards({
               {v.status === "running" ? `Paso ${Math.min(v.step, v.total)} de ${v.total}: ${WAITING[v.waiting]}` : v.status === "done" ? "Conectado" : "No se pudo llegar"}
             </span>
             {v.text && v.status !== "done" && <span className={`min-w-0 basis-full text-[11.5px] ${v.status === "failed" ? "text-danger" : "text-muted"}`}>{v.text}</span>}
+            {why && <span className="min-w-0 basis-full text-[11.5px] text-warn">{why}</span>}
             <span className="ml-auto flex items-center gap-1">
               {v.status === "done" && (
-                <Btn kind="primary" className="!h-6 !px-2 !text-[11.5px]" onClick={() => onDiscover(v.tabId)} title={`Lee los vecinos de ${v.target} con su pestaña y los agrega al diagrama (comandos de consulta)`}>
+                <Btn
+                  kind="primary"
+                  className="!h-6 !px-2 !text-[11.5px]"
+                  disabled={!!why}
+                  onClick={() => onDiscover(v.tabId)}
+                  title={why ?? `Lee los vecinos de ${v.target} con su pestaña y los agrega al diagrama (comandos de consulta)`}
+                >
                   <Radar size={12} /> Descubrir vecinos
                 </Btn>
               )}
@@ -193,6 +205,9 @@ export function ConnectPanel({
   onFocus,
   onDiscover,
   canDiscover,
+  discoverWhy,
+  pivotSaved,
+  pivotHasPassword,
   onMenu,
   hopping,
   proto,
@@ -217,6 +232,12 @@ export function ConnectPanel({
   /** Descubrir los vecinos del equipo con la pestaña que está en él. */
   onDiscover: (tabId: string) => void;
   canDiscover: boolean;
+  /** Por qué no se puede descubrir ahora con esa pestaña; el botón queda deshabilitado con el motivo a la vista. */
+  discoverWhy: (tabId: string) => string | undefined;
+  /** La sesión del pivote es una sesión guardada: sin ella el backend no escribe ninguna contraseña. */
+  pivotSaved: (s: Session) => boolean;
+  /** La sesión guardada del pivote tiene su contraseña guardada. */
+  pivotHasPassword: (s: Session) => boolean;
   onMenu: (e: React.MouseEvent<HTMLButtonElement>, n: TopoNode) => void;
   hopping: boolean;
   proto: "ssh" | "telnet";
@@ -244,8 +265,13 @@ export function ConnectPanel({
   const hopChoice = [plan.primary, ...plan.alternatives].find((c) => c?.kind === "route" || c?.kind === "inplace");
   const route = hopChoice?.route;
   const savedOf = route ? route.steps.filter((s) => s.user && savedHops.has(hopCredKey(s.ip, s.user))) : [];
-  const pivotOk = route?.session.save_password === true && !!route.session.id;
+  // Las contraseñas solo se escriben en una copia de una sesión guardada (la del pivote): con una conexión
+  // rápida no se promete nada y se dice por qué.
+  const saved = !!route && pivotSaved(route.session);
+  const pivotOk = saved && route?.session.save_password === true && pivotHasPassword(route.session);
   const locked = needsUnlock(vault);
+  const focusTab = plan.primary?.kind === "focus" ? plan.primary.tabId : undefined;
+  const why = focusTab ? discoverWhy(focusTab) : undefined;
 
   return (
     <div className="space-y-1.5 pt-1.5 border-t border-line">
@@ -307,19 +333,33 @@ export function ConnectPanel({
       </div>
       <p className="text-[11.5px] text-muted leading-snug">{primaryNote(plan)}</p>
       {plan.notice && plan.primary && <p className="text-[11.5px] text-warn leading-snug">{plan.notice}</p>}
-      {canDiscover && plan.primary?.kind === "focus" && plan.primary.tabId && (
-        <Btn className="w-full" onClick={() => onDiscover(plan.primary!.tabId!)} title="Lee los vecinos (CDP/LLDP, ruteo y las fuentes activas) con la pestaña de este equipo y los agrega al diagrama. Solo comandos de consulta.">
-          <Radar size={13} aria-hidden /> Descubrir vecinos de {n.name}
-        </Btn>
+      {canDiscover && focusTab && (
+        <>
+          <Btn
+            className="w-full"
+            disabled={!!why}
+            onClick={() => onDiscover(focusTab)}
+            title={why ?? "Lee los vecinos (CDP/LLDP, ruteo y las fuentes activas) con la pestaña de este equipo y los agrega al diagrama. Solo comandos de consulta."}
+          >
+            <Radar size={13} aria-hidden /> Descubrir vecinos de {n.name}
+          </Btn>
+          {why && <p className="text-[11.5px] text-warn leading-snug">{why}</p>}
+        </>
       )}
       {route && (
         <div className="space-y-1 text-[11.5px]">
-          {savedOf.length > 0 && (
+          {savedOf.length > 0 && saved && (
             <p className={skipSaved ? "text-muted line-through" : "text-accent"}>
               Se usará la contraseña guardada de {savedOf.map((s) => `${s.name} (${s.user})`).join(", ")}.
             </p>
           )}
-          {savedOf.length > 0 && (
+          {savedOf.length > 0 && !saved && (
+            <p className="text-warn">
+              Hay contraseña guardada de {savedOf.map((s) => `${s.name} (${s.user})`).join(", ")}, pero no se escribirá sola: el pivote ({route.origin}) es una
+              conexión sin guardar y la app solo escribe contraseñas en pestañas que son copia de una sesión guardada. Guarda la sesión del pivote para usarla.
+            </p>
+          )}
+          {savedOf.length > 0 && saved && (
             <label className="flex items-center gap-1.5">
               <input type="checkbox" className="accent-[var(--accent)]" checked={skipSaved} onChange={(e) => onSkipSaved(e.target.checked)} />
               No usar las guardadas en este salto

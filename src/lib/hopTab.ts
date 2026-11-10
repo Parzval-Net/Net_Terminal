@@ -34,6 +34,21 @@ export const FILL_SETTLE_MS = 400;
 /** Tope de saltos de una ruta (el pivote no cuenta: pivote + hasta 8 saltos). Pasado el tope se avisa, no se calla. */
 export const MAX_ROUTE_STEPS = 8;
 
+/**
+ * Saltos en curso (destino de cada uno), para que quien cierra Herramientas avise antes de cortarlos:
+ * Topología los publica al cambiar y los borra al desmontarse. Solo nombres, nunca credenciales.
+ */
+let running: string[] = [];
+export const runningHops = (): string[] => running;
+export const setRunningHops = (names: string[]) => {
+  running = [...names];
+};
+/** Frase para el aviso al cerrar Herramientas: los saltos en curso se cortan (vacía si no hay). */
+export const hopCloseNote = (names: string[]): string =>
+  names.length
+    ? `${names.length === 1 ? `Hay un salto en curso hacia ${names[0]}` : `Hay ${names.length} saltos en curso (${names.slice(0, 4).join(", ")}${names.length > 4 ? "…" : ""})`}: al cerrar Herramientas se detiene${names.length === 1 ? "" : "n"} y su pestaña queda en el último equipo alcanzado, sin escribir contraseñas. `
+    : "";
+
 /** Sesión de la pestaña de salto: la misma del pivote, sin reconectar sola ni repetir comandos de inicio. */
 export function hopTabSession(base: Session, title: string): Session {
   return {
@@ -64,8 +79,13 @@ const HOSTKEY =
   /are you sure you want to continue connecting|\(yes\/no(?:\/\[fingerprint\])?\)\s*\??\s*$|continue to access it\?\s*\[y\/n\]|save the server's public key\?\s*\[y\/n\]|accept (?:the )?(?:host )?key/i;
 const PASSWORD = /(?:password|passphrase|contraseña)(?: for [^:\n]*)?\s*:\s*$/i;
 const USERNAME = /(?:username|user name|login(?: as)?|usuario)\s*:\s*$/i;
-/** La contraseña que se escribió fue rechazada (no cuenta "Password:" a secas: eso lo ve el conteo de pedidos). */
-const AUTH_REJECTED = /permission denied|authentication (?:failed|failure)|access denied|login (?:invalid|incorrect)|bad (?:passwords|secrets)|too many authentication/i;
+/**
+ * La contraseña que se escribió fue rechazada (no cuenta "Password:" a secas: eso lo ve el conteo de pedidos).
+ * Al comienzo de una línea (con "% " o "usuario@host: " delante, como lo dicen los equipos y OpenSSH): un
+ * banner o MOTD que menciona "unauthorized access denied" a mitad de frase no es un rechazo.
+ */
+const AUTH_REJECTED =
+  /^\s*(?:%\s*)?(?:[\w.@\-[\]:]+:\s+)?(?:permission denied|authentication (?:failed|failure)|access denied|login (?:invalid|incorrect)|bad (?:passwords|secrets))|too many authentication/im;
 
 /** Última línea con texto, sin espacios al final. */
 export function lastLine(text: string): string {
@@ -98,6 +118,52 @@ export function passwordPrompts(text: string): number {
 
 /** El equipo dijo que rechazó la credencial ("Permission denied", "% Authentication failed", "% Login invalid"). */
 export const authRejected = (text: string) => AUTH_REJECTED.test(text);
+
+/** Líneas con texto, sin \r ni espacios al final. */
+const textLines = (t: string) =>
+  t
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim());
+
+/**
+ * Las últimas `n` líneas con texto. Los errores de un salto quedan justo antes del prompt al que se
+ * vuelve (o al final si no vuelve): un banner o MOTD más arriba ("unauthorized access denied",
+ * "sessions timed out after 10 min") no es un fallo.
+ */
+export const tailLines = (t: string, n: number) => textLines(t).slice(-n).join("\n");
+
+/**
+ * Lo que respondió el equipo al pedido de contraseña número `k` (1 = el primero del texto): las líneas
+ * que siguen a ese pedido. Un banner previo al login no cuenta como rechazo de la contraseña escrita.
+ * Sin ese pedido a la vista (salió de la pantalla), las últimas líneas.
+ */
+export function afterPasswordPrompt(text: string, k: number): string {
+  const lines = text.replace(/\r/g, "").split("\n");
+  let seen = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (PASSWORD.test(lines[i].trimEnd()) && ++seen === k) return lines.slice(i + 1).join("\n");
+  }
+  return k > 0 ? tailLines(text, 2) : text;
+}
+
+/** Línea de log del equipo (syslog por consola, "*Oct 21 10:42: %LINK-3-UPDOWN"), no del salto. */
+const LOG_LINE = /^\s*(?:\*|%|\w{3}\s+\d+\s+\d+:\d+)|%[A-Z0-9_]+-\d-/;
+
+/**
+ * Pivote y vecino con el mismo hostname ("Switch", "Router"): el prompt no dice si se llegó. Hubo llegada
+ * si entre el eco del comando y el prompt final se respondió un pedido de usuario o contraseña, o el
+ * equipo mostró algo propio (banner, MOTD, aviso de llave aceptada). El prompt solo, o tras un mensaje
+ * de error o de log, es el pivote otra vez. Los errores reconocidos se evalúan antes (`hopError`).
+ */
+export function arrivedSameName(after: string): boolean {
+  const lines = textLines(after);
+  if (lines.length < 2 || !promptName(lines[lines.length - 1])) return false;
+  const body = lines.slice(0, -1);
+  if (body.some((l) => PASSWORD.test(l) || USERNAME.test(l))) return true;
+  return body.some((l) => !promptName(l) && !/^\s*trying\b/i.test(l) && !LOG_LINE.test(l) && !hopError(l));
+}
 
 /** El texto que sigue al eco del último `cmd` (lo que respondió el equipo); sin eco, todo el texto. */
 export function afterEcho(text: string, cmd: string): string {
@@ -180,15 +246,19 @@ export const samePrompt = (a: string, b: string) => looseId(a) === looseId(b);
 /**
  * En qué equipo de la ruta está la pestaña según su pantalla: el índice (0 = pivote), `-1` si el
  * prompt es de un equipo que no está en la ruta (la pestaña cambió de equipo) o `null` si la pantalla
- * no muestra un prompt (login, paginador, comando en curso): no se puede verificar.
+ * no muestra un prompt (login, paginador, comando en curso) o si el prompt es de varios equipos de la ruta
+ * (mismo hostname en el pivote y el vecino): no se puede verificar.
  */
 export function routePosition(r: TabRoute, screen: string): number | null {
   const s = classifyHopScreen(screen);
   if (s.kind !== "prompt") return null;
   const shown = routePrompts(r);
   const names = routeNames(r);
-  for (let i = shown.length - 1; i >= 0; i--) if (samePrompt(s.name, shown[i]) || samePrompt(s.name, names[i])) return i;
-  return -1;
+  const hits: number[] = [];
+  for (let i = shown.length - 1; i >= 0; i--) if (samePrompt(s.name, shown[i]) || samePrompt(s.name, names[i])) hits.push(i);
+  // Dos equipos de la ruta con el mismo hostname ("Switch" › "Switch"): el prompt no dice en cuál está.
+  if (hits.length > 1) return null;
+  return hits.length ? hits[0] : -1;
 }
 
 /** La ruta ajustada a lo que dice el prompt: un "exit" tecleado a mano la acorta. Misma referencia si no cambia. */
@@ -399,8 +469,11 @@ export function stepHop(job: HopJob, screen: string, now: number): { job: HopJob
   }
   const after = afterEcho(screen, j.cmd);
   const s = classifyHopScreen(after);
-  const err = hopError(after);
+  // Solo lo cercano al final: un banner o MOTD del vecino ("access denied", "timed out") no es un fallo.
+  const err = hopError(tailLines(after, s.kind === "prompt" ? 3 : 1));
   const quiet = now - j.changedAt;
+  // Lo que respondió el equipo a la contraseña escrita por la app (un banner previo al login no cuenta).
+  const credReply = () => afterPasswordPrompt(after, j.credBase);
   if (s.kind === "hostkey") {
     if (!j.told.includes(`hostkey:${s.line}`)) {
       j = { ...j, told: [...j.told, `hostkey:${s.line}`] };
@@ -421,7 +494,7 @@ export function stepHop(job: HopJob, screen: string, now: number): { job: HopJob
     }
     if (src && j.cred === "asking") return { job: j, actions };
     if (src && j.cred === "typed") {
-      if (passwordPrompts(after) > j.credBase || authRejected(after)) {
+      if (passwordPrompts(after) > j.credBase || authRejected(credReply())) {
         j = { ...j, cred: "rejected" };
         actions.push({
           kind: "cred-rejected",
@@ -444,7 +517,7 @@ export function stepHop(job: HopJob, screen: string, now: number): { job: HopJob
     return { job: j, actions };
   }
   // Escrita la credencial y sin nuevo pedido: si el equipo dijo que la rechazó, se avisa (el SSH puede seguir pidiendo la clave).
-  if (step?.cred && j.cred === "typed" && authRejected(after) && s.kind !== "prompt") {
+  if (step?.cred && j.cred === "typed" && authRejected(tailLines(credReply(), 3)) && s.kind !== "prompt") {
     j = { ...j, cred: "rejected" };
     actions.push({
       kind: "cred-rejected",
@@ -454,7 +527,9 @@ export function stepHop(job: HopJob, screen: string, now: number): { job: HopJob
     });
   }
   if (s.kind === "prompt") {
-    if (!samePrompt(s.name, j.pivot ?? "")) {
+    // Mismo hostname en el pivote y el vecino: llegó si hubo login o banner del vecino antes del prompt.
+    const atPivot = samePrompt(s.name, j.pivot ?? "") && (!!err || !arrivedSameName(after));
+    if (!atPivot) {
       if (quiet >= PROMPT_STABLE_MS) {
         const mism = expected(j.neighbor, s.name) ? undefined : `Llegó a ${s.name} y se esperaba ${j.neighbor}.`;
         if (!last) {
@@ -755,13 +830,15 @@ export function planOpen(inp: PlanInput): OpenPlan {
  * Pestaña (la mejor) que está en un equipo, para enfocarla o leer su tráfico: la que su ruta o su
  * prompt ubican allí (verificada por prompt primero). Una pestaña que muestra el prompt de otro equipo
  * no cuenta, aunque su sesión apunte a este: cambió de equipo. Sin prompt a la vista (login,
- * paginador), una pestaña sin ruta cuenta por su nombre o por la IP de su sesión.
+ * paginador), una pestaña sin ruta cuenta por su nombre o por la IP de su sesión. Entre iguales, la más
+ * reciente; las de `busy` (salto en curso) quedan al final.
  */
 export function tabAtDevice<T extends { name: string; host?: string; screen?: (n: number) => string; tabId?: string }>(
   id: string,
   addrs: string[],
   tabs: T[],
   routes?: Record<string, TabRoute>,
+  busy?: ReadonlySet<string>,
 ): { tab: T; verified: boolean } | undefined {
   let best: { tab: T; verified: boolean; r: number } | undefined;
   for (const t of tabs) {
@@ -772,6 +849,8 @@ export function tabAtDevice<T extends { name: string; host?: string; screen?: (n
     if (nodeId(d.name) === id) r = d.verified ? 0 : 2;
     else if (!route && !d.verified && t.host && addrs.includes(t.host)) r = 3;
     else continue;
+    // Una pestaña con un salto en curso (esperando el prompt del pivote para saltar) solo si no hay otra.
+    if (t.tabId && busy?.has(t.tabId)) r += 4;
     if (!best || r <= best.r) best = { tab: t, verified: d.verified, r };
   }
   return best && { tab: best.tab, verified: best.verified };

@@ -480,6 +480,8 @@ assert.ok(H.authRejected("% Authentication failed"));
 assert.ok(H.authRejected("% Login invalid"));
 assert.ok(H.authRejected("Access denied"));
 assert.ok(!H.authRejected("Last login: Mon\r\nBanner: authorized access only"));
+assert.ok(!H.authRejected("WARNING: unauthorized access denied. Disconnect now."), "un banner a mitad de frase no es un rechazo");
+assert.ok(H.authRejected("noc@192.0.2.11: Permission denied (publickey,password)."));
 assert.equal(kind("noc@192.0.2.11's password: "), "password");
 assert.equal(kind("(noc@192.0.2.11) Password: "), "password");
 assert.equal(kind("Enter passphrase for key '/home/u/.ssh/id_ed25519':"), "password");
@@ -715,3 +717,94 @@ console.log("hopTab: ok");
   assert.equal(hopCredKey(" 192.0.2.1 ", "noc"), "192.0.2.1|noc");
 }
 
+
+// ---------- Pivote y vecino con el mismo hostname ("Switch" › "Switch") ----------
+{
+  const SW = "ssh -l noc 192.0.2.40";
+  const same = () => H.newHopJob({ cmd: SW, neighbor: "Switch", pivot: "Switch", now: 0, ip: "192.0.2.40", user: "noc" });
+  const playSame = (frames) => play(same(), [["Switch#", 1000], ...frames]);
+  // Llegó: pidió contraseña (la escribió el usuario) y mostró su banner antes del prompt.
+  let s = playSame([
+    [`Switch#${SW}\r\nPassword: `, 600],
+    [`Switch#${SW}\r\nPassword: \r\nUnauthorized access prohibited.\r\nSwitch#`, 1500],
+  ]);
+  assert.equal(s.job.phase, "done", "con login y banner del vecino, el mismo prompt es llegada");
+  assert.ok(!s.acts.some((a) => a.kind === "fail"));
+  // Llegó con llave SSH (sin contraseña): el banner del vecino basta.
+  s = playSame([[`Switch#${SW}\r\nLast login: Mon Nov  9 10:00:00 2026 from 192.0.2.1\r\nSwitch#`, 1500]]);
+  assert.equal(s.job.phase, "done", "banner del vecino y prompt");
+  // Volvió al pivote sin entrar: el prompt solo, de vuelta, sigue siendo un fallo.
+  s = playSame([[`Switch#${SW}\r\nSwitch#`, 2000]]);
+  assert.equal(s.job.phase, "failed");
+  assert.match(s.acts.find((a) => a.kind === "fail").reason, /volvió a Switch/);
+  // Error real tras el eco: fallo con su motivo, aunque el prompt sea el mismo.
+  s = playSame([[`Switch#${SW}\r\nPassword: \r\n% Authentication failed\r\nSwitch#`, 2000]]);
+  assert.equal(s.job.phase, "failed");
+  assert.match(s.acts.find((a) => a.kind === "fail").reason, /autenticación rechazada/);
+  s = playSame([[`Switch#${SW}\r\n% Connection refused by remote host\r\nSwitch#`, 2000]]);
+  assert.match(s.acts.find((a) => a.kind === "fail").reason, /conexión rechazada/);
+  // Un log del pivote por consola entre el eco y el prompt no es un banner del vecino.
+  s = playSame([[`Switch#${SW}\r\n*Nov  9 10:00:01: %LINK-3-UPDOWN: Interface Gi1/0/3, changed state to down\r\nSwitch#`, 2000]]);
+  assert.equal(s.job.phase, "failed");
+  assert.ok(H.arrivedSameName("Password: \nbanner\nSwitch#"));
+  assert.ok(!H.arrivedSameName("Switch#"));
+  assert.ok(!H.arrivedSameName("Trying 192.0.2.40 ...\nSwitch#"));
+  // La ruta con dos equipos del mismo nombre no se puede ubicar por el prompt: no se verifica ni se acorta.
+  const twin = { origin: "Switch", session: SESSION, steps: [{ name: "Switch", ip: "192.0.2.40", cmd: SW, user: "noc" }] };
+  assert.equal(H.routePosition(twin, "x\nSwitch#"), null);
+  assert.equal(H.reconcileRoute(twin, "x\nSwitch#"), twin, "un prompt ambiguo no acorta la ruta");
+  assert.deepEqual(H.tabDevice({ name: "t", screen: () => "Switch#" }, twin), { name: "Switch", verified: false, index: 1 });
+}
+
+// ---------- Banner o MOTD con "access denied" / "timed out" no es un fallo ----------
+{
+  const MOTD = "WARNING: unauthorized access denied. Idle sessions timed out after 10 min.";
+  // Credencial guardada escrita: el banner previo al login no la da por rechazada.
+  let s = play(chain({ s1: { cred: "saved" } }), [
+    [home, 1000],
+    [`core-sw01#${C1}\r\n${MOTD}\r\nPassword: `, 600],
+  ]);
+  assert.ok(s.acts.some((a) => a.kind === "fill"));
+  s.job = H.hopCredResult(s.job, true);
+  s = play(s.job, [[`core-sw01#${C1}\r\n${MOTD}\r\nPassword: `, 1000]], s.t);
+  assert.ok(!s.acts.some((a) => a.kind === "cred-rejected"), "el MOTD previo al login no es un rechazo de la contraseña escrita");
+  // Tras la contraseña, el MOTD del vecino y una pausa larga antes del prompt: no es un fallo.
+  s = play(s.job, [[`core-sw01#${C1}\r\n${MOTD}\r\nPassword: \r\n${MOTD}\r\nLoading profile...`, 3000]], s.t);
+  assert.ok(!s.acts.some((a) => a.kind === "fail" || a.kind === "cred-rejected"), "un MOTD con esas palabras no corta el salto");
+  s = play(s.job, [[`core-sw01#${C1}\r\n${MOTD}\r\nPassword: \r\n${MOTD}\r\nLoading profile...\r\ndist-sw01#`, 1500]], s.t);
+  assert.ok(s.acts.some((a) => a.kind === "step" && a.at === "dist-sw01"));
+  // El rechazo real, después del pedido respondido, sí se reconoce.
+  s = play(chain({ s1: { cred: "saved" } }), [
+    [home, 1000],
+    [`core-sw01#${C1}\r\n${MOTD}\r\nPassword: `, 600],
+  ]);
+  s.job = H.hopCredResult(s.job, true);
+  s = play(s.job, [[`core-sw01#${C1}\r\n${MOTD}\r\nPassword: \r\nPermission denied, please try again.`, 600]], s.t);
+  assert.ok(s.acts.some((a) => a.kind === "cred-rejected"));
+  assert.equal(H.tailLines("a\r\n\r\nb\r\nc  \r\n", 2), "b\nc");
+  assert.equal(H.afterPasswordPrompt("banner denied\nPassword: \nok\nsw#", 1), "ok\nsw#");
+}
+
+// ---------- Pestaña de un equipo: la de salto en curso queda al final ----------
+{
+  const atPivot = [
+    { connId: "c1", tabId: "t1", name: "core-sw01", host: "192.0.2.1", screen: pane("core-sw01#") },
+    { connId: "c9", tabId: "t9", name: "acc-sw01 vía dist-sw01", host: "192.0.2.1", screen: pane("core-sw01#") },
+  ];
+  const rts = { t9: H.truncateRoute(route3, 0) };
+  assert.equal(H.tabAtDevice("core-sw01", ["192.0.2.1"], atPivot, rts)?.tab.connId, "c9", "sin saltos en curso, la más reciente");
+  assert.equal(H.tabAtDevice("core-sw01", ["192.0.2.1"], atPivot, rts, new Set(["t9"]))?.tab.connId, "c1", "la que espera el prompt para saltar, no");
+  assert.equal(H.tabAtDevice("core-sw01", ["192.0.2.1"], atPivot.slice(1), rts, new Set(["t9"]))?.tab.connId, "c9", "si es la única, sí");
+}
+
+// ---------- Aviso al cerrar Herramientas con saltos en curso ----------
+{
+  assert.deepEqual(H.runningHops(), []);
+  assert.equal(H.hopCloseNote([]), "");
+  H.setRunningHops(["acc-sw01"]);
+  assert.deepEqual(H.runningHops(), ["acc-sw01"]);
+  assert.match(H.hopCloseNote(H.runningHops()), /^Hay un salto en curso hacia acc-sw01: al cerrar Herramientas se detiene /);
+  assert.match(H.hopCloseNote(["a", "b"]), /^Hay 2 saltos en curso \(a, b\): .* se detienen /);
+  H.setRunningHops([]);
+}
+console.log("hopTab (mismo hostname, banners, cierre): ok");

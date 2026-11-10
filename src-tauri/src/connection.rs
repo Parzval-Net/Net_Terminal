@@ -127,6 +127,17 @@ impl Mirror {
         }
     }
 
+    /// Suelta el autocompletado (y con él la contraseña): no responde ningún pedido más.
+    fn disarm_autofill(&mut self) -> bool {
+        match self.autofill.take() {
+            Some((mut af, _)) => {
+                af.disarm();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Posición absoluta donde empieza la línea actual (la última del historial).
     fn line_start(&self) -> u64 {
         let h = &self.history;
@@ -548,6 +559,15 @@ impl ConnectionManager {
         };
         let mut m = lock(&mirror);
         m.type_secret(&input, &fill.secret, newline, host, strict)
+    }
+
+    /// Desarma el autocompletado de la contraseña guardada de la conexión (ver `AutoFill::disarm`).
+    /// Topología lo pide antes de enviar un comando de salto: la contraseña de la sesión solo llega a
+    /// un vecino por `type_hop`, a pedido. Devuelve si estaba armado.
+    pub fn disarm_autofill(&self, id: &str) -> Result<bool, String> {
+        let mirror = lock(&self.conns).get(id).ok_or("Sesión no conectada")?.sink.mirror.clone();
+        let mut m = lock(&mirror);
+        Ok(m.disarm_autofill())
     }
 
     /// Escribe la contraseña de un salto en el pedido de login que la pantalla muestra tras el
@@ -2130,6 +2150,36 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(super::Outgoing::Secret(_))));
         assert!(m.type_secret(&tx, "S3cret", "\r", None, false).unwrap_err().contains("ya se respondió"));
         assert!(rx.try_recv().is_err());
+    }
+
+    /// Pestaña de salto (copia de la sesión del pivote, con contraseña guardada): el pivote entró con
+    /// llave y el autocompletado sigue armado en su ventana de 60 s. Desarmado antes del comando de salto,
+    /// el "Password:" del vecino no recibe la contraseña del pivote.
+    #[test]
+    fn disarmed_autofill_never_answers_the_neighbor() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let armed = |m: &mut super::Mirror| {
+            let af = crate::autofill::AutoFill::new(zeroize::Zeroizing::new("Pivote-S3cret".into()), None, "\r", std::time::Instant::now());
+            m.autofill = Some((af, tx.clone()));
+        };
+        // Banner sin prompt aún (el pivote no terminó de mostrar su prompt): se desarma igual.
+        let mut m = super::Mirror::default();
+        armed(&mut m);
+        m.push(b"Welcome to core-sw01\r\n");
+        assert!(m.disarm_autofill(), "estaba armado");
+        assert!(!m.disarm_autofill(), "una segunda vez no hay nada que desarmar");
+        m.push(b"core-sw01#ssh -l noc 192.0.2.11\r\nPassword: ");
+        assert!(rx.try_recv().is_err(), "la contraseña del pivote no llegó al vecino");
+        // Sin desarmar, el prompt del pivote también lo suelta (defensa en profundidad).
+        let mut m = super::Mirror::default();
+        armed(&mut m);
+        m.push(b"Last login: Mon\r\ncore-sw01#");
+        assert!(m.autofill.is_none());
+        m.push(b"ssh -l noc 192.0.2.11\r\nPassword: ");
+        assert!(rx.try_recv().is_err());
+        // La del vecino sigue llegando solo por type_hop_secret, a pedido.
+        assert_eq!(m.type_hop_secret(&tx, "V3cino", "\r", "192.0.2.11", "ssh -l noc 192.0.2.11", "t|0"), Ok(()));
+        assert!(matches!(rx.try_recv(), Ok(super::Outgoing::Secret(s)) if &s[..] == b"V3cino\r"));
     }
 
     /// Contraseña de un salto: solo tras el eco del comando de salto, una vez por paso y sin llegar

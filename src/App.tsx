@@ -10,6 +10,7 @@ import { HistoryMenu } from "./components/HistoryMenu";
 import { TerminalView, TermController } from "./components/TerminalView";
 import type { CredChange } from "./components/SessionModal";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { hopCloseNote, runningHops } from "./lib/hopTab";
 import { CloseManyMessage } from "./components/CloseManyMessage";
 import { CloseScope, summarizeClose, tabsToClose } from "./lib/closeAll";
 import { NotesPanel } from "./components/NotesPanel";
@@ -430,11 +431,12 @@ function Workspace({
    */
   const requestCloseTools = async () => {
     const running = await invoke<string[]>("server_running").catch(() => [] as string[]);
-    if (!running.length) return closeTab("tools");
+    const hops = runningHops();
+    if (!running.length && !hops.length) return closeTab("tools");
     const names: Record<string, string> = { tftp: "TFTP", http: "HTTP", ftp: "FTP", syslog: "Syslog", snmptrap: "traps SNMP" };
     setConfirm({
       title: "¿Cerrar Herramientas?",
-      message: `Hay servidores activos (${running.map((k) => names[k] ?? k).join(", ")}). Siguen funcionando, pero Herramientas dejará de mostrar sus mensajes, transferencias y mediciones. Para salir sin cerrar Herramientas, usa ${modLabel}E.`,
+      message: `${running.length ? `Hay servidores activos (${running.map((k) => names[k] ?? k).join(", ")}). Siguen funcionando, pero Herramientas dejará de mostrar sus mensajes, transferencias y mediciones. ` : ""}${hopCloseNote(hops)}Para salir sin cerrar Herramientas, usa ${modLabel}E.`,
       label: "Cerrar Herramientas",
       danger: true,
       defaultCancel: true,

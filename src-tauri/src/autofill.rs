@@ -58,6 +58,13 @@ impl AutoFill {
         self.done
     }
 
+    /// Desarma el autocompletado: ya no responde ningún pedido (la contraseña se suelta con él).
+    /// Topología lo pide antes de enviar un comando de salto: si el pivote entró con llave SSH,
+    /// el primer "Password:" sería el del vecino y no debe recibir la contraseña del pivote.
+    pub fn disarm(&mut self) {
+        self.stop();
+    }
+
     fn stop(&mut self) {
         self.done = true;
         self.line.clear();
@@ -92,6 +99,13 @@ impl AutoFill {
         }
         let line = self.line.trim_end();
         if aborts(line) {
+            self.stop();
+            return None;
+        }
+        // Ya se entró al equipo sin contraseña (llave SSH, sin login): el prompt de comandos está a la
+        // vista. Cualquier "Password:" posterior es de otro equipo (un ssh o telnet lanzado desde aquí) o
+        // de enable, y no recibe la contraseña de esta sesión.
+        if is_cli_prompt(line) {
             self.stop();
             return None;
         }
@@ -184,6 +198,24 @@ fn names_host(line: &str, host: &str) -> bool {
         || (line.starts_with('(') && line.ends_with("password:") && line.contains(&format!("@{host}) ")))
 }
 
+/// Prompt de comandos de un equipo o shell ya logueado ("router#", "sw01>", "<HUAWEI>", "[~SW]",
+/// "noc@srv:~$"): una sola palabra, que empieza con letra o dígito (o "<" / "[") y termina en el
+/// carácter de prompt. Conservador: un banner con espacios, "####" o un pedido que termina en ":" no cuenta.
+fn is_cli_prompt(line: &str) -> bool {
+    let l = line.trim();
+    if l.len() < 2 || l.len() > 80 || l.contains(char::is_whitespace) || l.ends_with(':') {
+        return false;
+    }
+    let first = l.chars().next().unwrap_or(' ');
+    let last = l.chars().last().unwrap_or(' ');
+    match first {
+        '<' => last == '>',
+        '[' => last == ']' || ((last == '#' || last == '$') && l.contains(']')),
+        c if c.is_alphanumeric() => matches!(last, '#' | '>' | '$') && l[..l.len() - 1].chars().any(char::is_alphanumeric),
+        _ => false,
+    }
+}
+
 fn aborts(line: &str) -> bool {
     ABORT.iter().any(|a| line.contains(a))
 }
@@ -264,6 +296,34 @@ mod tests {
         // Keyboard-interactive de OpenSSH con prefijo (usuario@host).
         let mut a = AutoFill::new(Zeroizing::new("S3cret".into()), None, "\r", t).only_host(Some("Router1".into()));
         assert_eq!(sent(a.feed("(noc@router1) Password: ", t)).as_deref(), Some("S3cret\r"));
+    }
+
+    #[test]
+    fn device_prompt_disarms_before_a_neighbor_asks() {
+        // Pivote con llave SSH: no hubo "Password:" y aparece su prompt. El "Password:" que sigue es del
+        // vecino (comando de salto) y no recibe la contraseña del pivote.
+        for prompt in ["core-sw01#", "core-sw01>", "<ar-wan01>", "[~ar-wan01]", "noc@srv01:~$", "fw01#"] {
+            let (mut a, t) = af(None);
+            assert_eq!(sent(a.feed(&format!("Last login: Mon\r\n{prompt}"), t)), None, "{prompt}");
+            assert!(a.done(), "{prompt}");
+            assert_eq!(sent(a.feed("ssh -l noc 192.0.2.11\r\nPassword: ", t)), None, "{prompt}");
+        }
+        // Lo que no es un prompt no desarma: banners, separadores y pedidos de login.
+        for line in ["##########", "Authorized access only>", "User Access Verification", "login:", "-->"] {
+            let (mut a, t) = af(None);
+            a.feed(line, t);
+            assert!(!a.done(), "{line}");
+            assert_eq!(sent(a.feed("\nPassword: ", t)).as_deref(), Some("S3cret\r"), "{line}");
+        }
+    }
+
+    #[test]
+    fn disarm_stops_the_autofill() {
+        let (mut a, t) = af(Some("noc"));
+        a.disarm();
+        assert!(a.done());
+        assert_eq!(sent(a.feed("Username: ", t)), None);
+        assert_eq!(sent(a.feed("\nPassword: ", t)), None);
     }
 
     #[test]
