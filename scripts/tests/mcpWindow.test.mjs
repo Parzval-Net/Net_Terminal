@@ -119,10 +119,48 @@ const req = (detail, over = {}) => ({ tool: "run_command", detail, connection: "
   assert.equal(W.autoApprove(list, req("show clock"), T0, () => "change").auto, false);
   assert.equal(W.autoApprove(list, req("show clock"), T0, () => "disruptive").auto, false);
   assert.equal(W.autoApprove(list, req("reload"), T0, () => "read").auto, true);
-  // Agente sin Mcp-Session-Id: su ventana es la de clave vacía, distinta de las demás.
+  // Agente sin Mcp-Session-Id (clave vacía): nunca hay ventana, aunque exista una de clave vacía;
+  // si no, todos los clientes anónimos la compartirían. La app decide con autoApproveBatch.
   const anon = W.grantWindow([], { ...who, clientKey: "" }, 5, T0);
-  assert.equal(W.autoApprove(anon, req("show clock", { client_key: "" }), T0, computeRisk).auto, true);
-  assert.equal(W.autoApprove(anon, req("show clock"), T0, computeRisk).auto, false);
+  const decide = (l, r, now = T0) => W.autoApproveBatch(r, (x) => W.autoApprove(l, x, now, computeRisk));
+  for (const key of ["", undefined]) {
+    assert.equal(decide(anon, req("show clock", { client_key: key })).auto, false, String(key));
+    assert.equal(decide(list, req("show clock", { client_key: key })).auto, false, String(key));
+    assert.equal(W.canOfferWindowFor(req("show clock", { client_key: key })), false, String(key));
+  }
+  assert.equal(decide(anon, req("show clock")).auto, false);
+  assert.equal(decide(list, req("show clock")).auto, true);
+  assert.equal(decide(list, req("reload")).auto, false);
+}
+
+// ---------- Lote de run_commands: cada línea con la misma regla ----------
+{
+  const list = W.grantWindow([], who, 15, T0);
+  const batch = (lines, over = {}) => W.autoApproveBatch(req(lines.join("\n"), { tool: W.BATCH_TOOL, ...over }), (x) => W.autoApprove(list, x, T0 + MIN, computeRisk));
+  assert.deepEqual(batch(["show clock", "show version", "display interface brief"]), { auto: true, risk: "read" });
+  // Basta una línea que no pase para mostrar el diálogo, con el motivo de esa línea.
+  assert.deepEqual(batch(["show clock", "reload"]), { auto: false, reason: "línea 2: disruptive" });
+  assert.equal(batch(["show clock", "ping 192.0.2.10"]).auto, false);
+  assert.equal(batch(["show clock", "show\tclock"]).auto, false);
+  assert.equal(batch(["show clock", ""]).auto, false);
+  assert.equal(batch(["show clock", "x".repeat(W.AUTO_MAX_CHARS + 1)]).auto, false);
+  assert.equal(batch(Array(W.BATCH_MAX).fill("show clock")).auto, true);
+  assert.equal(batch(Array(W.BATCH_MAX + 1).fill("show clock")).auto, false);
+  // Otro agente, otra conexión o sin clave: sin ventana.
+  assert.equal(batch(["show clock"], { client_key: "k2" }).auto, false);
+  assert.equal(batch(["show clock"], { connection: "t2#1" }).auto, false);
+  assert.equal(batch(["show clock"], { client_key: "" }).auto, false);
+  // Un lote nunca pasa por autoApprove directo (no es una herramienta de una línea).
+  assert.equal(W.autoApprove(list, req("show clock", { tool: W.BATCH_TOOL }), T0, computeRisk).auto, false);
+  // El diálogo ofrece la ventana también en un lote, solo a un agente identificado.
+  assert.equal(W.canOfferWindowFor(req("show clock", { tool: W.BATCH_TOOL })), true);
+  assert.equal(W.canOfferWindowFor(req("show clock", { tool: W.BATCH_TOOL, connection: null })), false);
+  assert.equal(W.canOfferWindowFor({ tool: "open_session", detail: "Abrir sesión", connection: null, client_key: "k1" }), false);
+  // useMcp decide con autoApproveBatch y no otorga ventana sin clave; el token nuevo las revoca.
+  const hook = readFileSync(new URL("../../src/lib/useMcp.ts", import.meta.url), "utf8");
+  assert.ok(/autoApproveBatch\(req,/.test(hook), "useMcp.ts debe decidir con autoApproveBatch");
+  assert.ok(/minutes && req\.connection && req\.client_key/.test(hook), "sin clave no se otorga ventana");
+  assert.ok(/setWindows\(\[\]\), \[settings\.mcpToken\]/.test(hook), "cambiar el token revoca las ventanas");
 }
 
 // ---------- Riesgo por línea y oferta de la ventana ----------

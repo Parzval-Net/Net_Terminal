@@ -55,17 +55,43 @@ pub fn wait_for(
     }
 }
 
-/// Acumula salida hasta que pasan `idle` sin datos nuevos o se cumple `timeout`.
+/// Acumula salida hasta que pasan `idle` sin datos nuevos o se cumple `timeout` (lo que hacía
+/// `send_command` antes de reconocer el prompt; queda para pruebas y mediciones).
+#[cfg(test)]
 pub fn collect(rx: &Receiver<String>, idle: Duration, timeout: Duration) -> String {
+    collect_until(rx, idle, timeout, Duration::ZERO, &|_| false)
+}
+
+/// Como `collect`, pero termina en cuanto `done` reconoce el final en lo recibido (por ejemplo el
+/// prompt del equipo tras el eco del comando). Con `settle` mayor que cero no corta al instante:
+/// espera ese silencio breve por si llega más (varias líneas tecleadas por adelantado) y, si llega
+/// algo que deja de cumplir `done`, vuelve a la espera normal. Si `done` nunca se cumple, el
+/// silencio `idle` sigue siendo el respaldo, como en `collect`.
+pub fn collect_until(rx: &Receiver<String>, idle: Duration, timeout: Duration, settle: Duration, done: &dyn Fn(&str) -> bool) -> String {
     let deadline = Instant::now() + timeout;
     let mut out = String::new();
+    let mut quiet = idle;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return out;
         }
-        match rx.recv_timeout(idle.min(left)) {
-            Ok(chunk) => out.push_str(&chunk),
+        match rx.recv_timeout(quiet.min(left)) {
+            Ok(chunk) => {
+                out.push_str(&chunk);
+                // Lo que ya está en cola se agrega antes de evaluar `done` (como en `wait_for`).
+                while let Ok(more) = rx.try_recv() {
+                    out.push_str(&more);
+                }
+                if done(&out) {
+                    if settle.is_zero() {
+                        return out;
+                    }
+                    quiet = settle;
+                } else {
+                    quiet = idle;
+                }
+            }
             Err(_) => return out,
         }
     }
@@ -125,6 +151,32 @@ mod tests {
         let mut buf = String::new();
         let err = wait_for(&rx, &re, Duration::from_millis(80), &mut buf, &|| false).unwrap_err();
         assert_eq!(err, WaitEnd::Timeout("parcial".into()));
+        drop(tx);
+    }
+
+    #[test]
+    fn collect_until_stops_at_done_or_falls_back_to_idle() {
+        let (tx, rx) = channel();
+        tx.send("show clock\r\n10:00\r\n".into()).unwrap();
+        tx.send("R1#".into()).unwrap();
+        let start = Instant::now();
+        let out = collect_until(&rx, Duration::from_secs(3), Duration::from_secs(5), Duration::ZERO, &|o| o.ends_with('#'));
+        assert!(out.ends_with("R1#"));
+        assert!(start.elapsed() < Duration::from_millis(500), "terminó por done, no por silencio");
+        // Sin `done`: el silencio es el respaldo.
+        tx.send("parcial".into()).unwrap();
+        let start = Instant::now();
+        assert_eq!(collect_until(&rx, Duration::from_millis(60), Duration::from_secs(5), Duration::ZERO, &|_| false), "parcial");
+        assert!(start.elapsed() >= Duration::from_millis(60));
+        // Con `settle`: lo que llega durante la pausa breve se incluye.
+        let t2 = tx.clone();
+        thread::spawn(move || {
+            t2.send("a\nR1#".into()).unwrap();
+            thread::sleep(Duration::from_millis(20));
+            t2.send("show b\nb\nR1#".into()).unwrap();
+        });
+        let out = collect_until(&rx, Duration::from_secs(3), Duration::from_secs(5), Duration::from_millis(150), &|o| o.ends_with('#'));
+        assert_eq!(out, "a\nR1#show b\nb\nR1#");
         drop(tx);
     }
 

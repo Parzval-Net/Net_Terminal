@@ -3,7 +3,7 @@ import { Bot } from "lucide-react";
 import { useDragResize } from "../lib/useDragResize";
 import { useModal } from "../lib/useModal";
 import { Risk, computeRisk, riskLabel, textRisk } from "../lib/packs";
-import { WINDOW_MINUTES, canOfferWindow, isWindowMinutes, lineRisks } from "../lib/mcpWindow";
+import { BATCH_TOOL, WINDOW_MINUTES, canOfferWindowFor, isWindowMinutes, lineRisks } from "../lib/mcpWindow";
 
 const BADGE: Record<Risk, string> = {
   read: "border border-line text-muted",
@@ -71,7 +71,8 @@ export function ApprovalDialog({ request, pending, windowMinutes = 15, onDecide 
   // Lo que puede cortar servicio exige una confirmación extra antes de habilitar "Permitir".
   const [ack, setAck] = useState(false);
   const blocked = risk === "disruptive" && !ack;
-  const offer = canOfferWindow(request);
+  const offer = canOfferWindowFor(request);
+  const batch = request.tool === BATCH_TOOL;
   const [allow, setAllow] = useState(false);
   const [minutes, setMinutes] = useState<number>(isWindowMinutes(windowMinutes) ? windowMinutes : 15);
   const client = (request.client ?? "").trim();
@@ -111,7 +112,7 @@ export function ApprovalDialog({ request, pending, windowMinutes = 15, onDecide 
           </div>
         )}
         <p className="px-5 mt-3 text-[11.5px] text-muted">
-          {lines.length > 1 ? `${lines.length} líneas. ` : ""}
+          {batch ? `${lines.length} ${lines.length === 1 ? "comando" : "comandos"} en orden, uno por línea; se detiene en el primer error. ` : lines.length > 1 ? `${lines.length} líneas. ` : ""}
           Revisa el contenido antes de permitir. Se rechaza solo en 2 minutos.
           {pending > 1 ? ` Hay ${pending - 1} ${pending - 1 === 1 ? "solicitud más" : "solicitudes más"} en espera.` : ""}
         </p>
@@ -139,7 +140,7 @@ export function ApprovalDialog({ request, pending, windowMinutes = 15, onDecide 
             </label>
             {allow && (
               <p className="mt-1 ml-6 text-[11.5px] text-muted">
-                Solo comandos de una línea que la app clasifica como «{riskLabel.read}». Cambios, cortes, varias líneas y comandos largos siguen pidiendo aprobación. Se revoca al vencer, al desconectar, con solo lectura o al apagar el servidor.
+                Solo comandos de una línea que la app clasifica como «{riskLabel.read}» (en un lote, todas sus líneas). Cambios, cortes, varias líneas en un envío y comandos largos siguen pidiendo aprobación. Se revoca al vencer, al desconectar, con solo lectura, al cambiar el token o al apagar el servidor.
               </p>
             )}
           </div>

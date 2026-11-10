@@ -8,7 +8,7 @@ import { listen } from "@tauri-apps/api/event";
 import { mcpConfigure, mcpDecide, mcpQueryReply } from "./api";
 import { computeRisk, textRisk, type CatalogVendor } from "./packs";
 import { answerQuery, setBridgeActive } from "./mcpBridge";
-import { activeWindows, autoApprove, grantWindow, revokeOne, revokeWhere, type ConsultWindow } from "./mcpWindow";
+import { activeWindows, autoApprove, autoApproveBatch, BATCH_TOOL, grantWindow, revokeOne, revokeWhere, type ConsultWindow } from "./mcpWindow";
 import type { Settings } from "./settings";
 import type { MonitorStatus, MonitorTarget, Sample } from "./monitors";
 import type { Session, Tab, TabState } from "../types";
@@ -62,6 +62,8 @@ export function useMcp({ settings, tabs, states, controllers, catalog, monitors,
   useEffect(() => {
     if (!settings.mcpEnabled || settings.mcpReadOnly) setWindows([]);
   }, [settings.mcpEnabled, settings.mcpReadOnly]);
+  // Token nuevo: los agentes anteriores quedan desconectados y sus ventanas también.
+  useEffect(() => setWindows([]), [settings.mcpToken]);
   // Sin servidor, Topología no arma los datos vivos para los agentes.
   useEffect(() => setBridgeActive(settings.mcpEnabled), [settings.mcpEnabled]);
 
@@ -103,7 +105,7 @@ export function useMcp({ settings, tabs, states, controllers, catalog, monitors,
     const subs = [
       listen<ApprovalRequest>("mcp-approval", (e) => {
         const req = e.payload;
-        const d = autoApprove(windowsRef.current, req, Date.now(), computeRisk);
+        const d = autoApproveBatch(req, (r) => autoApprove(windowsRef.current, r, Date.now(), computeRisk));
         if (d.auto) {
           mcpDecide(req.id, true, true, d.risk).catch((err) => toastFail("aprobar la consulta del agente", err));
           return;
@@ -117,7 +119,7 @@ export function useMcp({ settings, tabs, states, controllers, catalog, monitors,
       }),
       listen<{ tool: string; target: string; detail: string; ok: boolean }>("mcp-activity", (e) => {
         const { tool, target, detail, ok } = e.payload;
-        if (tool === "send_command" || tool === "run_command" || tool === "open_session")
+        if (tool === "send_command" || tool === "run_command" || tool === BATCH_TOOL || tool === "open_session")
           toast(`IA · ${ok ? "" : "rechazado: "}${detail.split("\n")[0]}${target ? ` → ${target}` : ""}`, "ai");
       }),
       listen<{ id: string; kind: string; args: Record<string, unknown> }>("mcp-query", (e) => {
@@ -150,10 +152,11 @@ export function useMcp({ settings, tabs, states, controllers, catalog, monitors,
       const risk = req.tool === "open_session" ? undefined : textRisk(req.detail);
       mcpDecide(req.id, approved, false, risk).catch((e) => toastFail("registrar la decisión sobre la solicitud MCP", e));
       setApprovals((a) => a.filter((x) => x.id !== req.id));
-      if (approved && minutes && req.connection) {
+      // Sin clave de agente (cliente sin Mcp-Session-Id) no hay ventana: la compartirían todos los anónimos.
+      if (approved && minutes && req.connection && req.client_key) {
         const tab = tabOfConn(req.connection);
         if (!tab || tab.readOnly) return;
-        setWindows((w) => grantWindow(w, { conn: req.connection!, clientKey: req.client_key ?? "", clientName: req.client ?? "", target: req.target }, minutes, Date.now()));
+        setWindows((w) => grantWindow(w, { conn: req.connection!, clientKey: req.client_key!, clientName: req.client ?? "", target: req.target }, minutes, Date.now()));
         toast(`Consultas de ${req.client || "el agente"} en ${req.target} permitidas por ${minutes} min. Revócalas en Ajustes › Agentes IA.`, "ai");
       }
     },
