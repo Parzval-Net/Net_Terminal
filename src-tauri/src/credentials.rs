@@ -239,13 +239,14 @@ impl Inner {
         }
     }
 
-    /// Último uso: de la bóveda o, en una carpeta cifrada, de los datos (leer o guardar, y la actividad
-    /// en la app que informa la interfaz).
+    /// Último uso para el bloqueo por inactividad. Con la carpeta cifrada cuenta solo la actividad del
+    /// usuario (desbloquear y lo que informa la interfaz con `data_touch`), para datos y bóveda: ni la
+    /// auditoría, ni un agente que consulta, ni una tarea de fondo mantienen la app desbloqueada. Sin
+    /// carpeta cifrada, como siempre: el último uso de la bóveda.
     fn last_used(&self) -> Option<(Instant, SystemTime)> {
-        let data = self.data.as_ref().and_then(|d| d.last_use());
-        match (self.last_use, data) {
-            (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
-            (a, b) => a.or(b),
+        match &self.data {
+            Some(d) => d.last_use(),
+            None => self.last_use,
         }
     }
 
@@ -498,6 +499,12 @@ impl Credentials {
     }
 
     pub fn change(&self, old: &str, new: &str) -> Result<(), String> {
+        self.change_cut(old, new, &|_| Ok(()))
+    }
+
+    /// `change` con puntos de corte para las pruebas: `cut(1)` tras escribir la ranura nueva en
+    /// datakey.ntk, `cut(2)` tras reescribir la bóveda (un Err simula un corte de energía ahí).
+    fn change_cut(&self, old: &str, new: &str, cut: &dyn Fn(u8) -> Result<(), String>) -> Result<(), String> {
         check_master(new)?;
         let mut inner = lock(&self.inner);
         inner.throttle.check()?;
@@ -521,21 +528,24 @@ impl Credentials {
             Some(sh) => {
                 let dir = self.data_dir();
                 let mut kf = datacrypt::KeyFile::read(&dir)?.ok_or("Falta la llave de datos (datakey.ntk)")?;
-                let dk = match kf.unwrap(old) {
-                    Ok((k, _)) => k,
+                let (dk, opened) = match kf.unwrap(old) {
+                    Ok(x) => x,
                     Err(e) => {
                         inner.throttle.fail();
                         return Err(e);
                     }
                 };
-                let slot = kf.add_slot(&dk, new, self.kdf)?;
+                // Se conserva la ranura que abrió la contraseña actual (la que también abre la bóveda).
+                let slot = kf.add_slot(&dk, new, self.kdf, opened)?;
                 kf.write(&dir)?;
+                cut(1)?;
                 Some((sh, kf, slot, dk, dir))
             }
         };
         let salt = random::<16>();
         let key = derive(new, &salt, self.kdf)?;
         self.encrypt_write(&key, Mode::Master, self.kdf, salt, &entries)?;
+        cut(2)?;
         if let Some((sh, mut kf, slot, dk, dir)) = data {
             kf.keep_only(slot);
             kf.write(&dir)?;
@@ -922,6 +932,10 @@ impl Credentials {
         inner.auto = AutoLock { idle: (minutes > 0).then(|| Duration::from_secs(u64::from(minutes) * 60)), on_sleep };
         if inner.has_key() {
             inner.touch();
+            // Cambiar el ajuste es actividad del usuario: el plazo cuenta desde ahora.
+            if let Some(d) = &inner.data {
+                d.touch();
+            }
         }
         Ok(())
     }
@@ -1794,7 +1808,7 @@ mod tests {
         let c = Credentials::with(&d, true, Box::new(MemKeys::default()), FAST);
         c.create(pw).unwrap();
         std::fs::write(d.join("settings.json"), b"{}").unwrap();
-        let layout = crate::datacrypt::Layout::new(&d, None);
+        let layout = crate::datacrypt::Layout::new(&d, &[]);
         let mut key = None;
         crate::datacrypt::enable(&layout, pw, FAST, &crate::datacrypt::no_hook, &mut |_| {}, &mut key).unwrap();
         let sh = crate::datacrypt::Shared::new();
@@ -1859,7 +1873,7 @@ mod tests {
         // Corte tras agregar la ranura nueva y antes de reescribir la bóveda: la vieja abre todo.
         let mut kf = crate::datacrypt::KeyFile::read(&d).unwrap().unwrap();
         let (dk, _) = kf.unwrap("maestra-nueva").unwrap();
-        kf.add_slot(&dk, "maestra-otra", FAST).unwrap();
+        kf.add_slot(&dk, "maestra-otra", FAST, 0).unwrap();
         kf.write(&d).unwrap();
         c.lock();
         lock(&c.inner).throttle.retry_at = None;
@@ -1870,7 +1884,7 @@ mod tests {
         assert!(kf.unwrap("maestra-otra").is_err());
         // Contraseña que abre los datos y no la bóveda (corte después del paso 2, simulado al revés).
         let mut kf = kf;
-        kf.add_slot(&dk, "solo-datos-123", FAST).unwrap();
+        kf.add_slot(&dk, "solo-datos-123", FAST, 0).unwrap();
         kf.write(&d).unwrap();
         c.lock();
         let r = c.data_unlock("solo-datos-123").unwrap();

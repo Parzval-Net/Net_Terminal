@@ -1174,6 +1174,10 @@ pub fn bundle_export(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Summary, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+    // Carpeta cifrada bloqueada: no se exporta lo que haya en memoria.
+    if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {
+        return Err(why.into());
+    }
     let password = Zeroizing::new(password);
     let master = master.map(Zeroizing::new);
     check_password(&password)?;
@@ -1233,6 +1237,9 @@ pub fn bundle_export(
 #[tauri::command(async)]
 pub fn bundle_inspect(path: String, password: String, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<Preview, String> {
     use tauri::Manager;
+    if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {
+        return Err(why.into());
+    }
     let password = Zeroizing::new(password);
     state.bundle.clear();
     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
@@ -1268,6 +1275,9 @@ pub fn bundle_import_apply(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<ApplyResult, String> {
     use tauri::Emitter;
+    if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {
+        return Err(why.into());
+    }
     let pending = state.bundle.take(&token).ok_or("La vista previa venció: vuelve a abrir el archivo")?;
     match apply(&pending, &state.store, &state.creds, &fresh, &updates, &opts) {
         Ok(r) => {

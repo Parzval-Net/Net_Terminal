@@ -13,7 +13,7 @@ impl Enc {
     fn new(tag: &str) -> Enc {
         let d = tmp(tag);
         fixture(&d);
-        let layout = Layout::new(&d, None);
+        let layout = Layout::new(&d, &[]);
         let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
         let sh = Shared::new();
         register(&d, &sh);
@@ -27,7 +27,7 @@ impl Enc {
 
     /// Ningún archivo cubierto quedó en claro (salvo el aviso para versiones anteriores).
     fn no_plaintext(&self) {
-        assert!(plaintext_found(&Layout::new(&self.d, None)).is_empty(), "{:?}", plaintext_found(&Layout::new(&self.d, None)));
+        assert!(plaintext_found(&Layout::new(&self.d, &[])).is_empty(), "{:?}", plaintext_found(&Layout::new(&self.d, &[])));
     }
 }
 
@@ -126,7 +126,9 @@ fn session_logs_are_encrypted_by_blocks_and_searchable() {
     let path = w.path().to_path_buf();
     assert!(path.to_string_lossy().ends_with("core.log.nte"));
     w.write(b"Router# show run\r\nusername admin secret 0 Clave123\r\nRouter#");
-    // Mientras graba se busca (lo íntegro hasta ahora; sin bloque de cierre).
+    // Mientras graba se busca (lo íntegro hasta ahora; sin bloque de cierre). Lo escrito llega al
+    // disco a lo más en 250 ms (búfer del log cifrado, vaciado por un hilo).
+    std::thread::sleep(FLUSH_EVERY * 3);
     let roots = crate::logsearch::Roots { logs: logs.clone(), backups: e.d.join("backups"), notes: e.d.join("notes") };
     let params = crate::logsearch::SearchParams { query: "username admin".into(), kinds: vec!["logs".into(), "backups".into(), "notes".into()], ..Default::default() };
     let (files, _) = crate::logsearch::search_now(&roots, &params, std::time::Duration::from_secs(10)).unwrap();
@@ -183,7 +185,7 @@ fn locked_folder_reads_and_writes_nothing() {
     use crate::logfile::{LogOptions, LogVars, LogWriter};
     let e = Enc::new("int-locked");
     let d = e.d.clone();
-    let before: Vec<(PathBuf, Vec<u8>)> = walk(&Layout::new(&d, None)).into_iter().map(|f| (f.phys.clone(), fs::read(&f.phys).unwrap())).collect();
+    let before: Vec<(PathBuf, Vec<u8>)> = walk(&Layout::new(&d, &[])).into_iter().map(|f| (f.phys.clone(), fs::read(&f.phys).unwrap())).collect();
     e.sh.set_key(None);
     // Sesiones: no se leen ni se guardan (una lista vacía nunca reemplaza la guardada).
     let store = crate::session_store::SessionStore::deferred(&d);
@@ -252,6 +254,31 @@ fn bench_datacrypt() {
             let _ = fs::remove_dir_all(&dir);
         }
     }
+    // Eco carácter a carácter sin enmascarar (el peor caso de tamaño): 256 KB escritos de a 1 byte.
+    for enc in [false, true] {
+        let e = Enc::new("bench-eco");
+        let dir = if enc { e.d.join("logs") } else { tmp("bench-eco-plain") };
+        let o = LogOptions { pattern: "eco".into(), timestamps: false, mask: false, ..Default::default() };
+        let mut w = LogWriter::create(&dir, o, LogVars::default()).unwrap();
+        let path = w.path().to_path_buf();
+        let text: Vec<u8> = line.bytes().cycle().take(256 * 1024).collect();
+        let t = Instant::now();
+        for b in &text {
+            w.write(std::slice::from_ref(b));
+        }
+        drop(w);
+        let secs = t.elapsed().as_secs_f64();
+        let size = fs::metadata(&path).unwrap().len();
+        println!(
+            "eco de a 1 byte {}: {:.1} MB/s, archivo {:.1} veces el texto",
+            if enc { "cifrado" } else { "en claro" },
+            0.25 / secs,
+            size as f64 / text.len() as f64
+        );
+        if !enc {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
     // Cifrado por bloques sin el procesamiento del log.
     let e = Enc::new("bench-raw");
     let dk = e.dk();
@@ -311,7 +338,7 @@ fn bench_datacrypt() {
     c.create("maestra-de-prueba").unwrap();
     fs::write(d.join("settings.json"), b"{}").unwrap();
     let mut key = None;
-    enable(&Layout::new(&d, None), "maestra-de-prueba", crate::seal::KDF_DEFAULT, &no_hook, &mut |_| {}, &mut key).unwrap();
+    enable(&Layout::new(&d, &[]), "maestra-de-prueba", crate::seal::KDF_DEFAULT, &no_hook, &mut |_| {}, &mut key).unwrap();
     let sh = Shared::new();
     register(&d, &sh);
     c.attach_data(sh.clone());

@@ -151,8 +151,8 @@ impl Write for LogFile {
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
             LogFile::Plain(f) => f.write_all(buf),
-            // Un bloque cifrado por escritura (nunca uno a medias por una escritura parcial).
-            LogFile::Enc(a) => a.append(buf),
+            // Agrupado en bloques (16 KiB o 250 ms; ver `datacrypt::Appender::append_buffered`).
+            LogFile::Enc(a) => a.append_buffered(buf),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {

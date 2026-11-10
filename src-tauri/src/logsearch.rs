@@ -824,6 +824,9 @@ pub(crate) fn roots_of(state: &crate::AppState) -> Roots {
 /// "result" con el resumen y "done" al terminar.
 #[tauri::command(async)]
 pub fn logsearch_start(params: SearchParams, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<String, String> {
+    if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {
+        return Err(why.into());
+    }
     use crate::nettools::emit;
     let q = params.prepare()?;
     let slot = Slot::take().ok_or("Ya hay una búsqueda en curso")?;
@@ -874,6 +877,9 @@ impl Drop for JobEnd {
 /// cifrado no se abre afuera (habría que escribirlo en claro): se ve en la app o se exporta.
 #[tauri::command(async)]
 pub fn logsearch_open(kind: String, rel: String, reveal: bool, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
+    if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {
+        return Err(why.into());
+    }
     use tauri_plugin_opener::OpenerExt;
     let path = resolve_file(&roots_of(&state), Kind::parse(&kind)?, &rel)?;
     if !reveal && path.extension().is_some_and(|e| e == crate::datacrypt::EXT) {
@@ -970,6 +976,9 @@ pub fn export_plain(roots: &Roots, kind: Kind, rel: &str, dest: &Path) -> Result
 /// Texto de un archivo encontrado para el visor de la app (también cifrado).
 #[tauri::command(async)]
 pub fn logsearch_view(kind: String, rel: String, state: tauri::State<'_, crate::AppState>) -> Result<FileText, String> {
+    if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {
+        return Err(why.into());
+    }
     read_text(&roots_of(&state), Kind::parse(&kind)?, &rel)
 }
 
@@ -977,6 +986,9 @@ pub fn logsearch_view(kind: String, rel: String, state: tauri::State<'_, crate::
 /// (nunca dentro de la carpeta de datos, que sirven TFTP, HTTP y FTP). Ok(None) si canceló.
 #[tauri::command(async)]
 pub fn logsearch_export(kind: String, rel: String, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<Option<String>, String> {
+    if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {
+        return Err(why.into());
+    }
     use tauri_plugin_dialog::DialogExt;
     let roots = roots_of(&state);
     let kind = Kind::parse(&kind)?;

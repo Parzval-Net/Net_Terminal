@@ -132,7 +132,7 @@ fn key_file_password_slots_and_change() {
     assert_eq!((slot, *k.key, k.id), (0, *dk.key, dk.id));
     assert!(back.unwrap("otra-clave-123").is_err(), "contraseña incorrecta");
     // Cambio de maestra: paso 1 agrega la ranura nueva; ambas abren.
-    let s = kf.add_slot(&dk, "clave-nueva-2", KDF).unwrap();
+    let s = kf.add_slot(&dk, "clave-nueva-2", KDF, 0).unwrap();
     kf.write(&d).unwrap();
     let both = KeyFile::read(&d).unwrap().unwrap();
     assert_eq!(both.slots(), 2);
@@ -144,7 +144,7 @@ fn key_file_password_slots_and_change() {
     assert!(only.unwrap("clave-correcta-1").is_err());
     assert_eq!(*only.unwrap("clave-nueva-2").unwrap().0.key, *dk.key);
     // Ranura con otra DEK: se rechaza.
-    assert!(kf.add_slot(&DataKey::generate(), "x-12345678", KDF).is_err());
+    assert!(kf.add_slot(&DataKey::generate(), "x-12345678", KDF, 0).is_err());
     // Archivo alterado o de versión futura.
     let mut b = fs::read(d.join(KEY_FILE)).unwrap();
     b[40] ^= 1;
@@ -180,29 +180,88 @@ fn appender_survives_reopen_crash_and_shares_state() {
         assert!(had);
         a.append(b"tres\n").unwrap();
     }
-    // Simula un corte (la app cerrada a la fuerza): sin el bloque de cierre y con los bytes de un
-    // bloque a medias al final.
-    let mut raw = fs::read(&p).unwrap();
-    let last = chunks_of(&raw).last().unwrap().0;
-    raw.truncate(last);
-    raw.extend_from_slice(&[9, 9, 9, 9, 1, 2]);
-    fs::write(&p, &raw).unwrap();
-    assert!(decrypt_all(&dk, &raw).is_err(), "sin cierre y con basura al final");
-    {
-        // Se descarta lo que sigue al último bloque íntegro y se sigue con nonces nuevos.
-        let (a, _) = open_append(&p, Some(&dk), OpenMode::Append).unwrap();
-        a.append(b"cuatro\n").unwrap();
+    // Simula un corte al escribir (la app cerrada a la fuerza): sin el bloque de cierre y con el
+    // comienzo de un bloque que no alcanzó a escribirse entero (los bytes son un prefijo correcto).
+    let full = fs::read(&p).unwrap();
+    let ch = chunks_of(&full);
+    let (fin_at, _) = *ch.last().unwrap();
+    let (prev_at, prev_len) = ch[ch.len() - 2];
+    for cut in [3usize, 4, 20, prev_len - 1] {
+        let mut raw = full[..fin_at].to_vec();
+        raw.extend_from_slice(&full[prev_at..prev_at + cut]);
+        fs::write(&p, &raw).unwrap();
+        assert!(decrypt_all(&dk, &raw).is_err(), "sin cierre y con un bloque a medias");
+        // Se recorta solo la cola incompleta y se sigue con nonces nuevos.
+        {
+            let (a, _) = open_append(&p, Some(&dk), OpenMode::Append).unwrap();
+            a.append(b"cuatro\n").unwrap();
+        }
+        assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), b"uno\ndos\ntres\ncuatro\n", "corte de {cut} bytes");
+        assert!(damaged_list().iter().all(|x| !x.contains("a.dañado")), "una cola cortada no es daño");
     }
-    assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), b"uno\ndos\ntres\ncuatro\n");
     // Bloqueada (sin DEK) no se puede abrir un archivo que nadie tiene abierto.
     assert_eq!(open_append(&p, None, OpenMode::Append).err().unwrap().kind(), io::ErrorKind::PermissionDenied);
-    // Último bloque alterado: no se retoma (no se escribe sobre un archivo dañado).
-    let mut raw = fs::read(&p).unwrap();
-    let n = raw.len();
-    raw[n - 20] ^= 1;
-    fs::write(&p, &raw).unwrap();
-    assert!(open_append(&p, Some(&dk), OpenMode::Append).is_err());
     let _ = fs::remove_dir_all(d);
+}
+
+/// Un daño que no es la cola cortada de una escritura (un bloque del medio, el último, un largo
+/// imposible, la cabecera): no se trunca ni se escribe encima. El archivo se aparta como
+/// `.dañado-<fecha>` (cifrado, recuperable hasta el daño), se avisa y se sigue en uno nuevo.
+#[test]
+fn damaged_append_file_is_set_aside_never_truncated() {
+    let dk = DataKey::generate();
+    let notified = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let n = notified.clone();
+        set_notifier(Box::new(move |p| n.lock().unwrap().push(p.to_string())));
+    }
+    for (what, flip) in [("bloque del medio", 1usize), ("último bloque", 3), ("largo imposible", 99), ("cabecera", 98)] {
+        let d = tmp("dmg");
+        let p = d.join("b.log.nte");
+        {
+            let (a, _) = open_append(&p, Some(&dk), OpenMode::CreateNew).unwrap();
+            for i in 0..4 {
+                a.append(format!("linea {i}\n").as_bytes()).unwrap();
+            }
+        }
+        let mut raw = fs::read(&p).unwrap();
+        let ch = chunks_of(&raw);
+        match flip {
+            99 => raw[ch[1].0 + 3] = 0x7f,  // largo enorme en el bloque 1
+            98 => raw[70] ^= 1,             // llave del archivo
+            i => raw[ch[i].0 + 30] ^= 1,    // texto cifrado del bloque i
+        }
+        // Sin el cierre: así el bloque 3 es el último.
+        let raw = raw[..ch[4].0].to_vec();
+        fs::write(&p, &raw).unwrap();
+        let before = raw.clone();
+        let (a, had) = open_append(&p, Some(&dk), OpenMode::Append).unwrap();
+        assert!(!had, "{what}: sigue en un archivo nuevo");
+        a.append(b"nuevo\n").unwrap();
+        drop(a);
+        assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), b"nuevo\n", "{what}");
+        let aside: Vec<PathBuf> = fs::read_dir(&d).unwrap().flatten().map(|e| e.path()).filter(|x| x.to_string_lossy().contains(".dañado-")).collect();
+        assert_eq!(aside.len(), 1, "{what}");
+        assert_eq!(fs::read(&aside[0]).unwrap(), before, "{what}: el apartado queda intacto");
+        assert!(aside[0].to_string_lossy().ends_with(".log.nte"), "sigue siendo un log cifrado");
+        assert!(damaged_list().iter().any(|x| x == &aside[0].to_string_lossy()), "{what}: queda en la lista de avisos");
+        assert!(notified.lock().unwrap().iter().any(|x| x == &aside[0].to_string_lossy()), "{what}: se avisó");
+        // El rescate entrega lo íntegro antes del daño.
+        let r = EncReader::new(File::open(&aside[0]).unwrap(), &dk, false);
+        if flip != 98 {
+            let mut out = Vec::new();
+            let mut s = r.unwrap().salvage();
+            s.read_to_end(&mut out).unwrap();
+            assert!(s.incomplete());
+            let expect: String = (0..flip.min(4)).map(|i| format!("linea {i}\n")).collect();
+            if flip != 99 {
+                assert_eq!(String::from_utf8(out).unwrap(), expect, "{what}");
+            }
+        } else {
+            assert!(r.is_err(), "cabecera dañada: no se abre");
+        }
+        let _ = fs::remove_dir_all(d);
+    }
 }
 
 #[test]
@@ -354,7 +413,7 @@ fn no_temps(d: &Path) {
 fn enable_and_disable_round_trip() {
     let d = tmp("conv");
     let files = fixture(&d);
-    let layout = Layout::new(&d, None);
+    let layout = Layout::new(&d, &[]);
     let mut seen = Vec::new();
     let (dk, rep) = en(&layout, "maestra-de-prueba", &no_hook, &mut |p| seen.push(p.clone())).unwrap();
     assert_eq!(rep.converted, files.len());
@@ -365,7 +424,7 @@ fn enable_and_disable_round_trip() {
     no_temps(&d);
     // La llave abre con la maestra.
     assert_eq!(*KeyFile::read(&d).unwrap().unwrap().unwrap("maestra-de-prueba").unwrap().0.key, *dk.key);
-    let rep = disable(&layout, &dk, &no_hook, &mut |_| {}).unwrap();
+    let rep = disable(&layout, &dk, &[], &no_hook, &mut |_| {}).unwrap();
     assert_eq!(rep.converted, files.len());
     assert_plain(&d, &files);
     assert!(!d.join(KEY_FILE).exists() && !d.join(README_FILE).exists() && !d.join(JOURNAL_FILE).exists());
@@ -383,7 +442,7 @@ fn interrupted_conversion_resumes_or_reverts_at_every_step() {
             for revert in [false, true] {
                 let d = tmp("cut");
                 let files = fixture(&d);
-                let layout = Layout::new(&d, None);
+                let layout = Layout::new(&d, &[]);
                 let count = std::cell::Cell::new(0usize);
                 let hook = |s: Step| {
                     if s == step {
@@ -436,7 +495,7 @@ fn interrupted_decryption_resumes_or_reverts() {
         for revert in [false, true] {
             let d = tmp("dcut");
             let files = fixture(&d);
-            let layout = Layout::new(&d, None);
+            let layout = Layout::new(&d, &[]);
             let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
             let count = std::cell::Cell::new(0usize);
             let hook = |s: Step| {
@@ -448,7 +507,7 @@ fn interrupted_decryption_resumes_or_reverts() {
                 }
                 Ok(())
             };
-            assert!(disable(&layout, &dk, &hook, &mut |_| {}).is_err());
+            assert!(disable(&layout, &dk, &[], &hook, &mut |_| {}).is_err());
             no_dataloss_with(&d, &files, Some(&dk));
             match startup_journal(&d) {
                 None => {
@@ -490,7 +549,7 @@ fn no_dataloss_with(d: &Path, files: &[(String, Vec<u8>)], dk: Option<&DataKey>)
 fn plaintext_found_in_encrypted_folder_is_reported_and_fixed_without_loss() {
     let d = tmp("found");
     let files = fixture(&d);
-    let layout = Layout::new(&d, None);
+    let layout = Layout::new(&d, &[]);
     let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
     // Una versión anterior abrió la carpeta: creó ajustes y una nota en claro, y rotó el aviso.
     fs::write(d.join("settings.json"), br#"{"fontSize":20}"#).unwrap();
@@ -516,7 +575,7 @@ fn plaintext_found_in_encrypted_folder_is_reported_and_fixed_without_loss() {
     assert_eq!(decrypt_all(&dk, &fs::read(&aside.phys).unwrap()).unwrap(), br#"{"fontSize":20}"#);
     assert_eq!(decrypt_all(&dk, &fs::read(d.join("notes/nueva.txt.nte")).unwrap()).unwrap(), b"nota nueva");
     // Al desactivar, el apartado también vuelve a claro.
-    disable(&layout, &dk, &no_hook, &mut |_| {}).unwrap();
+    disable(&layout, &dk, &[], &no_hook, &mut |_| {}).unwrap();
     assert!(walk(&layout).iter().all(|f| !f.encrypted));
     assert_eq!(fs::read(d.join("settings.json")).unwrap(), br#"{"fontSize":13,"mcpToken":""}"#);
     drop(files);
@@ -527,15 +586,15 @@ fn plaintext_found_in_encrypted_folder_is_reported_and_fixed_without_loss() {
 fn disable_refuses_when_a_file_was_tampered() {
     let d = tmp("tamper");
     let files = fixture(&d);
-    let layout = Layout::new(&d, None);
+    let layout = Layout::new(&d, &[]);
     let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
     let p = d.join("notes/red.txt.nte");
     let mut b = fs::read(&p).unwrap();
     let n = b.len();
     b[n - 30] ^= 1;
     fs::write(&p, &b).unwrap();
-    let e = disable(&layout, &dk, &no_hook, &mut |_| {}).unwrap_err();
-    assert!(e.contains("notes/red.txt"), "{e}");
+    let e = disable(&layout, &dk, &[], &no_hook, &mut |_| {}).unwrap_err();
+    assert!(e.message.contains("notes/red.txt"), "{e:?}");
     // No se tocó nada.
     assert!(d.join(KEY_FILE).exists() && d.join("settings.json.nte").exists() && !d.join("settings.json").exists());
     assert!(!d.join(JOURNAL_FILE).exists());
@@ -551,11 +610,20 @@ fn custom_logs_folder_is_converted_too() {
     fs::create_dir_all(ext.join("sub")).unwrap();
     fs::write(ext.join("sub/y.txt"), b"y").unwrap();
     fs::write(ext.join("z.bin"), b"no es log").unwrap();
-    let layout = Layout::new(&d, Some(&ext));
+    fs::write(ext.join("Informe (copia).log"), b"ajeno").unwrap();
+    fs::create_dir_all(ext.join("Clientes")).unwrap();
+    fs::write(ext.join("Clientes/core_sw_20260101-101010.log"), b"de la app").unwrap();
+    let layout = Layout::new(&d, std::slice::from_ref(&ext));
     let (dk, rep) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+    // En una carpeta elegida por el usuario solo se cifran los nombres que genera la app.
     assert_eq!(rep.converted, 2);
     assert_eq!(decrypt_all(&dk, &fs::read(ext.join("x.log.nte")).unwrap()).unwrap(), b"externo");
+    assert!(ext.join("Clientes/core_sw_20260101-101010.log.nte").exists());
+    assert_eq!(fs::read(ext.join("sub/y.txt")).unwrap(), b"y", "un .txt ajeno no se toca");
+    assert_eq!(fs::read(ext.join("Informe (copia).log")).unwrap(), b"ajeno", "un .log con nombre ajeno no se toca");
     assert_eq!(fs::read(ext.join("z.bin")).unwrap(), b"no es log");
+    assert!(plaintext_found(&layout).is_empty(), "los ajenos tampoco cuentan como claro encontrado");
+    assert_eq!(read_roots(&d), vec![ext.clone()], "la carpeta queda anotada junto a la llave");
     assert_eq!(read_journal(&d).map(|j| j.op), None);
     let _ = fs::remove_dir_all(d);
     let _ = fs::remove_dir_all(ext);
@@ -571,7 +639,7 @@ fn previous_versions_see_the_stub_and_never_the_encrypted_files() {
     assert!(s[0].name.contains("cifrada"));
     let d = tmp("old");
     fixture(&d);
-    en(&Layout::new(&d, None), "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+    en(&Layout::new(&d, &[]), "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
     // El SessionStore actual sin registro (como una versión anterior) lee el aviso y no reescribe nada.
     let before = fs::read(d.join("sessions.json.nte")).unwrap();
     let store = crate::session_store::SessionStore::new(&d);

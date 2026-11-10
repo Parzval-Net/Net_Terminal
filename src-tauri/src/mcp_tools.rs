@@ -409,6 +409,8 @@ struct FileId(u64, u64, u64);
 /// dentro de `root`, sin enlaces simbólicos ni uniones en ningún tramo (mismo criterio que la
 /// búsqueda en logs). La interfaz sigue leyendo como siempre.
 fn regular_file_in(path: &Path, root: &Path) -> Result<FileId, ()> {
+    // En una carpeta cifrada el archivo en disco es `<nombre>.nte`: se verifica ese (el que se lee).
+    let path = &crate::datacrypt::physical(path);
     let meta = std::fs::symlink_metadata(path).map_err(|_| ())?;
     if !meta.file_type().is_file() {
         return Err(());
