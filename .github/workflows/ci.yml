@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Mínimo privilegio: el token solo lee.
+permissions:
+  contents: read
+
+# Una sola ejecución por ref; un push nuevo cancela la ejecución anterior.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Acciones de terceros fijadas a SHA completo (mismas versiones que build.yml; el comentario indica
+# la versión). Dependabot (.github/dependabot.yml) propone las actualizaciones.
+
+jobs:
+  # Interfaz: tipos, pruebas de Node y build de producción.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          # Sin caché de dependencias: desde v5 la caché de npm se activa sola y false la apaga.
+          package-manager-cache: false
+      # --ignore-scripts: ningún paquete npm ejecuta código al instalarse.
+      - run: npm ci --ignore-scripts
+      - run: npx tsc --noEmit -p .
+      # scripts-api.test.mjs necesita python3, que ya trae ubuntu-latest.
+      - run: npm test
+      - run: npm run build
+
+  # Backend: pruebas y clippy sin advertencias.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libudev-dev libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (2026-10-16)
+        with:
+          toolchain: stable
+          components: clippy
+      - run: cargo test
+        working-directory: src-tauri
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri

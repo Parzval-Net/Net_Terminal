@@ -10,17 +10,23 @@ interface Entry {
 interface Props {
   /** Clave del equipo (ver historyKey). */
   historyKey: string;
+  /** Nombre de la pestaña dueña del historial: el panel la sigue y reenvía a ella, no a la activa. */
+  tabName: string;
+  /** false si el panel se abrió desde una pestaña que no es la activa. */
+  isActiveTab: boolean;
   connected: boolean;
-  /** Reenvía por el mismo camino con control de riesgo que Notas y el catálogo. */
+  /** Reenvía a la pestaña del historial por el mismo camino con control de riesgo que Notas y el catálogo. */
   onResend: (cmd: string) => void;
   onClose: () => void;
 }
 
 /**
- * Historial de comandos enviados desde Notas, catálogo y botones para el equipo activo.
+ * Historial de comandos enviados desde Notas, catálogo y botones para el equipo de UNA pestaña.
  * Se abre desde la barra de estado, el menú de la pestaña, la paleta o el atajo; se lee solo al montarse (sin costo cerrado).
+ * El panel pertenece a su pestaña: al cambiar de pestaña activa sigue mostrando la suya (lo dice el título),
+ * reenviar va siempre a ella y, si se cierra, el panel se cierra.
  */
-export function HistoryMenu({ historyKey, connected, onResend, onClose }: Props) {
+export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onResend, onClose }: Props) {
   const [items, setItems] = useState<Entry[] | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -52,11 +58,14 @@ export function HistoryMenu({ historyKey, connected, onResend, onClose }: Props)
     <div
       ref={box}
       role="dialog"
-      aria-label="Historial de comandos enviados"
+      aria-label={`Historial de comandos enviados de ${tabName}`}
       className="fixed bottom-9 right-3 z-40 w-[420px] max-w-[calc(100vw-1.5rem)] bg-panel border border-line rounded-lg shadow-pop text-[12px] text-fg overflow-hidden"
     >
-      <div className="flex items-center justify-between px-3 h-8 border-b border-line text-muted">
-        <span>Últimos comandos enviados (Notas, catálogo y botones)</span>
+      <div className="flex items-center justify-between gap-2 px-3 h-8 border-b border-line text-muted">
+        <span className="min-w-0 truncate" title="Últimos comandos enviados desde Notas, el catálogo y los botones">
+          Historial de <b className="font-semibold text-fg">{tabName}</b>
+          {!isActiveTab && " (otra pestaña)"}
+        </span>
         {!!items?.length && (
           <button
             onClick={clear}
@@ -83,7 +92,7 @@ export function HistoryMenu({ historyKey, connected, onResend, onClose }: Props)
             <li key={e.ts + e.cmd}>
               <button
                 disabled={!connected}
-                title={connected ? `Reenviar:\n${e.cmd}` : "Conecta la sesión para reenviar"}
+                title={connected ? `Reenviar a ${tabName}:\n${e.cmd}` : `Conecta ${tabName} para reenviar`}
                 onClick={() => {
                   onClose();
                   onResend(e.cmd);

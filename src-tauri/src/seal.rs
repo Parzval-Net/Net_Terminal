@@ -74,14 +74,16 @@ pub fn decrypt(key: &[u8; 32], nonce: &[u8; 24], ct: &[u8], aad: &[u8]) -> Resul
         .map_err(|_| ())
 }
 
-/// Escritura atómica con permisos 600 desde la creación (Unix). El temporal (`<archivo>.tmp`)
-/// recibe los mismos bytes que el destino: solo se usa con contenido ya cifrado.
+/// Escritura atómica con permisos 600 desde la creación (Unix). El temporal es único por
+/// escritura (`<archivo>.<aleatorio>.tmp`, en la misma carpeta para que el rename sea atómico):
+/// dos guardados simultáneos no se pisan, y un corte de energía deja el archivo anterior intacto
+/// (se sincroniza el archivo antes del rename y la carpeta después).
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+    let unique: [u8; 8] = random();
+    name.push(format!(".{}.tmp", unique.iter().map(|b| format!("{b:02x}")).collect::<String>()));
     let tmp = path.with_file_name(name);
-    let _ = std::fs::remove_file(&tmp);
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -192,6 +194,58 @@ pub(crate) mod tests {
         // Texto cifrado más corto que la etiqueta o vacío.
         assert!(decrypt(&key, &nonce, &ct[..5], &aad).is_err());
         assert!(decrypt(&key, &nonce, &[], &aad).is_err());
+    }
+
+    #[test]
+    fn write_atomic_concurrent_writes_stay_intact() {
+        let dir = std::env::temp_dir().join(format!("nt-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("datos.json");
+        // Cada hilo escribe muchas veces un contenido grande y distinguible.
+        let handles: Vec<_> = (0..8u8)
+            .map(|i| {
+                let f = file.clone();
+                std::thread::spawn(move || {
+                    let body = vec![b'a' + i; 200_000];
+                    for _ in 0..25 {
+                        write_atomic(&f, &body).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        // El resultado es exactamente el contenido de UNA escritura (nunca mezcla ni parcial).
+        let got = std::fs::read(&file).unwrap();
+        assert_eq!(got.len(), 200_000);
+        assert!(got.iter().all(|b| *b == got[0]));
+        // Sin temporales huérfanos.
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["datos.json".to_string()], "{names:?}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_atomic_replaces_and_cleans_up_on_error() {
+        let dir = std::env::temp_dir().join(format!("nt-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.json");
+        write_atomic(&file, b"uno").unwrap();
+        write_atomic(&file, b"dos").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"dos");
+        // Destino que es una carpeta: el rename falla y el temporal se elimina.
+        let as_dir = dir.join("carpeta");
+        std::fs::create_dir_all(&as_dir).unwrap();
+        assert!(write_atomic(&as_dir, b"x").is_err());
+        let tmps = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(tmps, 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

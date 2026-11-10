@@ -52,9 +52,7 @@ pub fn save(data: &Path, pack: &serde_json::Value) -> Result<String, String> {
         return Err("El pack supera 2 MB".into());
     }
     let path = dir(data).join(format!("{id}.json"));
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    crate::seal::write_atomic(&path, json.as_bytes())?;
     Ok(id.to_string())
 }
 
@@ -79,6 +77,31 @@ pub fn export(data: &Path, id: &str, dest: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_saves_of_the_same_pack_stay_valid() {
+        let data = std::env::temp_dir().join(format!("nt-packs-conc-{}", uuid::Uuid::new_v4()));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let d = data.clone();
+                std::thread::spawn(move || {
+                    let pack = serde_json::json!({"id": "mismo", "name": format!("v{i}"), "commands": [], "pad": "x".repeat(50_000)});
+                    for _ in 0..20 {
+                        save(&d, &pack).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let packs = list(&data);
+        assert_eq!(packs.len(), 1, "el archivo final es JSON íntegro");
+        assert_eq!(packs[0]["pad"].as_str().unwrap().len(), 50_000);
+        let tmps = fs::read_dir(dir(&data)).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(tmps, 0);
+        let _ = fs::remove_dir_all(data);
+    }
 
     #[test]
     fn saves_lists_and_rejects_bad_ids() {

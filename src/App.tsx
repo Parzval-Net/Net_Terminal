@@ -7,6 +7,8 @@ import { VerticalTabs } from "./components/VerticalTabs";
 import { StatusBar } from "./components/StatusBar";
 import { ActivityBar } from "./components/ActivityBar";
 import { HistoryMenu } from "./components/HistoryMenu";
+import { Toasts, type ToastItem, type ToastKind } from "./components/Toasts";
+import { errText, failText } from "./lib/errors";
 import { TerminalView, TermController } from "./components/TerminalView";
 import type { CredChange } from "./components/SessionModal";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -142,13 +144,17 @@ function Workspace({
   const [scriptLaunch, setScriptLaunch] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [mcpStatus, setMcpStatus] = useState("");
-  const [toasts, setToasts] = useState<{ id: number; text: string; kind: "info" | "error" | "ai" }[]>([]);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastSeq = useRef(0);
-  const toast = useCallback((text: string, kind: "info" | "error" | "ai" = "info") => {
+  /** Misma firma de siempre; el cierre (y su pausa al leer) lo maneja cada aviso en Toasts.tsx. */
+  const toast = useCallback((text: string, kind: ToastKind = "info") => {
     const id = ++toastSeq.current;
-    setToasts((t) => [...t.slice(-3), { id, text, kind }]);
-    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "error" ? 7000 : 4000);
+    // Un aviso idéntico reemplaza al anterior (un monitor caído no apila el mismo error).
+    setToasts((t) => [...t.filter((x) => !(x.text === text && x.kind === kind)).slice(-3), { id, text, kind }]);
   }, []);
+  const closeToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
+  /** Error del backend con su contexto: "No se pudo <acción>. Motivo: …". */
+  const toastFail = useCallback((action: string, e: unknown) => toast(failText(action, e), "error"), [toast]);
   const [confirm, setConfirm] = useState<{
     title: string;
     message: ReactNode;
@@ -247,9 +253,9 @@ function Workspace({
       .then(setMcpStatus)
       .catch((e) => {
         setMcpStatus(String(e));
-        if (settings.mcpEnabled) toast(`MCP: ${e}`, "error");
+        if (settings.mcpEnabled) toastFail("iniciar el servidor MCP", e);
       });
-  }, [settings.mcpEnabled, settings.mcpPort, settings.mcpToken, settings.mcpApproval, settings.mcpReadOnly, toast]);
+  }, [settings.mcpEnabled, settings.mcpPort, settings.mcpToken, settings.mcpApproval, settings.mcpReadOnly, toastFail]);
 
   useEffect(() => {
     const un = listen("open-settings", () => setSettingsOpen(true));
@@ -263,7 +269,7 @@ function Workspace({
   // predeterminada solo en esta ejecución: el ajuste se conserva para la próxima vez.
   useEffect(() => {
     invoke("logs_dir_set", { path: settings.logsDir || null }).catch((e) =>
-      toast(`Carpeta de logs: ${e}. En esta ejecución se usa la predeterminada.`, "error"),
+      toast(failText("usar la carpeta de logs", e) + " En esta ejecución se usa la predeterminada.", "error"),
     );
   }, [settings.logsDir, toast]);
 
@@ -330,6 +336,18 @@ function Workspace({
   const [toolsOpen, setToolsOpen] = useState(false);
   /** Pestaña cuyo historial de comandos enviados se muestra (null: cerrado). */
   const [historyFor, setHistoryFor] = useState<string | null>(null);
+  const pendingFind = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeId || pendingFind.current !== activeId) return;
+    pendingFind.current = null;
+    // Un cuadro después: la terminal ya está visible y la caja de búsqueda puede tomar el foco.
+    const raf = requestAnimationFrame(() => controllers.current.get(activeId)?.openFind());
+    return () => cancelAnimationFrame(raf);
+  }, [activeId]);
+  // El panel pertenece a su pestaña: si esa pestaña se cierra, el panel se cierra con ella.
+  useEffect(() => {
+    if (historyFor && !tabs.some((t) => t.id === historyFor)) setHistoryFor(null);
+  }, [tabs, historyFor]);
 
   // Pestañas en segundo plano con salida nueva (se limpia al verlas).
   const [activity, setActivity] = useState<Set<string>>(new Set());
@@ -391,7 +409,7 @@ function Workspace({
       setInstalling(0);
       invoke("update_install").catch((e) => {
         setInstalling(null);
-        toast(String(e), "error");
+        toastFail("instalar la actualización", e);
       });
     };
     const open = Object.values(states).filter((x) => x.status === "connected").length;
@@ -644,7 +662,7 @@ function Workspace({
     const body = text.replace(/\s+$/, "") + "\n";
     runBroadcast(resolved.targets, resolved.skipped, body, { lineDelayMs: settings.sendLineDelay, deviceDelayMs }, (id) =>
       controllers.current.get(id),
-    ).catch((e) => toast(String(e), "error"));
+    ).catch((e) => toastFail("enviar a varias sesiones", e));
   };
 
   // Notas: resaltado según el fabricante de la sesión activa.
@@ -689,7 +707,7 @@ function Workspace({
       const modes = [l.allowChanges ? "permite cambios" : "", l.vaultType ? "puede escribir contraseñas guardadas" : ""].filter(Boolean);
       toast(`Ejecutando ${script}${targets.length > 1 ? ` en ${targets.length} sesiones` : ""}${modes.length ? ` (${modes.join(", ")})` : ""}`);
     } catch (e) {
-      toast(String(e), "error");
+      toastFail(`ejecutar ${script}`, e);
     }
   };
 
@@ -808,7 +826,7 @@ function Workspace({
         toast(`No se reconoció la plataforma${ver ? ` (${ver})` : ""}; elige la más cercana a mano`, "error");
       }
     } catch (e) {
-      toast(`No se pudo detectar: ${e}`, "error");
+      toastFail("detectar la plataforma", e);
     } finally {
       setDetecting(false);
     }
@@ -856,7 +874,7 @@ function Workspace({
       loadPacks();
       setCmdEdit(null);
     } catch (e) {
-      toast(String(e), "error");
+      toastFail("guardar el pack de comandos", e);
     }
   };
 
@@ -886,23 +904,37 @@ function Workspace({
     then(text);
   };
 
-  const sendResolved = (text: string, checked = false) => {
-    const ctrl = activeCtrl();
-    if (!ctrl || !activeTab || !ctrl.isConnected()) return;
-    if (labOwns(activeTab.id)) return toast("El CLI Lab está ejecutando en esta pestaña: espera a que termine o usa Detener", "error");
+  /**
+   * Envía a una pestaña concreta (el historial de una pestaña no activa reenvía a ella, no a la
+   * activa) con el mismo control de riesgo y confirmación. Nunca usa el modo difusión: el destino
+   * es esa pestaña y ninguna otra.
+   */
+  const sendToTab = (tabId: string, text: string, checked = false) => {
+    const then = (t: string) => sendResolved(t, checked, tabId);
+    if (templateVars(text).length) return setTemplate({ text, then });
+    then(text);
+  };
+
+  const sendResolved = (text: string, checked = false, tabId: string | null = activeId) => {
+    const target = tabs.find((t) => t.id === tabId);
+    const ctrl = tabId ? controllers.current.get(tabId) : undefined;
+    if (!ctrl || !target || !ctrl.isConnected()) return;
+    if (labOwns(target.id)) return toast("El CLI Lab está ejecutando en esta pestaña: espera a que termine o usa Detener", "error");
     // Cada línea se ejecuta con Enter, también la última.
     const trimmed = text.replace(/\s+$/, "");
     if (!trimmed) return;
     const body = trimmed + "\n";
     const lines = trimmed.split("\n");
-    const session = activeTab.session;
+    const session = target.session;
     const go = () => {
       ctrl.send(body, settings.sendLineDelay).catch(console.error);
+      // Si se reenvió a una pestaña que no es la activa, se muestra para ver el resultado.
+      if (target.id !== activeId) setActiveId(target.id);
       ctrl.focus();
       // Historial por equipo: solo envíos explícitos (Notas, catálogo, botones), nunca teclas.
       if (!session.scp) invoke("cmd_history_add", { key: historyKey(session), command: trimmed }).catch(() => {});
     };
-    const remote = activeTab.session.type !== "local";
+    const remote = session.type !== "local";
     // Notas y botones pasan por el mismo motor de riesgo que el catálogo. Lo que puede
     // cortar servicio se confirma siempre; el resto según "Confirmar envío de varias líneas".
     const risk = remote && !checked ? computeRisk(trimmed) : "read";
@@ -912,10 +944,10 @@ function Workspace({
       setConfirm({
         title:
           risk === "disruptive"
-            ? `Puede cortar servicio en ${tabTitle(activeTab)}`
+            ? `Puede cortar servicio en ${tabTitle(target)}`
             : lines.length > 1
-              ? `¿Enviar ${lines.length} líneas a ${tabTitle(activeTab)}?`
-              : `¿Enviar a ${tabTitle(activeTab)}?`,
+              ? `¿Enviar ${lines.length} líneas a ${tabTitle(target)}?`
+              : `¿Enviar a ${tabTitle(target)}?`,
         message: `${risk !== "read" ? `${riskLabel[risk]}.\n\n` : ""}${preview}`,
         label: "Enviar",
         danger: risk === "disruptive",
@@ -996,7 +1028,7 @@ function Workspace({
         try {
           await invoke("cred_set", { sessionId: saved.id, password: cred.password });
         } catch (err) {
-          toast(`La sesión se guardó, pero no la contraseña: ${err}`, "error");
+          toast(`La sesión se guardó, pero no la contraseña. Motivo: ${errText(err)}`, "error");
           // Sin una contraseña previa, el indicador no debe quedar activo.
           const before = sessions.find((x) => x.id === saved.id);
           if (!before?.save_password)
@@ -1004,7 +1036,7 @@ function Workspace({
         }
       } else if (cred.action === "delete") {
         await invoke("cred_delete", { sessionId: saved.id }).catch((err) =>
-          toast(`No se pudo borrar la contraseña guardada: ${err}`, "error"),
+          toastFail("borrar la contraseña guardada", err),
         );
       }
       setSessions((prev) =>
@@ -1016,7 +1048,7 @@ function Workspace({
       setModal(null);
       if (connect && !tabId) openTab(saved);
     } catch (err) {
-      toast(`No se pudo guardar la sesión: ${err}`, "error");
+      toastFail("guardar la sesión", err);
     }
   };
 
@@ -1073,7 +1105,7 @@ function Workspace({
       const id = activeId;
       setStates((s) => (s[id] ? { ...s, [id]: { ...s[id], logPath: path } } : s));
     } catch (err) {
-      toast(`No se pudo activar el log: ${err}`, "error");
+      toastFail("activar el log", err);
     }
     ctrl.focus();
   };
@@ -1095,7 +1127,7 @@ function Workspace({
     try {
       setSessions(await invoke<Session[]>("update_sessions", { sessions: changed }));
     } catch (err) {
-      toast(`No se pudo guardar: ${err}`, "error");
+      toastFail("guardar los cambios de las sesiones", err);
     }
   };
 
@@ -1107,7 +1139,7 @@ function Workspace({
       setSessions((prev) => [...prev, saved]);
       setModal({ session: saved });
     } catch (err) {
-      toast(`No se pudo duplicar: ${err}`, "error");
+      toastFail("duplicar la sesión", err);
     }
   };
 
@@ -1162,9 +1194,16 @@ function Workspace({
     },
     toggleFocus: () => setFocusMode((f) => !f),
     newButton: () => setMacroEdit(null),
-    /** Clic en Sesiones: con el modo flotante y la barra cerrada abre/cierra la superpuesta; si no, acopla u oculta. */
+    /**
+     * Clic en Sesiones: con el modo flotante y la barra cerrada deja abierta la superpuesta (el
+     * mouseenter ya la abrió: alternar aquí la cerraba justo al hacer clic; se cierra con Esc, un
+     * clic fuera o al salir el mouse); si no, acopla u oculta.
+     */
     clickSessions: () => {
-      if (settings.floatingSidebar && !sidebarOpen) setPeek((v) => !v);
+      if (settings.floatingSidebar && !sidebarOpen) {
+        window.clearTimeout(peekTimer.current);
+        setPeek(true);
+      }
       else {
         setPeek(false);
         setSidebarOpen((o) => !o);
@@ -1267,6 +1306,7 @@ function Workspace({
       activeCtrl()?.focus();
     },
     sendToSession,
+    sendToTab,
     capture: () => activeCtrl()?.getSelection() ?? "",
     runMacro: (m: Macro) => (m.kind === "script" ? m.script && runScript(m.script) : m.text && sendToSession(m.text)),
     runScript,
@@ -1276,7 +1316,7 @@ function Workspace({
         const name = await invoke<string | null>("import_script");
         if (name) toast(`${name} quedó en la carpeta de scripts`);
       } catch (err) {
-        toast(`No se pudo agregar el script: ${err}`, "error");
+        toastFail("agregar el script", err);
       }
     },
     stopScript: () => scriptRun && invoke("stop_script", { run: scriptRun.run }).catch(() => {}),
@@ -1285,12 +1325,18 @@ function Workspace({
     sendBreak: (id: string | undefined = activeId ?? undefined) => {
       const ctrl = id ? controllers.current.get(id) : undefined;
       if (!ctrl) return;
-      invoke("send_break", { id: ctrl.connId() }).catch((e) => toast(String(e), "error"));
+      invoke("send_break", { id: ctrl.connId() }).catch((e) => toastFail("enviar Break", e));
       ctrl.focus();
     },
     reconnect: () => activeCtrl()?.reconnect(),
     disconnect: () => activeCtrl()?.disconnect(),
-    find: (id: string | undefined = activeId ?? undefined) => (id ? controllers.current.get(id) : undefined)?.openFind(),
+    /** Buscar: si la pestaña no es la activa se activa primero (su terminal está oculta) y la búsqueda se abre al mostrarse. */
+    find: (id: string | undefined = activeId ?? undefined) => {
+      if (!id) return;
+      if (id === activeId) return controllers.current.get(id)?.openFind();
+      pendingFind.current = id;
+      setActiveId(id);
+    },
     openHistory: (id: string | undefined = activeId ?? undefined) => id && setHistoryFor(id),
     toggleTools,
     requestCloseTools,
@@ -1447,7 +1493,8 @@ function Workspace({
           ref={peekRef}
           onMouseEnter={h.peekEnter}
           onMouseLeave={h.peekLeave}
-          className="absolute left-11 top-0 bottom-0 z-30 w-64 flex flex-col bg-chrome border-r border-line shadow-pop"
+          style={{ width: sidebarWidth }}
+          className="absolute left-11 top-0 bottom-0 z-30 max-w-[calc(100%-2.75rem)] flex flex-col bg-chrome border-r border-line shadow-pop"
         >
           <div className="h-8 shrink-0 flex items-center gap-1 pl-3 pr-1.5 border-b border-line text-[11px] font-semibold uppercase tracking-wide text-muted">
             <span className="flex-1">Sesiones</span>
@@ -1732,25 +1779,12 @@ function Workspace({
           request={approvals[0]}
           pending={approvals.length}
           onDecide={(approved) => {
-            invoke("mcp_decide", { id: approvals[0].id, approved }).catch((e) => toast(String(e), "error"));
+            invoke("mcp_decide", { id: approvals[0].id, approved }).catch((e) => toastFail("registrar la decisión sobre la solicitud MCP", e));
             setApprovals((a) => a.slice(1));
           }}
         />
       )}
-      {toasts.length > 0 && (
-        <div className="fixed bottom-16 right-4 z-40 flex flex-col items-end gap-1.5 pointer-events-none">
-          {toasts.map((t) => (
-            <div
-              key={t.id}
-              className={`max-w-[420px] px-3 py-2 rounded-lg border shadow-pop text-[12px] bg-panel ${
-                t.kind === "error" ? "border-danger text-danger" : t.kind === "ai" ? "border-accent" : "border-line"
-              }`}
-            >
-              {t.text}
-            </div>
-          ))}
-        </div>
-      )}
+      <Toasts toasts={toasts} onClose={closeToast} />
       {packsOpen && (
         <PacksModal
           packs={allPacks}
@@ -1877,8 +1911,10 @@ function Workspace({
       {historyFor && tabs.some((t) => t.id === historyFor) && (
         <HistoryMenu
           historyKey={historyKey(tabs.find((t) => t.id === historyFor)!.session)}
+          tabName={tabTitle(tabs.find((t) => t.id === historyFor)!)}
+          isActiveTab={historyFor === activeId}
           connected={states[historyFor]?.status === "connected"}
-          onResend={h.sendToSession}
+          onResend={(cmd) => h.sendToTab(historyFor, cmd)}
           onClose={h.closeHistory}
         />
       )}
