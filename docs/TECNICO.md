@@ -344,7 +344,7 @@ La llave de la bóveda se toma una sola vez para todo el flujo (`Credentials::ho
 
 | Clase | Claves | Regla |
 | --- | --- | --- |
-| Excluida | `mcpToken`, `mcpEnabled`, `mcpPort`, `mcpApproval`, `mcpReadOnly` | API local: secreto y una puerta de entrada |
+| Excluida | `mcpToken`, `mcpEnabled`, `mcpPort`, `mcpApproval`, `mcpReadOnly`, `mcpVisibility`, `mcpMarked`, `mcpScopes`, `mcpAudit`, `mcpWindowMin` | API local: secreto, puerta de entrada y permisos de los agentes |
 | Excluida | `tftpPort`, `httpPort`, `syslogPort`, `syslogSave`, `ftpPort`, `snmpTrapPort`, `snmpTrapBind`, `serverGuard` | Servidores integrados: un archivo podría dejarlos en todas las interfaces, sin filtro de clientes ni detención automática |
 | Excluida | `autoLegacySsh` | Algoritmos SSH débiles |
 | Excluida | `vaultAutoLockMin`, `vaultLockOnSleep` | Política local de la bóveda |

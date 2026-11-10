@@ -83,13 +83,19 @@ pub const VAULT_NEEDED: &str =
 /// sensibles que vienen apagadas (API local, servidores, algoritmos legacy, bloqueo de la bóveda),
 /// rutas locales, datos del equipo y lo que se exporta aparte o no tiene sentido en otro equipo.
 /// La interfaz tiene la misma lista (`src/lib/bundle.ts`); una prueba de Node exige que coincidan.
-pub const SETTINGS_EXCLUDED: [&str; 29] = [
+pub const SETTINGS_EXCLUDED: [&str; 34] = [
     // API local (MCP): token, encendido, puerto, aprobación y solo lectura.
     "mcpToken",
     "mcpEnabled",
     "mcpPort",
     "mcpApproval",
     "mcpReadOnly",
+    // Permisos de agentes: visibilidad, sesiones marcadas, datos legibles, auditoría y ventana de consultas.
+    "mcpVisibility",
+    "mcpMarked",
+    "mcpScopes",
+    "mcpAudit",
+    "mcpWindowMin",
     // Servidores integrados y receptor de traps.
     "tftpPort",
     "httpPort",
