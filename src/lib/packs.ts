@@ -109,17 +109,23 @@ const maxRisk = (a: Risk, b: Risk): Risk => (RANK[a] >= RANK[b] ? a : b);
  * configuración ("ssh server enable", "telnet 10.0.0.0 255.0.0.0 inside") o un comando remoto.
  * Tampoco son consulta las transferencias ("copy … tftp:", "tftp <ip> put", "execute backup"): sacan
  * datos del equipo hacia un servidor externo aunque no cambien su configuración (ver leavesDevice).
+ * "diagnose test application <proceso> <nivel>" (FortiOS) ejecuta la acción número <nivel> del proceso: unas
+ * muestran y otras vacían cachés, alternan el motor IPS o su bypass, recargan, detienen o reinician. Es cambio
+ * salvo una lista corta de niveles que solo muestran, según los menús que publica Fortinet: ipsmonitor 1
+ * (información del motor) y 3 (registro de reinicios); dnsproxy 2 (estadísticas), 3 (configuración DNS), 6 (FQDN),
+ * 7 (caché) y 8 (base DNS); fcnacd 2 (conectividad con EMS) y 7 (caché ZTNA y de rutas); nr5gd 1, 3, 6 y 15 (estado,
+ * conexión, slot y señal del módem 5G). La numeración cambia entre versiones: solo entran niveles bajos y estables. Cortan
+ * servicio el 99 (reinicia el proceso) e ipsmonitor 97/98 (inician o detienen todos los motores IPS): DISRUPTIVE.
  */
 const READ_START =
-  /^(show|display|get|dir|more|ping|traceroute|tracert|tracepath|verify|monitor (traffic(?!.*\swr)|interface|start|stop)|test policy|compare configuration|who|policy-check|tcpdump|dnslookup|nslookup|vpn-tunnel diag-report|(undo )?terminal (logging|monitor|debugging|trapping)|request system storage cleanup dry-run|request system software validate|admin show|packet-tracer|ethanalyzer local(?!.*\swr)|terminal (length|width|(no )?monitor|pager)|no page\s*$|checkpoint diff\b|diag cable-diagnostic show\b|cd \/md\S*\s*$|mdconnect\s*$|screen-length\s+\d+\s+temporary|screen-width|set cli |file (list|show|checksum)|commit check|request support information|diagnose (sys (top|status|session (stat|list)|session filter(?=\s*$)|ha (status|checksum (?!rec)))|vpn (ike gateway|tunnel) list|sniffer packet|ip (route|arp) list|firewall iprope lookup|test application(?!\s+\S+\s+99\b))|execute (ping6?|traceroute6?|telnet|ssh)(?!-)|execute (ping|traceroute)-options view-settings)\b/i;
-
+  /^(show|display|get|dir|more|ping|traceroute|tracert|tracepath|verify|monitor (traffic(?!.*\swr)|interface|start|stop)|test policy|compare configuration|who|policy-check|tcpdump|dnslookup|nslookup|vpn-tunnel diag-report|(undo )?terminal (logging|monitor|debugging|trapping)|request system storage cleanup dry-run|request system software validate|admin show|packet-tracer|ethanalyzer local(?!.*\swr)|terminal (length|width|(no )?monitor|pager)|no page\s*$|checkpoint diff\b|diag cable-diagnostic show\b|cd \/md\S*\s*$|mdconnect\s*$|screen-length\s+\d+\s+temporary|screen-width|set cli |file (list|show|checksum)|commit check|request support information|diagnose (sys (top|status|session (stat|list)|session filter(?=\s*$)|ha (status|checksum (?!rec)))|vpn (ike gateway|tunnel) list|sniffer packet|ip (route|arp) list|firewall iprope lookup|test application (ipsmonitor [13]|dnsproxy [23678]|fcnacd [27]|nr5gd (1|3|6|15))(?=\s*$))|execute (ping6?|traceroute6?|telnet|ssh)(?!-)|execute (ping|traceroute)-options view-settings)\b/i;
 /**
  * Cortan servicio o sesiones, o dejan el equipo en otro estado (conmutación, rollback,
  * borrado de tablas, túneles o SA, reinicio de equipos administrados, módems o daemons,
  * prueba de cable TDR). Incluye el "debug" de IOS, que puede saturar la CPU.
  */
 const DISRUPTIVE =
-  /^(reload(?! cancel)|reboot|shutdown|halt|poweroff|power-off|erase|format(?!-(Table|List|Wide|Custom|Hex)\b)|write erase|delete|undelete|rmdir|squeeze|zeroize|factory|configure replace|configure revert now|reset saved-configuration|reset (bgp|ospf|isis|mpls|ip ospf|ike sa|ipsec sa|recycle-bin|mac-address(?! flapping))|rollback (configuration|running-config)\b|checkpoint rollback|commit replace|abort trial|debug(ging)?\b|redundancy (force-)?switchover|(system|slave|master) switchover|test cable-diagnostics|diag cable-diagnostic test|show cable-diag\b|diagnose switch physical-ports cable-diag|clear (ip )?(bgp|ospf|isis|eigrp)(?!.*\bsoft\b)|clear bgp(?!.*\bsoft\b)|clear (ip )?route|clear arp\s*$|clear ip nat translation|clear crypto\b|clear mac(-| )address-table\b|clear interfaces statistics all\b|clear ethernet-switching table\s*$|clear security flow session\b|request system (reboot|halt|power-off|zeroize|logout|software rollback)|request chassis cluster failover|request chassis routing-engine master\b|request node (reboot|halt|power-off|offline)|restart \S+|set interfaces \S+( unit \d+)? disable\b|cfg -x|execute (reboot|shutdown|factoryreset\w*|formatlogdisk|restore|ha failover|disk format|sim-switch|clear system arp table|poe-reset|(bpdu|loop)-guard reset)|execute (lte|5g)-modem (reboot|power-off|sim-switch|start-upgrade|firmware-upgrade|carrier-config switch)|execute switch-controller (switch-action (poe reset|cable-diag|bpdu-guard reset|loop-guard reset|restart|set-standalone|factory-reset)|poe-reset|switch-software upgrade)|execute wireless-controller (reset-wtp|restart-\S+|push-wtp-image|rolling-wtp-upgrade)|execute extender (reset-fortiextender|restart-fortiextender-daemon|push-fortiextender-image|install-forticloud-\S+)|execute router clear (bgp|ospf)(?!.*\bsoft\b)|diagnose sys session clear|diagnose sys ha reset-uptime|diagnose switch-controller restart-daemon|diagnose test application \S+ 99\b|diagnose vpn tunnel down\b|diagnose vpn ike (gateway (clear|flush)|restart)\b|diagnose vpn "?\/ike\/restart|diagnose firewall auth clear\b|fnsysctl killall\b|schedule reboot|install (activate|remove|commit)|install add\b.*\sactivate\b|deactivate|cpstop|cpstart|cprestart|cphastop|mdsstop|fw unload(local)?|clusterXL_admin down|set cluster member admin down|fwaccel off|fw tab\b.*\s-x\b|fw ctl conntab\b.*\s-x\b|fw ctl zdebug\b|fw ctl debug (?!(0|-x)\s*$)\S|vpn tu (del|delete)\b|save config\s*$|load configuration\b|set interface \S+ state off\b|set static-route\b.*\boff\b|upgrade system\b|upgrade\s*$|vpn-tunnel rekey\b|cluster (failover|reboot|reset)\b|import config\b|restore (image|factory-default|backup-image)\b|restore-defaults\b|boot system( flash)?( primary| secondary)?\s*$|interface \S+ (disable|speed-duplex)\b|no interface \S+ power-over-ethernet\b|vsx update-software\b|poe mode disable|apboot\b|ap-re(group|name)\b|ifconfig \S+ down|ip (-\S+ )*l(i(nk?)?)? s(et?)? (dev )?\S+ down|cphaprob\b.*-s problem)\b/i;
+  /^(reload(?! cancel)|reboot|shutdown|halt|poweroff|power-off|erase|format(?!-(Table|List|Wide|Custom|Hex)\b)|write erase|delete|undelete|rmdir|squeeze|zeroize|factory|configure replace|configure revert now|reset saved-configuration|reset (bgp|ospf|isis|mpls|ip ospf|ike sa|ipsec sa|recycle-bin|mac-address(?! flapping))|rollback (configuration|running-config)\b|checkpoint rollback|commit replace|abort trial|debug(ging)?\b|redundancy (force-)?switchover|(system|slave|master) switchover|test cable-diagnostics|diag cable-diagnostic test|show cable-diag\b|diagnose switch physical-ports cable-diag|clear (ip )?(bgp|ospf|isis|eigrp)(?!.*\bsoft\b)|clear bgp(?!.*\bsoft\b)|clear (ip )?route|clear arp\s*$|clear ip nat translation|clear crypto\b|clear mac(-| )address-table\b|clear interfaces statistics all\b|clear ethernet-switching table\s*$|clear security flow session\b|request system (reboot|halt|power-off|zeroize|logout|software rollback)|request chassis cluster failover|request chassis routing-engine master\b|request node (reboot|halt|power-off|offline)|restart \S+|set interfaces \S+( unit \d+)? disable\b|cfg -x|execute (reboot|shutdown|factoryreset\w*|formatlogdisk|restore|ha failover|disk format|sim-switch|clear system arp table|poe-reset|(bpdu|loop)-guard reset)|execute (lte|5g)-modem (reboot|power-off|sim-switch|start-upgrade|firmware-upgrade|carrier-config switch)|execute switch-controller (switch-action (poe reset|cable-diag|bpdu-guard reset|loop-guard reset|restart|set-standalone|factory-reset)|poe-reset|switch-software upgrade)|execute wireless-controller (reset-wtp|restart-\S+|push-wtp-image|rolling-wtp-upgrade)|execute extender (reset-fortiextender|restart-fortiextender-daemon|push-fortiextender-image|install-forticloud-\S+)|execute router clear (bgp|ospf)(?!.*\bsoft\b)|diagnose sys session clear|diagnose sys ha reset-uptime|diagnose switch-controller restart-daemon|diagnose test application (\S+ 99|ipsmonitor 9[78])\b|diagnose vpn tunnel down\b|diagnose vpn ike (gateway (clear|flush)|restart)\b|diagnose vpn "?\/ike\/restart|diagnose firewall auth clear\b|fnsysctl killall\b|schedule reboot|install (activate|remove|commit)|install add\b.*\sactivate\b|deactivate|cpstop|cpstart|cprestart|cphastop|mdsstop|fw unload(local)?|clusterXL_admin down|set cluster member admin down|fwaccel off|fw tab\b.*\s-x\b|fw ctl conntab\b.*\s-x\b|fw ctl zdebug\b|fw ctl debug (?!(0|-x)\s*$)\S|vpn tu (del|delete)\b|save config\s*$|load configuration\b|set interface \S+ state off\b|set static-route\b.*\boff\b|upgrade system\b|upgrade\s*$|vpn-tunnel rekey\b|cluster (failover|reboot|reset)\b|import config\b|restore (image|factory-default|backup-image)\b|restore-defaults\b|boot system( flash)?( primary| secondary)?\s*$|interface \S+ (disable|speed-duplex)\b|no interface \S+ power-over-ethernet\b|vsx update-software\b|poe mode disable|apboot\b|ap-re(group|name)\b|ifconfig \S+ down|ip (-\S+ )*l(i(nk?)?)? s(et?)? (dev )?\S+ down|cphaprob\b.*-s problem)\b/i;
 
 /**
  * Cortan servicio y solo se reconocen por el fabricante (revisión del catálogo: los comandos se
@@ -201,9 +207,12 @@ const ARP_READ = `arp${ARP_OPT}(\\s+((?=[^\\s]*[.:])[\\da-f.:]+|\\{\\{\\w+\\}\\}
  * "hostnamectl". "date" y "hostname" con argumento que fija un valor quedan fuera ("date
  * 0101120025" fija la hora en BSD y GNU; "date -f" también en BSD salvo con -j). "ip" va
  * aparte (iprouteRead): "ip route ..." también es la ruta estática de IOS o VRP.
+ * "top" y "free" también son órdenes de equipos de red: "top <comando>" de Junos ejecuta un comando de
+ * configuración desde la raíz (normalize lo evalúa por ese comando) y "free user-interface|line" de VRP y Comware
+ * desconecta a un usuario (EXTRA_DISRUPTIVE). Por eso solo son consulta solos o con opciones de Linux.
  */
 const LINUX_READ = new RegExp(
-  "^((top|uptime|free|df|du|cat|less|tail|head|grep|ls|lsof|lsns|lsblk|lscpu|lsmod|lsusb|lshw|uname|raid_diagnostic|lspci|netstat|ps|w|id|pwd)(\\s|$)|find(?!.*\\s-(exec|execdir|ok|okdir|delete|fprint\\w*|fls)\\b)(\\s|$)|dmidecode(?!.*\\s--dump-bin\\b)(\\s|$)|hostname( -\\w+)*\\s*$|" +
+  "^((uptime|df|du|cat|less|tail|head|grep|ls|lsof|lsns|lsblk|lscpu|lsmod|lsusb|lshw|uname|raid_diagnostic|lspci|netstat|ps|w|id|pwd)(\\s|$)|top(\\s+-.*)?$|free(\\s+(-\\S+|\\d+))*$|find(?!.*\\s-(exec|execdir|ok|okdir|delete|fprint\\w*|fls)\\b)(\\s|$)|dmidecode(?!.*\\s--dump-bin\\b)(\\s|$)|hostname( -\\w+)*\\s*$|" +
     "date(?!.*\\s(-s|--set)\\b)(?!(?!.*\\s-\\w*j).*\\s-\\w*f\\b)(?!(\\s+-\\w+)*\\s+\\d[\\d.]*\\s*$)(\\s|$)|" +
     ARP_READ +
     "|ss\\b|ifconfig( \\S+)?$)",
@@ -287,8 +296,9 @@ const OS_READ = new RegExp(
       "ipconfig(\\s+/(all|displaydns|allcompartments))*\\s*$",
       // Test-ComputerSecureChannel -Repair rehace la relación con el dominio; Format-Volume borra.
       "(Get|Test(?!-ComputerSecureChannel\\b.*\\s-Repair\\b)|Resolve|Find|Measure|Select|Where|Sort|Show|Compare)-\\w+|Format-(Table|List|Wide|Custom|Hex)\\b",
-      // netsh [contexto...] show: "show" debe ser el verbo (antes de él solo contextos).
-      "netsh(\\s+-[rcup]\\s+\\S+)*(\\s+(?!(set|add|delete|del|reset|start|stop|dump|connect|disconnect|import|export|install|uninstall|exec|flush|renew|release|refresh|reconnect|update|init|commit|abort|alias|unalias|offline|online|pushd|popd)\\b)[a-z0-9][\\w-]*){0,5}\\s+show\\b",
+      // netsh [contexto...] show: "show" debe ser el verbo (antes de él solo contextos). "-r equipo" (con -u/-p) se
+      // conecta por RPC a otro equipo y se autentica ante él: no es consulta.
+      "netsh(\\s+-c\\s+\\S+)*(\\s+(?!(set|add|delete|del|reset|start|stop|dump|connect|disconnect|import|export|install|uninstall|exec|flush|renew|release|refresh|reconnect|update|init|commit|abort|alias|unalias|offline|online|pushd|popd)\\b)[a-z0-9][\\w-]*){0,5}\\s+show\\b",
       "route print|getmac|nbtstat -[acnsS]\\b|pathping|systeminfo|whoami|typeperf(?!.*\\s-o\\b)|w32tm /(query|stripchart|monitor|tz)\\b",
       // pktmon etl2txt|etl2pcap|format|pcapng escriben un archivo convertido: no son consulta.
       "pktmon (status|list|filter list|counters)\\b",
@@ -597,7 +607,7 @@ const FORTI_CONTEXT = /^(config global|config vdom|edit ("[^"$`]*"|[\w.@:/-]+|\{
 
 /**
  * Cortan servicio y el motor de catálogo no los cubría (auditoría del motor de riesgo). Red: sesiones y tablas de
- * ASA/IOS (conn, xlate, line, arp-cache), quitar un proceso de enrutamiento o una interfaz lógica, failover de ASA,
+ * ASA/IOS (conn, xlate, line, arp-cache) y "free user-interface" de VRP, quitar un proceso de enrutamiento o una interfaz lógica, failover de ASA,
  * "boot" de ArubaOS-Switch (reinicia), aplicar un checkpoint de Aruba, instalar Junos con reboot, reinicio de
  * procesos de FortiOS, sacar a un administrador, "fw sam" de inhibición (bloquea tráfico) y "del" con un sistema de
  * archivos de IOS ("del flash:x"; "del C:\x" de Windows queda como cambio). Sistemas: apagar o aislar con systemctl,
@@ -610,6 +620,8 @@ const EXTRA_DISRUPTIVE = new RegExp(
   "^(" +
     [
       "clear (conn|xlate|local-host|line|arp-cache)\\b",
+      // VRP y Comware: desconectar a un usuario de una línea (como "clear line" de IOS).
+      "free (user-interface|line)\\b",
       "clear configuration interface\\b",
       "no router (bgp|ospf|ospfv3|eigrp|isis|rip)\\b",
       "undo (ospf|ospfv3|bgp|isis|rip)(\\s+\\d+)?\\s*$",
@@ -759,6 +771,7 @@ const NET_ABBR: readonly Abbr[] = [
     ["sys", 2, [["kill", 3], ["session", 2, [["clear", 3]]], ["ha", 2, [["reset-uptime", 3]]]]],
     ["vpn", 2, [["tunnel", 2, [["down", 3]]], ["ike", 2, [["gateway", 2, [["clear", 3], ["flush", 3]]], ["restart", 4]]]]],
     ["firewall", 2, [["auth", 2, [["clear", 3]]]]],
+    ["test", 3, [["application", 3, [["ipsmonitor", 4]]]]],
   ]],
   ["undo", 4, [["interface", 3], ["ospf", 2], ["bgp", 2], ["isis", 2]]],
   ["no", 2, [["router", 3, [["bgp", 2], ["ospf", 2], ["eigrp", 2], ["isis", 2], ["rip", 2]]], ["interface", 3], ["failover", 4]]],
@@ -900,7 +913,29 @@ export function editedLine(line: string): string {
   return buf.join("");
 }
 
-const riskCache = new Map<string, Risk>();
+/**
+ * Lo que la evaluación anota de paso, además del riesgo: algún tramo ejecuta un cliente de red (contacta un destino
+ * que elige quien escribe) o abre un programa interactivo (las líneas siguientes las leería ese programa). Se
+ * acumulan en `seen` durante una evaluación (síncrona; los niveles anidados suman a la misma).
+ */
+const NET = 1;
+const INTERACTIVE = 2;
+let seen = 0;
+const RISKS: readonly Risk[] = ["read", "change", "disruptive"];
+/** Resultado memorizado por comando: rango del riesgo << 2 | anotaciones. */
+const riskCache = new Map<string, number>();
+
+function analyze(cmd: string): number {
+  let v = riskCache.get(cmd);
+  if (v === undefined) {
+    // Es pura: se memoriza para no repetir las regex al recargar o reconstruir el catálogo.
+    if (riskCache.size >= 10000) riskCache.clear();
+    seen = 0;
+    v = (RANK[evalRisk(cmd, 0)] << 2) | seen;
+    riskCache.set(cmd, v);
+  }
+  return v;
+}
 
 /** Riesgo mayor entre las líneas de un texto de varios comandos (aprobaciones MCP). */
 export function textRisk(text: string): Risk {
@@ -916,14 +951,28 @@ export function textRisk(text: string): Risk {
  * (consultas por fabricante y filtros de tubería conocidos). Diseño en docs/TECNICO.md («Motor de riesgo»).
  */
 export function computeRisk(cmd: string): Risk {
-  let risk = riskCache.get(cmd);
-  if (risk === undefined) {
-    // Es pura: se memoriza para no repetir las regex al recargar o reconstruir el catálogo.
-    if (riskCache.size >= 10000) riskCache.clear();
-    risk = evalRisk(cmd, 0);
-    riskCache.set(cmd, risk);
-  }
-  return risk;
+  return RISKS[analyze(cmd) >> 2];
+}
+
+/**
+ * Algún tramo del comando ejecuta un cliente de red hacia un destino que elige quien escribe (ping, traceroute,
+ * nslookup, curl, ssh, telnet, Resolve-DnsName, "execute ping" de FortiOS, "show host <nombre>" de Junos, nltest,
+ * nbtstat -a…), con la misma normalización que computeRisk: prefijos (sudo, env, time, timeout, busybox…), comillas,
+ * subexpresiones, tuberías, cadenas y comandos anidados. Lo usa la ventana de consultas del MCP: un agente podría
+ * sacar un dato poniéndolo en el nombre de destino (DNS, ICMP, URL). Si el riesgo es "disruptive" la evaluación se
+ * corta antes y puede no verlo (la ventana no aprueba ese riesgo).
+ */
+export function contactsNetwork(cmd: string): boolean {
+  return (analyze(cmd) & NET) !== 0;
+}
+
+/**
+ * Algún tramo abre un programa interactivo (less, more, top, cpview, vi, man, watch, journalctl con paginador, ssh o
+ * telnet sin comando…): las líneas que se escriban después las leería ese programa y no el equipo. Para quien escribe
+ * a mano siguen siendo consulta; la ventana de consultas del MCP no los envía sin diálogo.
+ */
+export function opensInteractive(cmd: string): boolean {
+  return (analyze(cmd) & INTERACTIVE) !== 0;
 }
 
 const cuts = (x: string) =>
@@ -1310,7 +1359,7 @@ const PS_ARG = /^(executionpolicy|ex|ep|windowstyle|w|win\w*|configurationname|c
 
 /**
  * Lo que de verdad se ejecuta en un tramo: quita prefijos que solo cambian cómo corre el comando (sudo, doas, env
- * VAR=x, nohup, time, timeout, watch, nice, xargs, exec, do/run de los equipos, palabras clave del shell…), la ruta
+ * VAR=x, nohup, time, timeout, watch, nice, xargs, exec, do/run/top/up de los equipos, palabras clave del shell…), la ruta
  * y las comillas del nombre, y resuelve variables y alias de la misma línea. Los intérpretes con un comando en un
  * argumento (sh -c, cmd /c, powershell -Command, clish -c, su -c, eval, iex, vi -c ':!…') se evalúan por ese
  * argumento; -EncodedCommand oculta el comando: "puede cortar servicio".
@@ -1395,8 +1444,24 @@ function normalize(seg: string, c: Ctx, vars: Vars): Norm {
         continue;
       }
       case "watch":
+        // Pantalla completa hasta Ctrl-C.
+        seen |= INTERACTIVE;
         s = skipOpts(rest, /^(-n|--interval|-q|--equexit)$/);
         continue;
+      case "top":
+      case "up": {
+        // Junos (configuración): "top <comando>" y "up [n] <comando>" ejecutan ese comando desde la raíz o desde un
+        // nivel más arriba ("top delete", "top run request system reboot"): vale ese comando y al menos cambio. "top" con
+        // opciones es el de Linux (LINUX_READ); solo, o "up [n]", cambia de nivel.
+        let r = rest;
+        const n = w === "up" ? tokenAt(r, 0) : null;
+        if (n && /^\d+$/.test(n.val)) r = r.slice(n.end).trimStart();
+        const x = tokenAt(r, 0);
+        if (!x || (w === "top" && !x.quoted && x.val.startsWith("-"))) break;
+        risk = maxRisk(risk, "change");
+        s = r;
+        continue;
+      }
       case "xargs":
         risk = maxRisk(risk, "change");
         s = skipOpts(rest, /^(-[aEdIiLlnPs]|--(arg-file|eof|delimiter|max-lines|max-args|max-procs|max-chars|process-slot-var))$/);
@@ -1490,6 +1555,7 @@ function normalize(seg: string, c: Ctx, vars: Vars): Norm {
       case "view":
       case "ex":
       case "gvim": {
+        seen |= INTERACTIVE;
         let r: Risk = "change";
         for (let x = tokenAt(rest, 0); x; x = tokenAt(rest, x.end)) {
           let arg: string | null = null;
@@ -1663,7 +1729,9 @@ function memberRisk(cmd: string): Risk {
  *   en la URL (exfiltración por DNS o ICMP).
  * - Lectores de archivos de los equipos de red (more, dir, verify, file show, show, display, type) con una URL
  *   remota: abren una conexión hacia otro servidor.
- * - Rutas UNC ("\\servidor\recurso"): Windows se autentica ante ese servidor y le entrega el hash NTLM.
+ * - Rutas UNC ("\\servidor\recurso", "//servidor/recurso", "FileSystem::\\servidor\…", "\\?\UNC\servidor\…") y
+ *   consultas a otro equipo por WMI, CIM, RPC o LDAP (remoteAuth): Windows se autentica ante ese equipo con la
+ *   cuenta de la sesión (Kerberos o NTLM) y un servidor elegido por quien escribe recibe el hash NTLM.
  */
 const NET_CLIENTS = new Set(
   (
@@ -1677,7 +1745,32 @@ const STDIN_REDIRECT = /(?:^|[^<])<(?![(>])/;
 const DYNAMIC_ARG = /[$`(]|%\w+%/;
 const SINGLE_QUOTED = /'[^']*'/g;
 const REMOTE_URL = /(?:^|[\s"'=])(?:tftp|ftps?|sftp|scp|rcp|https?|smb|cifs|nfs):/i;
-const UNC_PATH = /(?:^|[\s"'=,(])\\\\[A-Za-z0-9{][^\s\\"']*\\/;
+/** Ruta UNC con "\\" o "//" (PowerShell y cmd aceptan las dos). Tras ":" sin otro ":" es una URL ("http://"), no UNC. */
+const UNC_PATH = /(?:^|[\s"'=,(]|::)(?:\\\\|\/\/)(?:[?.]\\UNC\\)?[A-Za-z0-9{][^\s\\/"']*[\\/]/i;
+
+/**
+ * PowerShell con un equipo de destino: -ComputerName (y su alias -Cn), -CimSession, -Server o -Session, también
+ * abreviados como los acepta PowerShell ("-Comp", "-ComputerName:x"). Solo en los cmdlets de consulta de OS_READ.
+ */
+const PS_CMDLET = /^(get|test|resolve|find|measure|select|where|sort|show|compare|format)-/;
+const PS_REMOTE = /\s-(comp(u(t(e(r(n(a(m(e)?)?)?)?)?)?)?)?|cn|cims(e(s(s(i(o(n)?)?)?)?)?)?|serv(e(r)?)?|sess(i(o(n)?)?)?)(?=[\s:]|$)/i;
+/**
+ * Herramientas de Windows con un equipo de destino que se autentican ante él: systeminfo, tasklist, getmac y
+ * driverquery /s, typeperf -s, "w32tm /query /computer:", "nltest /server:" y Test-WSMan con destino.
+ */
+const WIN_REMOTE = /^((systeminfo|tasklist|getmac|driverquery)\b.*\s[/-]s(?=[\s:]|$)|typeperf\b.*\s-s\s|w32tm\b(?=.*\/query\b).*\/computer:|nltest\b.*\/server:|test-wsman\s+\S)/i;
+const WIN_REMOTE_WORDS = new Set(["systeminfo", "tasklist", "getmac", "driverquery", "typeperf", "w32tm", "nltest", "test-wsman"]);
+
+/** Consulta que se autentica ante otro equipo con la cuenta de la sesión (ver leavesDevice). */
+function remoteAuth(line: string, word: string): boolean {
+  if (PS_CMDLET.test(word)) {
+    // Test-Connection, Test-NetConnection y Resolve-DnsName no se autentican (ICMP, TCP, DNS); Test-Connection -Source
+    // o -Credential sí (WMI en el equipo de origen).
+    if (word === "test-connection") return /\s-(so|cr)\w*(?=[\s:]|$)/i.test(line);
+    if (!NET_CLIENTS.has(word) && PS_REMOTE.test(line)) return true;
+  }
+  return WIN_REMOTE_WORDS.has(word) && WIN_REMOTE.test(line);
+}
 
 function leavesDevice(line: string, word: string, afterPipe: boolean): boolean {
   if (NET_CLIENTS.has(word)) {
@@ -1686,7 +1779,73 @@ function leavesDevice(line: string, word: string, afterPipe: boolean): boolean {
     if (DYNAMIC_ARG.test(bare) || (bare.includes("<") && STDIN_REDIRECT.test(bare.replace(QUOTED, "''")))) return true;
   }
   if (URL_READERS.has(word) && REMOTE_URL.test(line)) return true;
-  return line.includes("\\\\") && UNC_PATH.test(line);
+  if (remoteAuth(line, word)) return true;
+  return (line.includes("\\\\") || line.includes("//")) && UNC_PATH.test(line);
+}
+
+/**
+ * Clientes de red para contactsNetwork: los de NET_CLIENTS, ssh, telnet y stelnet (en su propio caso de simpleRisk),
+ * ncat, "dnslookup" y "packet-tracer", y tras "execute" (FortiOS, también abreviado) o "admin" (IOS XR).
+ */
+const NET_TOOLS = new Set([...NET_CLIENTS, "ssh", "telnet", "stelnet", "ncat", "dnslookup", "packet-tracer"]);
+const EXEC_PREFIX = /^(?:exe(?:c(?:u(?:te?)?)?)?|admin)\s+(\S+)/i;
+/**
+ * Contactan un destino que elige quien escribe sin ser uno de esos clientes: "show host <nombre>" de Junos (resuelve
+ * el nombre), nbtstat -a/-A (NetBIOS), "w32tm /stripchart|/monitor" (NTP), nltest (localiza controladores de dominio
+ * por DNS), "dns-sd -G|-Q", "dscacheutil -q host", "resolvectl query" y "scutil -r" (resuelven el nombre).
+ */
+const NET_FORMS = /^(sh(ow?)?\s+host?\s+\S|nbtstat\b.*\s-a(\s|$)|w32tm\b.*\/(stripchart|monitor)\b|nltest\b|dns-sd\s+-[GQ]\b|dscacheutil\s+-q\s+host\b|resolvectl\s+query\b|scutil\s+-r\b)/i;
+const NET_FORM_WORDS = new Set(["sh", "sho", "show", "nbtstat", "w32tm", "nltest", "dns-sd", "dscacheutil", "resolvectl", "scutil"]);
+
+/** Programas que toman la terminal (paginadores, editores, monitores de pantalla completa). */
+const FULLSCREEN = new Set(["less", "most", "pg", "man", "info", "htop", "atop", "btop", "nload", "bmon", "cpview", "nano", "pico", "emacs", "screen", "tmux", "nmtui"]);
+
+/** El comando abre un programa interactivo (ver opensInteractive). `word`: su primera palabra en minúsculas. */
+function interactive(cmd: string, word: string, afterPipe: boolean): boolean {
+  switch (word) {
+    case "more":
+      // "more flash:x" (IOS) muestra un archivo del equipo; en Linux, macOS y Windows es un paginador.
+      return afterPipe || !/\s[a-z][\w-]*:/i.test(cmd);
+    case "top":
+      // -b (por lotes), -n (iteraciones) o -l (macOS) terminan solos.
+      return !/\s-[A-Za-z]*[bnl]/.test(cmd);
+    case "iftop":
+      return !/\s-[A-Za-z]*t/.test(cmd);
+    case "nettop":
+      return !/\s-[A-Za-z]*[lL]/.test(cmd);
+    case "mtr":
+      return !/\s(-[A-Za-z]*[rwjCxlp]|--(report|json|csv|xml|raw|split))/.test(cmd);
+    case "journalctl":
+    case "systemctl":
+    case "networkctl":
+      // systemd abre un paginador si la salida no cabe en la pantalla, salvo --no-pager, "journalctl -f" o "systemctl is-…".
+      return !/\s--no-pager\b/.test(cmd) && !(word === "journalctl" && /\s(-[A-Za-z]*f|--follow)\b/.test(cmd)) && !(word === "systemctl" && /\sis-/.test(cmd));
+    case "nslookup":
+      // Sin destino abre su propio intérprete.
+      return !/\s[^\s-]/.test(cmd);
+    case "diagnose":
+      return /^diagnose\s+sys\s+top(?![\w-])/i.test(cmd);
+    case "get":
+      return /^get\s+system\s+performance\s+top\b/i.test(cmd);
+    case "monitor":
+      // Junos: pantalla completa que acepta teclas ("c" borra los contadores).
+      return /^monitor\s+interface\b/i.test(cmd);
+  }
+  return FULLSCREEN.has(word);
+}
+
+/** Anota en `seen` si el comando contacta un destino elegido o abre un programa interactivo. */
+function noteUse(cmd: string, word: string, afterPipe: boolean): void {
+  const ex = word === "admin" || word.startsWith("exe") ? EXEC_PREFIX.exec(cmd) : null;
+  if (ex) {
+    const w = ex[1].toLowerCase();
+    if (NET_TOOLS.has(w)) seen |= NET;
+    // "execute ssh|telnet" y "execute ha manage" abren una sesión en otro equipo.
+    if (w === "ssh" || w === "telnet" || /^\S+\s+ha\s+manage\b/i.test(cmd)) seen |= INTERACTIVE;
+    return;
+  }
+  if ((NET_TOOLS.has(word) && word !== "ssh" && word !== "telnet" && word !== "stelnet") || (NET_FORM_WORDS.has(word) && NET_FORMS.test(cmd)) || remoteAuth(cmd, word)) seen |= NET;
+  if (interactive(cmd, word, afterPipe)) seen |= INTERACTIVE;
 }
 
 /** Un comando ya normalizado: corta servicio, es una consulta conocida o, si no, cambio. */
@@ -1694,6 +1853,7 @@ function simpleRisk(cmd: string, word: string, c: Ctx, afterPipe: boolean): Risk
   if (cuts(cmd) || (c.multi && DISRUPTIVE_IN_CONFIG.test(cmd))) return "disruptive";
   if (STP_MODE.test(cmd) && !c.lines.some((l) => /^spanning-tree$/i.test(l))) return "disruptive";
   if (abbrevCuts(cmd, c)) return "disruptive";
+  noteUse(cmd, word, afterPipe);
   switch (word) {
     case "kill":
     case "killall":
@@ -1705,6 +1865,8 @@ function simpleRisk(cmd: string, word: string, c: Ctx, afterPipe: boolean): Risk
     case "telnet":
     case "stelnet": {
       const remote = remoteCommand(cmd);
+      // Cliente (no configuración del servidor): contacta el destino; sin comando abre una sesión en el otro equipo.
+      if (remote !== null) seen |= remote === "" ? NET | INTERACTIVE : NET;
       // Tras un "|" o con "<" el cliente lee de la entrada y la envía al otro equipo (comandos o un archivo).
       if (remote === "") return afterPipe || STDIN_REDIRECT.test(cmd.replace(QUOTED, "''")) ? "change" : "read";
       if (remote !== null) return maxRisk("change", evalRisk(remote, c.depth + 1));
