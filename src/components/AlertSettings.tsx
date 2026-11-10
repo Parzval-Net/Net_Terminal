@@ -48,6 +48,7 @@ export function AlertSettings({ settings: s, folders, onChange }: Props) {
                 type="checkbox"
                 checked={r.enabled}
                 title={r.enabled ? "Activa" : "Inactiva"}
+                aria-label={`${r.name || r.pattern}: ${r.enabled ? "activa" : "inactiva"}`}
                 onChange={(e) => save(rules.map((x) => (x.id === r.id ? { ...x, enabled: e.target.checked } : x)))}
               />
             </label>
@@ -61,6 +62,7 @@ export function AlertSettings({ settings: s, folders, onChange }: Props) {
             <button
               onClick={() => setDraft({ ...r })}
               title="Editar"
+              aria-label={`Editar ${r.name || r.pattern}`}
               className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
             >
               <Pencil size={13} />
@@ -68,6 +70,7 @@ export function AlertSettings({ settings: s, folders, onChange }: Props) {
             <button
               onClick={() => save(rules.filter((x) => x.id !== r.id))}
               title="Eliminar"
+              aria-label={`Eliminar ${r.name || r.pattern}`}
               className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-danger hover:bg-hover"
             >
               <Trash2 size={13} />
@@ -133,7 +136,7 @@ export function AlertSettings({ settings: s, folders, onChange }: Props) {
                 ["enabled", "Activa"],
               ] as const
             ).map(([key, label]) => (
-              <label key={key} className="flex items-center gap-1.5">
+              <label key={key} className="flex items-center gap-1.5 min-h-6">
                 <input type="checkbox" className="accent-[var(--accent)]" checked={draft[key]} onChange={(e) => setDraft({ ...draft, [key]: e.target.checked })} />
                 {label}
               </label>
@@ -142,14 +145,15 @@ export function AlertSettings({ settings: s, folders, onChange }: Props) {
           <input
             className="field font-mono !text-[12px]"
             value={sample}
+            aria-label="Línea de salida de prueba"
             placeholder="Probar con una línea de salida"
             onChange={(e) => setSample(e.target.value)}
           />
           {error ? (
-            <p className="text-[11.5px] text-danger">{error}</p>
+            <p role="alert" className="text-[11.5px] text-danger">{error}</p>
           ) : (
             matches !== null && (
-              <p className={`text-[11.5px] ${matches ? "text-accent" : "text-muted"}`}>
+              <p role="status" className={`text-[11.5px] ${matches ? "text-accent" : "text-muted"}`}>
                 {matches ? "Coincide: esta línea genera una alerta" : "No coincide"}
               </p>
             )

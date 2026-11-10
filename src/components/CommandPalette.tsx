@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { History, ListX, Search } from "lucide-react";
 import { Session, sessionTarget } from "../types";
 import { QuickBolt, SessionIcon, typeLabel } from "./SessionIcon";
+import { useModal } from "../lib/useModal";
 
 /** Acción de la app en la paleta (p. ej. "Cerrar todas las sesiones"). */
 export interface PaletteAction {
@@ -66,6 +67,7 @@ export function quickTarget(s: Session): string {
 }
 
 export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Props) {
+  const modal = useModal({ onClose });
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   // Últimos destinos de conexión rápida (archivo en la carpeta de datos, máx. 20).
@@ -98,6 +100,10 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
   }, [query, sessions, recent, actions]);
 
   useEffect(() => setIndex(0), [query]);
+  // La opción activa siempre a la vista al moverse con las flechas.
+  useEffect(() => {
+    document.getElementById(`palette-opt-${index}`)?.scrollIntoView({ block: "nearest" });
+  }, [index]);
 
   const choose = (i: number) => {
     const item = items[i];
@@ -118,33 +124,30 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-center pt-[12vh] bg-black/25" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 flex justify-center pt-[12vh] bg-black/25" onMouseDown={onClose}>
+      {/* El foco queda atrapado (Tab no sale a la barra lateral ni a la terminal de detrás): lo hace useModal. */}
       <div
-        role="dialog"
-        aria-modal="true"
+        {...modal.dialog}
+        aria-labelledby={undefined}
         aria-label="Buscar sesión o conexión rápida"
         className="w-[520px] max-w-[92vw] h-fit bg-panel border border-line rounded-xl shadow-pop overflow-hidden"
         onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          // Foco atrapado: Tab no debe salir a la barra lateral ni a la terminal de detrás.
-          if (e.key !== "Tab") return;
-          const f = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("input, button"));
-          const i = f.indexOf(document.activeElement as HTMLElement);
-          const next = f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length];
-          e.preventDefault();
-          next?.focus();
-        }}
       >
         <div className="flex items-center gap-2.5 px-4 h-12 border-b border-line">
           <Search size={16} className="text-muted" />
           <input
             autoFocus
+            role="combobox"
+            aria-expanded
+            aria-controls="palette-list"
+            aria-autocomplete="list"
+            aria-activedescendant={items.length ? `palette-opt-${index}` : undefined}
+            aria-label="Buscar sesión o conexión rápida"
             className="flex-1 bg-transparent outline-none text-[14px] placeholder:text-muted"
             placeholder="Buscar sesión o escribir user@host para conexión rápida"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") onClose();
               if (e.key === "ArrowDown") {
                 e.preventDefault();
                 setIndex((i) => Math.min(i + 1, items.length - 1));
@@ -157,9 +160,9 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
             }}
           />
         </div>
-        <ul className="max-h-[50vh] overflow-y-auto p-1.5">
+        <ul id="palette-list" role="listbox" aria-label="Resultados" className="max-h-[50vh] overflow-y-auto p-1.5">
           {!query.trim() && recent.length > 0 && (
-            <li className="flex items-center justify-between px-3 h-6 text-[11px] text-muted">
+            <li role="presentation" className="flex items-center justify-between px-3 h-6 text-[11px] text-muted">
               Conexiones rápidas recientes
               <button className="hover:text-fg hover:underline" onClick={clearRecent}>
                 Borrar recientes
@@ -172,9 +175,12 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
               return (
                 <li
                   key={`action-${a.label}`}
+                  id={`palette-opt-${i}`}
+                  role="option"
+                  aria-selected={i === index}
                   onMouseMove={() => setIndex(i)}
                   onClick={() => choose(i)}
-                  className={`flex items-center gap-3 px-3 h-11 rounded-lg ${i === index ? "bg-selected" : ""}`}
+                  className={`flex items-center gap-3 px-3 h-11 rounded-lg ${i === index ? "bg-selected shadow-[inset_2px_0_0_0_var(--accent)]" : ""}`}
                 >
                   <ListX size={15} className="text-danger shrink-0" />
                   <div className="min-w-0 flex-1 leading-tight">
@@ -189,9 +195,12 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
             return (
             <li
               key={isRecent ? `recent-${i}` : quick ? `quick-${s.type}` : s.id}
+              id={`palette-opt-${i}`}
+              role="option"
+              aria-selected={i === index}
               onMouseMove={() => setIndex(i)}
               onClick={() => choose(i)}
-              className={`flex items-center gap-3 px-3 h-11 rounded-lg ${i === index ? "bg-selected" : ""}`}
+              className={`flex items-center gap-3 px-3 h-11 rounded-lg ${i === index ? "bg-selected shadow-[inset_2px_0_0_0_var(--accent)]" : ""}`}
             >
               {isRecent ? (
                 <History size={15} className="text-muted shrink-0" />
@@ -214,7 +223,7 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
             );
           })}
           {items.length === 0 && (
-            <li className="px-3 py-6 text-center text-muted text-[12px]">
+            <li role="presentation" className="px-3 py-6 text-center text-muted text-[12px]">
               Sin resultados. Prueba con <code>ssh user@host</code> o <code>telnet host 23</code>.
             </li>
           )}

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useModal } from "../lib/useModal";
 import { CATEGORIES, PackCommand, Platform, Risk, computeRisk, riskLabel } from "../lib/packs";
 import { useDragResize } from "../lib/useDragResize";
 
@@ -20,17 +21,14 @@ export function CommandEditor({ vendorName, platforms, initial, onSave, onDelete
   const effective: Risk = RANK[computed] > RANK[c.risk] ? computed : c.risk;
   const badVar = (c.cmd.match(/\{\{[^}]*\}\}/g) ?? []).some((m) => !/^\{\{\s*[\w.-]+\s*\}\}$/.test(m));
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const modal = useModal({ onClose: onClose });
 
   const valid = c.cmd.trim() && c.desc.trim() && !badVar;
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
       <form
+        {...modal.dialog}
         {...win.box}
         className="w-[480px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[360px] min-h-[300px] max-w-[96vw] max-h-[94vh]"
         onMouseDown={(e) => e.stopPropagation()}
@@ -40,7 +38,7 @@ export function CommandEditor({ vendorName, platforms, initial, onSave, onDelete
         }}
       >
         <header {...win.handle} className="shrink-0 px-5 h-12 flex items-center border-b border-line select-none">
-          <h2 className="text-[14px] font-semibold">
+          <h2 id={modal.titleId} className="text-[14px] font-semibold">
             {initial ? "Editar comando" : "Nuevo comando"} · {vendorName}
           </h2>
         </header>

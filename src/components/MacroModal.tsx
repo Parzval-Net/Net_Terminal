@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Macro } from "../lib/settings";
 import { useDragResize } from "../lib/useDragResize";
+import { useModal } from "../lib/useModal";
 
 interface Props {
   initial: Macro | null;
@@ -19,10 +20,8 @@ export function MacroModal({ initial, onSave, onClose }: Props) {
 
   useEffect(() => {
     invoke<string[]>("list_scripts").then(setScripts).catch(() => {});
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
+  const modal = useModal({ onClose });
 
   // Trae un .py de cualquier carpeta a scripts/ (el diálogo lo abre el backend) y lo selecciona.
   const browse = async () => {
@@ -40,9 +39,10 @@ export function MacroModal({ initial, onSave, onClose }: Props) {
   const valid = m.label.trim() && (m.kind === "send" ? m.text?.trim() : m.script);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
       <form
         {...win.box}
+        {...modal.dialog}
         className="w-[460px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[360px] min-h-[260px] max-w-[96vw] max-h-[94vh]"
         onMouseDown={(e) => e.stopPropagation()}
         onSubmit={(e) => {
@@ -51,7 +51,7 @@ export function MacroModal({ initial, onSave, onClose }: Props) {
         }}
       >
         <header {...win.handle} className="shrink-0 px-5 h-12 flex items-center border-b border-line select-none">
-          <h2 className="text-[14px] font-semibold">{initial ? "Editar botón" : "Nuevo botón"}</h2>
+          <h2 id={modal.titleId} className="text-[14px] font-semibold">{initial ? "Editar botón" : "Nuevo botón"}</h2>
         </header>
         <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
           <label className="block">
@@ -75,6 +75,7 @@ export function MacroModal({ initial, onSave, onClose }: Props) {
                 key={k}
                 type="button"
                 onClick={() => setM({ ...m, kind: k })}
+                aria-pressed={m.kind === k}
                 className={`h-8 rounded-md text-[12.5px] ${m.kind === k ? "bg-panel shadow-sm" : "text-muted hover:text-fg"}`}
               >
                 {label}
@@ -120,7 +121,7 @@ export function MacroModal({ initial, onSave, onClose }: Props) {
                   Buscar en el equipo…
                 </button>
               </div>
-              {pickError && <span className="block mt-1.5 text-[11.5px] text-danger">{pickError}</span>}
+              {pickError && <span role="alert" className="block mt-1.5 text-[11.5px] text-danger">{pickError}</span>}
               <span className="block mt-1.5 text-[11.5px] text-muted">
                 Los scripts viven en la carpeta de datos, en <code>scripts/</code>. Usan{" "}
                 <code>import netterminal as nt</code> y requieren Python 3 instalado. Si eliges uno de otra carpeta, se copia ahí.

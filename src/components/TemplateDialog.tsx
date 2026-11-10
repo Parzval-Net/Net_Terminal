@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useModal } from "../lib/useModal";
 import { useDragResize } from "../lib/useDragResize";
 import { isSecretVar } from "../lib/templateSecrets";
 
@@ -37,11 +38,7 @@ export function TemplateDialog({ text, onSubmit, onCancel }: Props) {
     return Object.fromEntries(names.map((n) => [n, isSecretVar(n) ? "" : (prev[n] ?? "")]));
   });
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  const modal = useModal({ onClose: onCancel });
 
   const win = useDragResize<HTMLFormElement>("templateWindow");
   const missing = names.filter((n) => !values[n]?.trim());
@@ -61,8 +58,9 @@ export function TemplateDialog({ text, onSubmit, onCancel }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onCancel}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onCancel}>
       <form
+        {...modal.dialog}
         {...win.box}
         className="w-[440px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[360px] min-h-[260px] max-w-[96vw] max-h-[94vh]"
         onMouseDown={(e) => e.stopPropagation()}
@@ -72,7 +70,7 @@ export function TemplateDialog({ text, onSubmit, onCancel }: Props) {
         }}
       >
         <header {...win.handle} className="shrink-0 px-5 pt-4 pb-2 select-none">
-          <h2 className="text-[14px] font-semibold">Completar plantilla</h2>
+          <h2 id={modal.titleId} className="text-[14px] font-semibold">Completar plantilla</h2>
           <p className="text-muted text-[12px]">Los valores se recuerdan para la próxima vez, salvo contraseñas y claves.</p>
         </header>
         <div className="flex-1 min-h-0 px-5 py-2 space-y-2.5 overflow-y-auto">

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, KeyRound, Plus, Trash2, X } from "lucide-react";
 import { SerialPortInfo, Session, SessionType, Tunnel, TunnelKind } from "../types";
@@ -66,11 +67,7 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.type]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const modal = useModal({ onClose: onClose });
 
   const changeType = (type: SessionType) =>
     setS((p) => ({
@@ -148,8 +145,9 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
   );
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
       <form
+        {...modal.dialog}
         {...win.box}
         className="w-[460px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[360px] min-h-[260px] max-w-[96vw] max-h-[94vh]"
         onMouseDown={(e) => e.stopPropagation()}
@@ -159,7 +157,7 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
         }}
       >
         <header {...win.handle} className="shrink-0 flex items-center justify-between px-5 h-12 border-b border-line select-none">
-          <h2 className="text-[14px] font-semibold">{title ?? (initial ? "Editar sesión" : "Nueva sesión")}</h2>
+          <h2 id={modal.titleId} className="text-[14px] font-semibold">{title ?? (initial ? "Editar sesión" : "Nueva sesión")}</h2>
           <button
             type="button"
             onClick={onClose}
@@ -171,11 +169,12 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
-          <div className="grid grid-cols-5 gap-1 p-1 rounded-lg bg-hover">
+          <div role="group" aria-label="Tipo de sesión" className="grid grid-cols-5 gap-1 p-1 rounded-lg bg-hover">
             {(["ssh", "telnet", "serial", "raw", "local"] as SessionType[]).map((t) => (
               <button
                 key={t}
                 type="button"
+                aria-pressed={s.type === t}
                 onClick={() => changeType(t)}
                 className={`flex items-center justify-center gap-1.5 h-8 rounded-md text-[12.5px] font-medium ${
                   s.type === t ? "bg-panel shadow-sm text-fg" : "text-muted hover:text-fg"
@@ -490,7 +489,7 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
         </div>
 
         <footer className="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-line">
-          {error && <span className="mr-auto text-[11.5px] text-danger truncate">{error}</span>}
+          {error && <span role="alert" className="mr-auto text-[11.5px] text-danger truncate">{error}</span>}
           <button
             type="button"
             onClick={() => submit(false)}

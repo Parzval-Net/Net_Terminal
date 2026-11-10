@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, Download, FileJson, Lock, Search, Trash2, Upload, X } from "lucide-react";
@@ -32,11 +33,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
       .filter(([, l]) => l.length);
   }, [packs, query]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const modal = useModal({ onClose: onClose });
 
   const pick = async () => {
     setError("");
@@ -80,14 +77,15 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
   }, [preview]);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
       <div
+        {...modal.dialog}
         {...win.box}
         className="w-[620px] h-[560px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[420px] min-h-[320px] max-w-[96vw] max-h-[94vh]"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <header {...win.handle} className="shrink-0 flex items-center justify-between px-5 h-12 border-b border-line select-none">
-          <h2 className="text-[14px] font-semibold">Packs de comandos</h2>
+          <h2 id={modal.titleId} className="text-[14px] font-semibold">Packs de comandos</h2>
           <button onClick={onClose} aria-label="Cerrar" className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover">
             <X size={16} />
           </button>
@@ -98,7 +96,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
             Un pack es un archivo JSON con comandos y sus explicaciones. Es solo texto: nunca se ejecuta al importarlo. La app
             recalcula el riesgo de cada comando y no permite que un pack lo declare menor.
           </p>
-          {error && <p className="text-[12px] text-danger">{error}</p>}
+          {error && <p role="alert" className="text-[12px] text-danger">{error}</p>}
 
           {preview && (
             <div className="rounded-lg border border-line p-3 space-y-2">

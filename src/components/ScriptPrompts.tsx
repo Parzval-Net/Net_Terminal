@@ -5,6 +5,7 @@ import { FileCode2, KeyRound } from "lucide-react";
 import { riskLabel, type Risk } from "../lib/packs";
 import { type GatePrompt, type ScriptPrompt, type SecretPrompt, autoDecision, scriptLineRisk } from "../lib/scriptGate";
 import { useDragResize } from "../lib/useDragResize";
+import { useModal } from "../lib/useModal";
 
 interface Props {
   toast: (text: string, kind?: "info" | "error") => void;
@@ -56,6 +57,7 @@ export function ScriptPrompts({ toast }: Props) {
 
 function GateDialog({ prompt: p, pending, onDecide }: { prompt: GatePrompt; pending: number; onDecide: (ok: boolean) => void }) {
   const win = useDragResize("scriptGateWindow", false);
+  const modal = useModal();
   const risk: Risk = scriptLineRisk(p.line, p.opaque);
   useEffect(() => {
     // Esc rechaza; Enter no aprueba a propósito (hay que hacer clic en Permitir).
@@ -70,8 +72,8 @@ function GateDialog({ prompt: p, pending, onDecide }: { prompt: GatePrompt; pend
   }, [onDecide]);
 
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/35 p-4">
-      <div role="alertdialog" aria-modal="true" aria-labelledby="sg-title" {...win.box} className="w-[500px] max-w-full bg-panel border border-line rounded-xl shadow-pop">
+    <div {...modal.overlay} className="fixed inset-0 z-[60] grid place-items-center bg-black/35 p-4">
+      <div role="alertdialog" aria-modal="true" aria-labelledby="sg-title" tabIndex={-1} {...win.box} className="w-[500px] max-w-full bg-panel border border-line rounded-xl shadow-pop">
         <header {...win.handle} className="flex items-center gap-2.5 px-5 pt-4 select-none">
           <span className={`w-8 h-8 grid place-items-center rounded-lg bg-selected ${risk === "disruptive" ? "text-danger" : "text-warn"}`}>
             <FileCode2 size={17} />
@@ -128,6 +130,7 @@ function GateDialog({ prompt: p, pending, onDecide }: { prompt: GatePrompt; pend
 
 function SecretDialog({ prompt: p, onDone }: { prompt: SecretPrompt; onDone: (value: string | null) => void }) {
   const win = useDragResize<HTMLFormElement>("scriptSecretWindow", false);
+  const modal = useModal();
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -149,12 +152,13 @@ function SecretDialog({ prompt: p, onDone }: { prompt: SecretPrompt; onDone: (va
   };
 
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/35 p-4">
+    <div {...modal.overlay} className="fixed inset-0 z-[60] grid place-items-center bg-black/35 p-4">
       <form
         onSubmit={submit}
         role="dialog"
         aria-modal="true"
         aria-labelledby="ss-title"
+        tabIndex={-1}
         {...win.box}
         className="w-[420px] max-w-full bg-panel border border-line rounded-xl shadow-pop"
         autoComplete="off"

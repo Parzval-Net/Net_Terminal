@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useModal } from "../lib/useModal";
 import { Radio, Square, X } from "lucide-react";
 import { Risk, computeRisk, riskLabel } from "../lib/packs";
 import { Resolved, clearBroadcast, stopBroadcast, useBroadcastRun } from "../lib/broadcast";
@@ -42,6 +43,8 @@ export function BroadcastDialog({ text, resolved, declared, delayMs, verb, onCan
   const needsCount = risk !== "read";
   const ok = n > 0 && (!needsCount || typed.trim() === String(n));
 
+  // Esc y Enter los atiende el manejador de abajo; el hook pone la trampa de foco y devuelve el foco al cerrar.
+  const modal = useModal();
   useEffect(() => {
     // En captura: Esc/Enter no llegan a la terminal. Enter solo confirma lo que no exige escribir.
     const onKey = (e: KeyboardEvent) => {
@@ -60,11 +63,12 @@ export function BroadcastDialog({ text, resolved, declared, delayMs, verb, onCan
   }, [onCancel, onConfirm, needsCount, ok, delay]);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4" onMouseDown={onCancel}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4" onMouseDown={onCancel}>
       <div
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="bc-title"
+        tabIndex={-1}
         className="w-[620px] max-w-full max-h-[90vh] flex flex-col bg-panel border border-line rounded-xl shadow-pop"
         onMouseDown={(e) => e.stopPropagation()}
       >

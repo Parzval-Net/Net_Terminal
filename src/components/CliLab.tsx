@@ -14,6 +14,7 @@ import { LabItem, LabStep, SAVE_COMMAND, clearLab, isLabRunning, labReport, runL
 import { runOnDeviceResult } from "../lib/deviceRun";
 import { isSecretVar } from "../lib/templateSecrets";
 import { useDragResize } from "../lib/useDragResize";
+import { useModal } from "../lib/useModal";
 import { fontStack } from "../lib/theme";
 import { isMac } from "../lib/platform";
 import { persist, stored } from "../lib/prefs";
@@ -99,11 +100,8 @@ export function CliLab(p: Props) {
   }, [text]);
   useEffect(() => () => persist(DRAFT, { text: draft.current }), []);
   useEffect(() => persist(OPTS, opts), [opts]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !confirm && naming === null && p.onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [p.onClose, confirm, naming]);
+  // Esc cierra el laboratorio, salvo con el aviso de envío abierto o un nombre en edición (ambos usan Esc).
+  const modal = useModal({ onClose: confirm || naming !== null ? undefined : p.onClose });
 
   const vars = useMemo(() => templateVars(text), [text]);
   const lines = useMemo(() => scriptLines(text), [text]);
@@ -207,9 +205,11 @@ export function CliLab(p: Props) {
   }, [failKey]);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={p.onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={p.onClose}>
       <div
         {...win.box}
+        {...modal.dialog}
+        aria-labelledby={undefined}
         className="@container w-[960px] h-[640px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[min(620px,calc(100vw-2rem))] min-h-[min(420px,calc(100vh-2rem))] max-w-[98vw] max-h-[96vh]"
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"

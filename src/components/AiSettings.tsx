@@ -2,6 +2,7 @@ import { useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Copy, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Settings, newToken } from "../lib/settings";
+import { Item as Row, Switch } from "./controls";
 
 interface Props {
   settings: Settings;
@@ -108,12 +109,13 @@ export function AiSettings({ settings: s, status, onChange }: Props) {
         <div className="flex gap-1.5">
           <input
             readOnly
+            aria-label="Token del servidor MCP"
             className="field font-mono !text-[12px] flex-1"
             type={show ? "text" : "password"}
             value={s.mcpToken}
             placeholder="Se genera al activar"
           />
-          <IconBtn title={show ? "Ocultar" : "Mostrar"} onClick={() => setShow(!show)}>
+          <IconBtn title={show ? "Ocultar token" : "Mostrar token"} onClick={() => setShow(!show)}>
             {show ? <EyeOff size={14} /> : <Eye size={14} />}
           </IconBtn>
           <IconBtn title="Copiar token" onClick={() => copy("token", s.mcpToken)} disabled={!s.mcpToken}>
@@ -123,7 +125,7 @@ export function AiSettings({ settings: s, status, onChange }: Props) {
             <RefreshCw size={14} />
           </IconBtn>
         </div>
-        {copied === "token" && <p className="mt-1 text-[11.5px] text-accent">Token copiado</p>}
+        {copied === "token" && <p role="status" className="mt-1 text-[11.5px] text-accent">Token copiado</p>}
       </div>
 
       <div>
@@ -136,6 +138,7 @@ export function AiSettings({ settings: s, status, onChange }: Props) {
                   {name} <span className="text-[11.5px] text-muted">· {where}</span>
                 </span>
                 <button
+                  aria-label={`Copiar la configuración para ${name}`}
                   onClick={(e) => {
                     e.preventDefault();
                     copy(name, snippet);
@@ -160,38 +163,10 @@ export function AiSettings({ settings: s, status, onChange }: Props) {
   );
 }
 
-function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4 min-h-8">
-      <div className="min-w-0">
-        <div>{label}</div>
-        {hint && <div className="text-[11.5px] text-muted">{hint}</div>}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  );
-}
-
-function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative w-9 h-5 rounded-full transition-colors before:absolute before:-inset-[3px] before:content-[''] ${checked ? "bg-accent" : "bg-line"}`}
-    >
-      <span
-        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-          checked ? "translate-x-4" : ""
-        }`}
-      />
-    </button>
-  );
-}
-
 function IconBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
+      aria-label={props.title}
       {...props}
       className="w-8 h-[30px] shrink-0 grid place-items-center rounded-md border border-line text-muted hover:text-fg hover:bg-hover disabled:opacity-40"
     />

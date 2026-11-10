@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Columns2, LayoutGrid, Maximize2, Minimize2, Plus, Rows2, X } from "lucide-react";
 import { newTabMenuItems } from "./tabMenu";
 import { SplitLayout, layoutLabel } from "../lib/split";
@@ -10,6 +10,7 @@ import { SessionIcon, isQuickSession } from "./SessionIcon";
 import { focusLabel, modLabel } from "../lib/platform";
 import type { CloseScope } from "../lib/closeAll";
 import { useTabDrag } from "../lib/tabDrag";
+import { useTabKeys } from "../lib/useTabKeys";
 
 export interface TabBarProps {
   tabs: Tab[];
@@ -84,8 +85,14 @@ export const dotColor = (status: ConnStatus, active: boolean) =>
  * tema claro, o al revés, no contrasta). Siempre visible al enfocar con el teclado.
  */
 export const closeBtnClass = (active: boolean) =>
-  `hidden group-hover:grid focus-visible:grid w-5 h-5 shrink-0 place-items-center rounded outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+  `hidden group-hover:grid group-focus-within:grid focus-visible:grid w-6 h-6 shrink-0 place-items-center rounded outline-none focus-visible:ring-2 focus-visible:ring-accent ${
     active ? "text-term-fg/70 hover:text-term-fg hover:bg-term-fg/15" : "text-muted hover:text-fg hover:bg-hover"
+  }`;
+
+/** Nombre accesible de una pestaña: título, estado de conexión y marcas pendientes (el punto y los símbolos no se leen). */
+export const tabLabel = (title: string, status: ConnStatus, marker: "alert" | "activity" | null) =>
+  `${title}, ${status === "connected" ? "conectada" : status === "connecting" ? "conectando" : "desconectada"}${
+    marker === "alert" ? ", alerta por palabra clave" : marker === "activity" ? ", salida nueva" : ""
   }`;
 
 export const TabBar = memo(function TabBar(props: TabBarProps) {
@@ -104,9 +111,26 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
   } = props;
   const vertical = tabLayout === "vertical";
   const [editing, setEditing] = useState<string | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; radio?: boolean } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
   const drag = useTabDrag("data-tab", "x", props.onReorder);
+  // Teclado de la lista (flechas, Supr, F2, tecla de menú): el mismo patrón que la barra vertical.
+  const ids = useMemo(() => tabs.map((t) => t.id), [tabs]);
+  const keys = useTabKeys({
+    orientation: "horizontal",
+    attr: "data-tab",
+    ids,
+    onSelect,
+    onClose,
+    onRename: setEditing,
+    onMenu: (id, el) => {
+      const t = tabs.find((x) => x.id === id);
+      const r = el.getBoundingClientRect();
+      if (t) setMenu({ x: r.left, y: r.bottom + 4, items: tabMenuItems(t, states[id], props, () => setEditing(id)) });
+    },
+  });
+  // Un único tab entra en el orden de Tab (tabindex móvil): el activo o, si no hay, el primero.
+  const focusId = tabs.some((t) => t.id === activeId) ? activeId : tabs[0]?.id;
   // La pestaña activa siempre visible: con muchas pestañas o la ventana angosta quedaba fuera
   // de la franja (que se desplaza sin barra visible).
   const stripRef = useRef<HTMLDivElement>(null);
@@ -138,13 +162,26 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
           setMenu({ x: e.clientX, y: e.clientY, items: layoutItem(props) });
         }}
       >
+        <div
+          ref={keys.listRef}
+          role="tablist"
+          aria-orientation="horizontal"
+          aria-label="Pestañas abiertas"
+          onKeyDown={keys.onKeyDown}
+          className="flex items-end gap-0.5 shrink-0"
+        >
         {!vertical && tabs.map((t) => {
           const active = t.id === activeId;
           const status = states[t.id]?.status ?? "connecting";
+          const marker = alerted?.has(t.id) && !active ? "alert" : activity.has(t.id) && !active ? "activity" : null;
           return (
             <div
               key={t.id}
               data-tab={t.id}
+              role="tab"
+              aria-selected={active}
+              aria-label={tabLabel(tabTitle(t), status, marker)}
+              tabIndex={focusId === t.id ? 0 : -1}
               onMouseDown={(e) => {
                 if (e.button === 1) {
                   e.preventDefault();
@@ -165,7 +202,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                 });
               }}
               title={`${tabTitle(t)}${t.title ? ` (${t.session.name})` : ""}\nArrastra para mover · doble clic: renombrar · clic derecho: opciones · clic medio: cerrar`}
-              className={`group relative flex items-center gap-2 h-7 pl-3 pr-1.5 min-w-[120px] max-w-[220px] rounded-t-lg text-[12.5px] ${
+              className={`group relative flex items-center gap-2 h-7 pl-3 pr-1.5 min-w-[120px] max-w-[220px] rounded-t-lg text-[12.5px] cursor-default focus-visible:outline-offset-[-2px] ${
                 drag.dragId === t.id ? "opacity-50" : ""
               } ${drag.target?.id === t.id ? dropMark(drag.target.after ? "right" : "left") : ""} ${
                 active
@@ -182,29 +219,38 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                   onMouseDown={(e) => e.stopPropagation()}
                   onFocus={(e) => e.currentTarget.select()}
                   onBlur={(e) => commit(t.id, e.currentTarget.value)}
+                  aria-label="Nuevo nombre de la pestaña"
                   onKeyDown={(e) => {
                     e.stopPropagation();
-                    if (e.key === "Enter") e.currentTarget.blur();
-                    if (e.key === "Escape") setEditing(null);
+                    if (e.key === "Enter") {
+                      e.currentTarget.blur();
+                      keys.focusTab(t.id);
+                    }
+                    if (e.key === "Escape") {
+                      setEditing(null);
+                      keys.focusTab(t.id);
+                    }
                   }}
                 />
               ) : (
                 <span className={`truncate flex-1 ${t.title ? "italic" : ""}`}>{tabTitle(t)}</span>
               )}
               {alerted?.has(t.id) && !active ? (
-                <span className="text-[11px] font-semibold text-danger shrink-0" title="Alerta por palabra clave">
+                <span aria-hidden className="text-[11px] font-semibold text-danger shrink-0" title="Alerta por palabra clave">
                   ▲
                 </span>
               ) : activity.has(t.id) && !active && (
-                <span className="text-[11px] font-semibold text-accent shrink-0" title="Salida nueva">
+                <span aria-hidden className="text-[11px] font-semibold text-accent shrink-0" title="Salida nueva">
                   ●
                 </span>
               )}
               <span
-                className="w-1.5 h-1.5 rounded-full shrink-0 group-hover:hidden"
+                aria-hidden
+                className="w-1.5 h-1.5 rounded-full shrink-0 group-hover:hidden group-focus-within:hidden"
                 style={{ background: dotColor(status, active) }}
               />
               <button
+                tabIndex={focusId === t.id ? 0 : -1}
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => onClose(t.id)}
                 title={`Cerrar (${modLabel}W)`}
@@ -216,6 +262,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
             </div>
           );
         })}
+        </div>
         {menu && <ContextMenu menu={menu} onClose={closeMenu} />}
         {!vertical && (
           <button
@@ -242,9 +289,11 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
         <button
           onClick={(e) => {
             const r = e.currentTarget.getBoundingClientRect();
-            setMenu({ x: r.right - 200, y: r.bottom + 4, items: splitMenuItems(split, onSplit) });
+            setMenu({ x: r.right - 200, y: r.bottom + 4, items: splitMenuItems(split, onSplit), radio: true });
           }}
           title={split ? `Vista dividida: ${layoutLabel[split]}` : "Vista dividida: ver 2 o 4 pestañas a la vez"}
+          aria-label="Vista dividida"
+          aria-haspopup="menu"
           aria-pressed={!!split}
           className={`mb-[5px] w-7 h-6 shrink-0 grid place-items-center rounded-md hover:bg-hover ${split ? "text-accent" : "text-muted hover:text-fg"}`}
         >

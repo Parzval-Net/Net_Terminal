@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bot } from "lucide-react";
 import { useDragResize } from "../lib/useDragResize";
+import { useModal } from "../lib/useModal";
 import { Risk, riskLabel, textRisk } from "../lib/packs";
 
 const BADGE: Record<Risk, string> = {
@@ -44,6 +45,8 @@ export function ApprovalDialog({ request, pending, onDecide }: Props) {
   }, [onDecide]);
 
   const win = useDragResize("approvalWindow", false);
+  // Esc y Enter los atiende el manejador de arriba; el hook pone la trampa de foco y devuelve el foco al cerrar.
+  const modal = useModal();
   const lines = request.detail.split("\n");
   const action = request.tool === "open_session" ? "abrir la sesión" : "ejecutar en";
   const risk = useMemo(() => (request.tool === "open_session" ? null : textRisk(request.detail)), [request]);
@@ -52,8 +55,8 @@ export function ApprovalDialog({ request, pending, onDecide }: Props) {
   const blocked = risk === "disruptive" && !ack;
 
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/35 p-4">
-      <div role="alertdialog" aria-modal="true" aria-labelledby="approval-title" aria-describedby="approval-detail" {...win.box} className="w-[480px] max-w-full bg-panel border border-line rounded-xl shadow-pop">
+    <div {...modal.overlay} className="fixed inset-0 z-[60] grid place-items-center bg-black/35 p-4">
+      <div role="alertdialog" aria-modal="true" aria-labelledby="approval-title" aria-describedby="approval-detail" tabIndex={-1} {...win.box} className="w-[480px] max-w-full bg-panel border border-line rounded-xl shadow-pop">
         <header {...win.handle} className="flex items-center gap-2.5 px-5 pt-4 select-none">
           <span className="w-8 h-8 grid place-items-center rounded-lg bg-selected text-accent">
             <Bot size={17} />

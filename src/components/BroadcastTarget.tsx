@@ -20,6 +20,8 @@ export const BroadcastTargetPicker = memo(function BroadcastTargetPicker() {
   // Posición fija (sobre el botón): la barra de botones recorta lo que se sale de ella.
   const [open, setOpen] = useState<{ right: number; bottom: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
 
   const count = useMemo(() => {
     if (target.mode === "current") return null;
@@ -38,7 +40,12 @@ export const BroadcastTargetPicker = memo(function BroadcastTargetPicker() {
     const close = (e: MouseEvent) => {
       if (!ref.current?.contains(e.target as Node)) setOpen(null);
     };
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(null);
+    // Esc cierra y devuelve el foco al botón que abrió el selector.
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(null);
+      btnRef.current?.focus();
+    };
     window.addEventListener("mousedown", close);
     window.addEventListener("keydown", esc);
     return () => {
@@ -47,6 +54,12 @@ export const BroadcastTargetPicker = memo(function BroadcastTargetPicker() {
     };
   }, [open]);
 
+  // Al abrir, el foco entra a la opción elegida (el selector no es modal: Tab sale a la barra).
+  const isOpen = !!open;
+  useEffect(() => {
+    if (isOpen) popRef.current?.querySelector<HTMLElement>("input:checked, input:not(:disabled)")?.focus();
+  }, [isOpen]);
+
   const multi = target.mode !== "current";
   const shortLabel =
     target.mode === "folder" ? target.folder.split("/").pop() || "Carpeta" : target.mode === "panes" ? "Paneles" : "Pestañas";
@@ -54,17 +67,21 @@ export const BroadcastTargetPicker = memo(function BroadcastTargetPicker() {
   return (
     <div ref={ref} className="relative shrink-0">
       <button
+        ref={btnRef}
         onClick={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
           setOpen((o) => (o ? null : { right: Math.max(8, window.innerWidth - r.right), bottom: window.innerHeight - r.top + 6 }));
         }}
-        title="Elegir a qué sesiones se envía"
-        aria-label={multi ? `Destino: ${targetLabel(target, ws)}, ${count} conectadas` : "Destino: pestaña actual"}
+        title="Elegir a qué sesiones se envía lo de Notas, catálogo, botones y scripts"
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+        aria-label={multi ? `Enviar a: ${targetLabel(target, ws)}, ${count} conectadas` : "Enviar a: pestaña actual"}
         className={`flex items-center gap-1 px-2 h-6 rounded-md text-[11.5px] border ${
           multi ? "border-warn text-warn font-medium" : "border-transparent text-muted hover:text-fg hover:bg-hover"
         }`}
       >
         {multi && <Radio size={12} />}
+        <span className="hidden @[52rem]:inline shrink-0 font-normal text-muted">Enviar a:</span>
         <span className="max-w-[90px] @[52rem]:max-w-[140px] truncate">
           {multi ? (
             `${shortLabel} (${count})`
@@ -80,6 +97,7 @@ export const BroadcastTargetPicker = memo(function BroadcastTargetPicker() {
       </button>
       {open && (
         <div
+          ref={popRef}
           className="fixed z-40 w-72 bg-panel border border-line rounded-lg shadow-pop p-1.5 text-fg"
           style={open}
           role="dialog"
@@ -126,7 +144,7 @@ export function TargetOptions() {
       {target.mode === "tabs" && (
         <div className="ml-6 mb-1 max-h-40 overflow-y-auto">
           {remote.map((t) => (
-            <label key={t.id} className="flex items-center gap-2 px-1 h-6 text-[12px] hover:bg-hover rounded">
+            <label key={t.id} className="flex items-center gap-2 px-1 min-h-6 text-[12px] hover:bg-hover rounded">
               <input
                 type="checkbox"
                 className="accent-[var(--accent)]"

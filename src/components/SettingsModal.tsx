@@ -7,6 +7,8 @@ import logo from "../assets/logo.svg";
 import type { ModuleId } from "../lib/settings";
 import { AiSettings } from "./AiSettings";
 import { useDragResize } from "../lib/useDragResize";
+import { useModal } from "../lib/useModal";
+import { Item, Segmented, Switch } from "./controls";
 import type { ITheme } from "@xterm/xterm";
 import { HighlightSettings } from "./HighlightSettings";
 import { AlertSettings } from "./AlertSettings";
@@ -63,7 +65,7 @@ const sections: { id: Section; label: string; Icon: typeof Palette; group: strin
   { id: "terminal", label: "Terminal", Icon: SquareTerminal, group: "General", keywords: "historial scrollback copiar al seleccionar pegar clic derecho confirmar al cerrar legacy ssh algoritmos antiguos ssh-rsa compatibilidad sugerencias de comandos autocompletar abreviaturas historial de sugerencias tecla de lista confirmar envío varias líneas barra de botones pausa entre líneas notas" },
   { id: "highlight", label: "Resaltado", Icon: Highlighter, group: "General", keywords: "resaltado sintaxis reglas regex esquemas fabricante cisco juniper huawei fortinet colores exportar importar" },
   { id: "data", label: "Logs", Icon: ScrollText, group: "Sesiones y datos", keywords: "logs grabar automáticamente hora en cada línea nombre del archivo patrón anexar rotación diaria ocultar secretos carpeta de logs" },
-  { id: "credentials", label: "Credenciales", Icon: KeyRound, group: "Sesiones y datos", keywords: "contraseñas guardadas bóveda llavero contraseña maestra portable credenciales" },
+  { id: "credentials", label: "Credenciales", Icon: KeyRound, group: "Sesiones y datos", keywords: "contraseñas guardadas bóveda llavero contraseña maestra portable credenciales vecinos saltos topología" },
   { id: "sessions", label: "Importar y exportar", Icon: ArrowLeftRight, group: "Sesiones y datos", keywords: "sesiones importar exportar portapapeles json putty securecrt mobaxterm ssh config csv carpeta de datos portable" },
   { id: "modules", label: "Módulos", Icon: Blocks, group: "Herramientas", keywords: "módulos monitoreo diagnóstico topología subredes velocidad tftp http syslog plugins respaldos herramientas" },
   { id: "alerts", label: "Alertas", Icon: BellRing, group: "Herramientas", keywords: "alertas palabra clave reglas sonido aviso pestaña expresión regular" },
@@ -102,6 +104,7 @@ export function SettingsModal({
 }: Props) {
   const [section, setSection] = useState<Section>(initialSection ?? "appearance");
   const win = useDragResize("settingsWindow");
+  const modal = useModal({ onClose, initialFocus: '[aria-current="page"]' });
   const [dataDir, setDataDir] = useState("");
   const [notice, setNotice] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
@@ -165,21 +168,20 @@ export function SettingsModal({
 
   useEffect(() => {
     invoke<string>("data_dir").then(setDataDir).catch(() => {});
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   const autoPreset = presets[appDark ? 0 : 1];
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
       <div
         {...win.box}
+        {...modal.dialog}
+        aria-labelledby="settings-title"
         className="@container w-[800px] h-[600px] min-w-[420px] min-h-[340px] max-w-[96vw] max-h-[94vh] resize flex bg-panel border border-line rounded-xl shadow-pop overflow-hidden"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <nav className="w-12 @[640px]:w-44 shrink-0 bg-chrome border-r border-line p-2 space-y-0.5 overflow-y-auto">
+        <nav aria-label="Secciones de ajustes" className="w-12 @[640px]:w-44 shrink-0 bg-chrome border-r border-line p-2 space-y-0.5 overflow-y-auto">
           <div {...win.handle} className="hidden @[640px]:block px-2 pt-1.5 pb-2 text-[14px] font-semibold select-none">
             Ajustes
           </div>
@@ -203,8 +205,10 @@ export function SettingsModal({
                   key={id}
                   onClick={() => setSection(id)}
                   title={label}
+                  aria-label={label}
+                  aria-current={section === id ? "page" : undefined}
                   className={`w-full flex items-center gap-2 px-2 h-8 rounded-md text-left ${
-                    section === id ? "bg-selected text-fg" : "text-muted hover:text-fg hover:bg-hover"
+                    section === id ? "bg-selected text-fg shadow-[inset_2px_0_0_0_var(--accent)]" : "text-muted hover:text-fg hover:bg-hover"
                   }`}
                 >
                   <Icon size={15} className="shrink-0" />
@@ -218,7 +222,10 @@ export function SettingsModal({
 
         <div className="flex-1 min-w-0 flex flex-col">
           <header {...win.handle} className="flex items-center justify-between h-12 px-5 border-b border-line select-none">
-            <h2 className="text-[14px] font-semibold">{sections.find((x) => x.id === section)?.label}</h2>
+            <h2 id="settings-title" className="text-[14px] font-semibold">
+              <span className="sr-only">Ajustes: </span>
+              {sections.find((x) => x.id === section)?.label}
+            </h2>
             <button
               onClick={onClose}
               aria-label="Cerrar"
@@ -261,8 +268,8 @@ export function SettingsModal({
                   <Switch checked={s.floatingSidebar} onChange={(v) => onChange({ floatingSidebar: v })} />
                 </Item>
 
-                <div>
-                  <Label>Tema de terminal</Label>
+                <div role="group" aria-labelledby="term-theme-label">
+                  <div id="term-theme-label" className="mb-2 text-[12px] font-medium text-muted">Tema de terminal</div>
                   <div className="grid grid-cols-3 gap-2">
                     <ThemeCard
                       preset={{ ...autoPreset, name: "Automático" }}
@@ -302,6 +309,7 @@ export function SettingsModal({
                   <div className="flex items-center gap-2">
                     <input
                       type="range"
+                      aria-label="Tamaño de la fuente en píxeles"
                       min={9}
                       max={28}
                       value={s.fontSize}
@@ -544,7 +552,7 @@ export function SettingsModal({
                     </button>
                   </div>
                 </Item>
-                {notice && <p className="text-[11.5px] text-accent -mt-2">{notice}</p>}
+                {notice && <p role="status" className="text-[11.5px] text-accent -mt-2">{notice}</p>}
                 <Item label="Carpeta de datos" hint={dataDir}>
                   <OpenBtn which="data" />
                 </Item>
@@ -556,14 +564,18 @@ export function SettingsModal({
             )}
           </div>
 
-          <footer className="flex justify-between items-center px-5 h-12 border-t border-line">
-            <button
-              onClick={() => setConfirmReset(true)}
-              title="Las reglas de resaltado personalizadas se conservan"
-              className="px-2.5 h-7 rounded-md border border-line text-[12px] text-muted hover:text-danger hover:border-danger"
-            >
-              Restablecer valores
-            </button>
+          <footer className="flex justify-between items-center gap-3 px-5 h-12 border-t border-line">
+            {section !== "credentials" && section !== "about" ? (
+              <button
+                onClick={() => setConfirmReset(true)}
+                title="Vuelve todos los ajustes de la aplicación a sus valores por defecto. Se conservan sesiones, notas, contraseñas y reglas de resaltado propias"
+                className="px-2.5 h-7 rounded-md border border-line text-[12px] text-muted hover:text-danger hover:border-danger"
+              >
+                Restablecer todos los ajustes…
+              </button>
+            ) : (
+              <span />
+            )}
             <span className="text-[11.5px] text-muted">Los cambios se aplican al instante</span>
           </footer>
           {confirmReset &&
@@ -630,6 +642,7 @@ function LogNaming({ settings: s, onChange }: { settings: Settings; onChange: (p
       <Item label="Nombre del archivo" hint="Variables: {session} {host} {folder} {date} {time}. {folder} crea subcarpetas">
         <input
           className="field !w-56 font-mono !text-[12px]"
+          aria-label="Patrón del nombre del archivo de log"
           value={s.logPattern}
           maxLength={200}
           placeholder={defaultSettings.logPattern}
@@ -641,6 +654,7 @@ function LogNaming({ settings: s, onChange }: { settings: Settings; onChange: (p
           <button
             key={v}
             onClick={() => onChange({ logPattern: (s.logPattern || "") + v })}
+            aria-label={`Agregar la variable ${v} al patrón`}
             className="px-1.5 h-6 rounded border border-line hover:bg-hover font-mono"
           >
             {v}
@@ -693,7 +707,7 @@ function LogsFolder({ settings: s, onChange }: { settings: Settings; onChange: (
       </Item>
       {s.logsDir && (
         <div className="flex items-center gap-2 text-[11.5px] text-muted">
-          <button onClick={() => apply("")} className="hover:text-fg hover:underline">
+          <button onClick={() => apply("")} className="min-h-6 hover:text-fg hover:underline">
             Restablecer a la predeterminada
           </button>
           <span className="truncate" title={info?.default}>({info?.default})</span>
@@ -702,7 +716,7 @@ function LogsFolder({ settings: s, onChange }: { settings: Settings; onChange: (
       {s.logsDir && info?.portable && (
         <p className="text-[11.5px] text-warn">Modo portable: los logs fuera de la carpeta data/ no viajan con el pendrive.</p>
       )}
-      {error && <p className="text-[11.5px] text-danger">{error}</p>}
+      {error && <p role="alert" className="text-[11.5px] text-danger">{error}</p>}
     </div>
   );
 }
@@ -750,7 +764,7 @@ function UpdateSettings({ settings: s, onChange }: { settings: Settings; onChang
         </button>
       </div>
       {repo && <p className="text-[11px] text-muted">Fuente: releases de github.com/{repo}</p>}
-      {status && <p className="text-[12px] text-accent">{status}</p>}
+      {status && <p role="status" className="text-[12px] text-accent">{status}</p>}
     </div>
   );
 }
@@ -787,10 +801,6 @@ function About({ settings, onChange }: { settings: Settings; onChange: (p: Parti
   );
 }
 
-function Label({ children }: { children: React.ReactNode }) {
-  return <div className="mb-2 text-[12px] font-medium text-muted">{children}</div>;
-}
-
 /** El historial guarda solo plantillas del catálogo, en este equipo (nunca argumentos ni equipos). */
 function ClearSuggestHistory() {
   const [done, setDone] = useState(false);
@@ -807,61 +817,6 @@ function ClearSuggestHistory() {
         {done ? "Historial borrado" : "Borrar historial de sugerencias"}
       </button>
     </Item>
-  );
-}
-
-function Item({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4 min-h-8">
-      <div className="min-w-0">
-        <div>{label}</div>
-        {hint && <div className="text-[11.5px] text-muted truncate" title={hint}>{hint}</div>}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  );
-}
-
-function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative w-9 h-5 rounded-full transition-colors before:absolute before:-inset-[3px] before:content-[''] ${checked ? "bg-accent" : "bg-field-line"}`}
-    >
-      <span
-        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-          checked ? "translate-x-4" : ""
-        }`}
-      />
-    </button>
-  );
-}
-
-function Segmented<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: [T, string][];
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="flex p-0.5 rounded-lg bg-hover">
-      {options.map(([v, label]) => (
-        <button
-          key={v}
-          onClick={() => onChange(v)}
-          className={`px-3 h-7 rounded-md text-[12.5px] ${
-            value === v ? "bg-panel shadow-sm text-fg" : "text-muted hover:text-fg"
-          }`}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
   );
 }
 
@@ -883,6 +838,7 @@ function ThemeCard({
   return (
     <button
       onClick={onClick}
+      aria-pressed={selected}
       className={`text-left rounded-lg border overflow-hidden ${
         selected ? "border-accent ring-2 ring-[var(--selected)]" : "border-line hover:border-muted"
       }`}

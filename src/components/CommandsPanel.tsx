@@ -1,4 +1,4 @@
-import { memo, useCallback, useDeferredValue, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useId, useMemo, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { CATEGORIES, CatalogEntry, CatalogVendor, OS_VENDORS, Risk, appliesTo, commandFor, riskLabel } from "../lib/packs";
 import { modLabel } from "../lib/platform";
+import { stepIndex } from "../lib/kbNav";
 import { PanelResize, panelClass } from "./PanelResize";
 
 interface Props {
@@ -87,6 +88,9 @@ interface RowActions {
   copy: (c: CatalogEntry, cmd: string) => void;
   fav: (key: string, fav: boolean) => void;
   edit: (c: CatalogEntry) => void;
+  /** Tarjeta seleccionada (sus acciones quedan a la vista) y tarjeta que entra en el orden de Tab. */
+  select: (key: string) => void;
+  focus: (key: string) => void;
 }
 
 export const CommandsPanel = memo(function CommandsPanel(p: Props) {
@@ -97,6 +101,8 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
   const [onlyFav, setOnlyFav] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({ Sistema: true });
   const [copied, setCopied] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [focusKey, setFocusKey] = useState<string | null>(null);
   const vendor = p.catalog.find((v) => v.id === p.vendor) ?? p.catalog[0];
   const platform = vendor?.platforms.some((x) => x.id === p.platform) ? p.platform : null;
   const favSet = useMemo(() => new Set(p.favorites), [p.favorites]);
@@ -118,6 +124,8 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
         pRef.current.onFavorites(fav ? f.filter((x) => x !== key) : [...f, key]);
       },
       edit: (c) => pRef.current.onEdit(c),
+      select: (key) => setSelectedKey((cur) => (cur === key ? null : key)),
+      focus: (key) => setFocusKey(key),
     }),
     [],
   );
@@ -143,10 +151,16 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
 
   const filtering = !!deferredQuery.trim() || onlyFav;
   const total = groups.reduce((n, [, l]) => n + l.length, 0);
+  // Tabindex móvil: una sola tarjeta entra en el orden de Tab (la última con foco o, si no, la primera).
+  const visibleKeys = useMemo(
+    () => (vendor ? groups.flatMap(([cat, list]) => (filtering || open[cat] ? list.map((c) => `${vendor.id}:${c.cmd}`) : [])) : []),
+    [groups, filtering, open, vendor],
+  );
+  const tabKey = focusKey && visibleKeys.includes(focusKey) ? focusKey : (visibleKeys[0] ?? null);
   const platLabel = useCallback((id: string) => vendor?.platforms.find((x) => x.id === id)?.label ?? id, [vendor]);
 
   return (
-    <aside className={panelClass(!!p.overlay)} style={{ width: p.width }}>
+    <aside aria-label="Catálogo de comandos" className={panelClass(!!p.overlay)} style={{ width: p.width }}>
       <PanelResize width={p.width} onResize={p.onResize} />
       <header className="flex items-center gap-1 px-2 h-9 border-b border-line">
         {/* Lista agrupada: con equipos de red y sistemas operativos ya no caben como pestañas. */}
@@ -172,10 +186,10 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
             ) : null,
           )}
         </select>
-        <HeadBtn title="Packs de comandos" onClick={p.onPacks}>
+        <HeadBtn title="Packs de comandos" aria-label="Packs de comandos" onClick={p.onPacks}>
           <Package size={14} />
         </HeadBtn>
-        <HeadBtn title={`Cerrar (${modLabel}L)`} onClick={p.onClose}>
+        <HeadBtn title={`Cerrar (${modLabel}L)`} aria-label="Cerrar el catálogo" onClick={p.onClose}>
           <X size={15} />
         </HeadBtn>
       </header>
@@ -184,6 +198,7 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
         {vendor && vendor.platforms.length > 0 && (
           <div className="flex gap-1.5">
             <select
+              aria-label="Plataforma"
               className="field !h-7 !text-[12px] flex-1 min-w-0"
               value={platform ?? ""}
               onChange={(e) => p.onPlatform(e.target.value || null)}
@@ -201,6 +216,8 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
                 onClick={p.onDetect}
                 disabled={p.detecting}
                 title={`Detectar ejecutando "${vendor.detectCommand}" en la sesión`}
+                aria-label="Detectar la plataforma"
+                aria-busy={p.detecting}
                 className="shrink-0 flex items-center gap-1 px-2 h-7 rounded-md border border-line text-[11.5px] hover:bg-hover disabled:opacity-40"
               >
                 <Radar size={12} className={p.detecting ? "animate-pulse" : ""} />
@@ -215,6 +232,7 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
           <input
             className="field !h-7 !pl-8 !text-[12px]"
             placeholder="Buscar comando o tarea"
+            aria-label="Buscar comando o tarea"
             title="Por comando o por tarea: vecinos, óptico, CPU, VLAN…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -222,16 +240,19 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
           />
         </div>
         <div className="flex items-center gap-3 text-[11.5px] text-muted whitespace-nowrap">
-          <label className="flex items-center gap-1.5" title="Solo consultas: oculta lo que cambia configuración o puede cortar servicio">
+          <label className="flex items-center gap-1.5 min-h-6" title="Solo consultas: oculta lo que cambia configuración o puede cortar servicio">
             <input type="checkbox" className="accent-[var(--accent)]" checked={onlyRead} onChange={(e) => setOnlyRead(e.target.checked)} />
             <span className="@[19rem]:hidden">Consultas</span>
             <span className="hidden @[19rem]:inline">Solo consultas</span>
           </label>
-          <label className="flex items-center gap-1.5">
+          <label className="flex items-center gap-1.5 min-h-6">
             <input type="checkbox" className="accent-[var(--accent)]" checked={onlyFav} onChange={(e) => setOnlyFav(e.target.checked)} />
             Favoritos
           </label>
-          <span className="ml-auto">{total}</span>
+          <span className="ml-auto" role="status" aria-live="polite">
+            {total}
+            <span className="sr-only"> {total === 1 ? "comando" : "comandos"}</span>
+          </span>
           {vendor && (
             <button title="Agregar un comando propio" onClick={() => p.onAdd(vendor.id)} className="h-6 px-1 text-accent hover:underline flex items-center gap-0.5">
               <Plus size={12} /> Propio
@@ -240,13 +261,14 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+      <div data-cmdlist className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
         {groups.map(([cat, list]) => {
           const isOpen = filtering || open[cat];
           return (
             <div key={cat}>
               <button
                 onClick={() => setOpen((o) => ({ ...o, [cat]: !o[cat] }))}
+                aria-expanded={!!isOpen}
                 className="w-full flex items-center gap-1 px-1 h-7 text-[11px] font-semibold uppercase tracking-wide text-muted hover:text-fg"
               >
                 <ChevronRight size={12} className={`transition-transform ${isOpen ? "rotate-90" : ""}`} />
@@ -265,6 +287,8 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
                     platLabel={platLabel}
                     target={p.target}
                     copied={copied === c.cmd}
+                    selected={selectedKey === `${vendor.id}:${c.cmd}`}
+                    tabbable={tabKey === `${vendor.id}:${c.cmd}`}
                     actions={actions}
                   />
                 ))}
@@ -296,6 +320,8 @@ const CommandRow = memo(function CommandRow({
   platLabel,
   target,
   copied,
+  selected,
+  tabbable,
   actions,
 }: {
   c: CatalogEntry;
@@ -306,16 +332,46 @@ const CommandRow = memo(function CommandRow({
   platLabel: (id: string) => string;
   target: string | null;
   copied: boolean;
+  selected: boolean;
+  tabbable: boolean;
   actions: RowActions;
 }) {
+  const id = useId();
+  // Los botones de la tarjeta con foco entran en el orden de Tab; los de las demás, no (tabindex móvil).
+  const ti = tabbable ? 0 : -1;
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      return actions.select(favKey);
+    }
+    const cards = Array.from(e.currentTarget.closest("[data-cmdlist]")?.querySelectorAll<HTMLElement>("[data-cmdrow]") ?? []);
+    const to = stepIndex(e.key, cards.indexOf(e.currentTarget), cards.length, { orientation: "vertical", wrap: false, page: 6 });
+    if (to < 0) return;
+    e.preventDefault();
+    cards[to].focus();
+  };
+  // Acciones a la vista con el mouse encima, con el foco dentro o en la tarjeta seleccionada. La fila ocupa su alto siempre
+  // (invisible, no hidden): la lista no salta al pasar el mouse.
+  const showActions = selected ? "visible" : "invisible group-hover:visible group-focus-within:visible";
   return (
     <div
-      className={`group rounded-lg px-2 py-1.5 hover:bg-hover border-l-2 [content-visibility:auto] [contain-intrinsic-size:auto_64px] ${riskBorder[c.risk]}`}
+      role="group"
+      aria-label={cmd}
+      aria-describedby={`${id}-d ${id}-r`}
+      data-cmdrow
+      tabIndex={ti}
+      onFocus={() => actions.focus(favKey)}
+      onKeyDown={onKeyDown}
+      onClick={(e) => !(e.target as HTMLElement).closest("button") && actions.select(favKey)}
+      className={`group rounded-lg px-2 py-1.5 border-l-2 focus-visible:outline-offset-[-2px] [content-visibility:auto] [contain-intrinsic-size:auto_92px] ${riskBorder[c.risk]} ${
+        selected ? "bg-selected ring-1 ring-inset ring-[var(--accent)]" : "hover:bg-hover"
+      }`}
     >
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
           <CmdText cmd={cmd} />
-          <p className="text-[11.5px] text-muted mt-0.5 leading-snug">{c.desc}</p>
+          <p id={`${id}-d`} className="text-[11.5px] text-muted mt-0.5 leading-snug">{c.desc}</p>
           {showVariants && c.variants?.length ? (
             <div className="mt-1 space-y-0.5">
               {c.variants.map((v) => (
@@ -328,41 +384,47 @@ const CommandRow = memo(function CommandRow({
           ) : null}
           {c.note && <p className="text-[11px] text-muted mt-0.5 italic leading-snug">{c.note}</p>}
           <div className="flex flex-wrap items-center gap-x-2 mt-0.5 text-[11px]">
-            <span className={riskStyle[c.risk]} title={c.escalated ? `El pack lo declaró "${riskLabel[c.declaredRisk]}"; la app lo subió por seguridad` : undefined}>
-              {riskIcon[c.risk]} {riskLabel[c.risk]}
+            <span id={`${id}-r`} className={riskStyle[c.risk]} title={c.escalated ? `El pack lo declaró "${riskLabel[c.declaredRisk]}"; la app lo subió por seguridad` : undefined}>
+              <span aria-hidden>{riskIcon[c.risk]}</span> {riskLabel[c.risk]}
               {c.escalated ? " (ajustado)" : ""}
             </span>
             {showVariants && c.platforms?.length ? <span className="text-muted">{c.platforms.map(platLabel).join(", ")}</span> : null}
             {!c.builtin && <span className="text-accent">{c.packName}</span>}
           </div>
         </div>
+        {/* Área de 24 x 24 px (el ícono es de 14); a la vista con foco, mouse o selección, y siempre si es favorito. */}
         <button
           title={fav ? "Quitar de favoritos" : "Agregar a favoritos"}
+          aria-label={`Favorito: ${c.cmd.split("\n")[0]}`}
+          aria-pressed={fav}
+          tabIndex={ti}
           onClick={() => actions.fav(favKey, fav)}
-          className={`shrink-0 mt-0.5 ${fav ? "text-warn" : "text-muted opacity-0 group-hover:opacity-100"}`}
+          className={`shrink-0 -mt-0.5 -mr-1 w-6 h-6 grid place-items-center rounded focus-visible:opacity-100 ${
+            fav ? "text-warn" : `text-muted hover:text-fg ${selected ? "" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`
+          }`}
         >
-          <Star size={13} fill={fav ? "currentColor" : "none"} />
+          <Star size={14} fill={fav ? "currentColor" : "none"} />
         </button>
       </div>
-      <div className="hidden group-hover:flex flex-wrap gap-1 mt-1.5">
-        <PanelBtn disabled={!target} onClick={() => actions.run(c, cmd)} title={target ? `Ejecutar en ${target}` : "Conecta una sesión"}>
+      <div className={`flex flex-wrap gap-1 mt-1.5 ${showActions}`}>
+        <PanelBtn tabIndex={ti} disabled={!target} onClick={() => actions.run(c, cmd)} title={target ? `Ejecutar en ${target}` : "Conecta una sesión"}>
           <Play size={11} /> Ejecutar
         </PanelBtn>
         {!cmd.includes("\n") && (
-          <PanelBtn disabled={!target} onClick={() => actions.type(cmd)} title="Escribir en la terminal sin Enter">
+          <PanelBtn tabIndex={ti} disabled={!target} onClick={() => actions.type(cmd)} title="Escribir en la terminal sin Enter">
             <TextCursorInput size={11} /> Escribir
           </PanelBtn>
         )}
-        <PanelBtn onClick={() => actions.copy(c, cmd)}>
+        <PanelBtn tabIndex={ti} onClick={() => actions.copy(c, cmd)}>
           {copied ? <CornerDownLeft size={11} /> : <Copy size={11} />} {copied ? "Copiado" : "Copiar"}
         </PanelBtn>
         {c.source && (
-          <PanelBtn onClick={() => openUrl(c.source!)} title={c.source}>
+          <PanelBtn tabIndex={ti} onClick={() => openUrl(c.source!)} title={c.source}>
             <ExternalLink size={11} /> Fuente
           </PanelBtn>
         )}
         {c.packId.startsWith("user-") && (
-          <PanelBtn onClick={() => actions.edit(c)}>
+          <PanelBtn tabIndex={ti} onClick={() => actions.edit(c)}>
             <Pencil size={11} /> Editar
           </PanelBtn>
         )}

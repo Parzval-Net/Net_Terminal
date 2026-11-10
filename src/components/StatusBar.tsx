@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import { ArrowLeftRight, KeyRound, Bot, Circle, CircleDot, History, RotateCcw, Search, ShieldAlert, ShieldCheck, Unplug } from "lucide-react";
+import { ArrowLeftRight, KeyRound, Bot, Circle, CircleCheck, CircleDashed, CircleDot, CircleOff, History, RotateCcw, Search, ShieldAlert, ShieldCheck, Unplug } from "lucide-react";
 import {
   DeviceInfo,
   LIFE_LABEL,
@@ -28,6 +28,8 @@ import { historyLabel, modLabel } from "../lib/platform";
 const LBL = "hidden @[52rem]:inline";
 
 const statusText = { connecting: "Conectando", connected: "Conectado", closed: "Desconectado" };
+/** Cada estado con su forma además del color (WCAG 1.4.1): check, anillo punteado y círculo tachado. */
+const statusIcon = { connecting: CircleDashed, connected: CircleCheck, closed: CircleOff };
 
 interface Props {
   tab: Tab | undefined;
@@ -44,6 +46,8 @@ interface Props {
   /** Abre el historial de comandos enviados (alterna: un segundo clic lo cierra). */
   onHistory: () => void;
   historyOpen: boolean;
+  /** La barra de búsqueda de la terminal está abierta (estado del botón Buscar). */
+  findOpen?: boolean;
   /** Modelo y versión leídos de la pantalla (show version): ciclo de vida del equipo. */
   device?: DeviceInfo;
 }
@@ -64,10 +68,11 @@ export const StatusBar = memo(function StatusBar({
   onFind,
   onHistory,
   historyOpen,
+  findOpen,
   device,
 }: Props) {
   const ai = aiEnabled && (
-    <BarBtn onClick={onAi} title="Servidor MCP activo: los agentes de IA pueden conectarse" className="!text-accent">
+    <BarBtn onClick={onAi} title="Servidor MCP activo: los agentes de IA pueden conectarse" aria-label="Servidor MCP activo: agentes de IA" className="!text-accent">
       <Bot size={12} />
       <span className={LBL}>IA</span>
     </BarBtn>
@@ -81,13 +86,14 @@ export const StatusBar = memo(function StatusBar({
   const { session } = tab;
   const logging = !!state.logPath;
   const connected = state.status === "connected";
+  const StatusIcon = statusIcon[state.status];
 
   return (
     <div className="@container h-7 shrink-0 flex items-center gap-2 @[40rem]:gap-3 px-3 bg-chrome border-t border-line text-[11.5px] text-muted">
-      <span className="flex items-center gap-1.5 shrink-0 whitespace-nowrap" title={statusText[state.status]}>
-        <span className="w-1.5 h-1.5 rounded-full" style={{ background: statusColor[state.status] }} />
-        {/* Barra muy angosta: queda el punto de color (el estado va en el tooltip). */}
-        <span className="hidden @[34rem]:inline">{statusText[state.status]}</span>
+      <span role="status" className="flex items-center gap-1.5 shrink-0 whitespace-nowrap" title={statusText[state.status]}>
+        <StatusIcon size={12} aria-hidden style={{ color: statusColor[state.status] }} />
+        {/* Barra muy angosta: queda el ícono de forma propia; el estado se lee igual (texto solo para lectores) y va en el tooltip. */}
+        <span className="sr-only @[34rem]:not-sr-only">{statusText[state.status]}</span>
       </span>
       <span className="font-medium text-fg/80">{typeLabel[session.type]}</span>
       <span className="truncate min-w-0">{sessionTarget(session)}</span>
@@ -102,7 +108,7 @@ export const StatusBar = memo(function StatusBar({
       )}
 
       {onSaveAs && !session.id && session.type !== "local" && !session.scp && (
-        <BarBtn onClick={onSaveAs} title="Conexión rápida sin guardar: guardar como sesión">
+        <BarBtn onClick={onSaveAs} title="Conexión rápida sin guardar: guardar como sesión" aria-label="Guardar como sesión">
           <QuickBolt size={12} />
           <span className={LBL}>Guardar como sesión…</span>
         </BarBtn>
@@ -122,8 +128,14 @@ export const StatusBar = memo(function StatusBar({
       <div className="ml-auto shrink-0 flex items-center gap-0.5">
         {/* Destino único de Notas, catálogo, botones y scripts: siempre a la vista. */}
         <BroadcastTargetPicker />
-        <span className="w-px h-3.5 mx-1 bg-line" />
-        <BarBtn onClick={onFind} title={`Buscar en la sesión (${modLabel}F)`} aria-label="Buscar en la sesión">
+        <span aria-hidden className="w-px h-3.5 mx-1 bg-line" />
+        <BarBtn
+          onClick={onFind}
+          title={`Buscar en la terminal (${modLabel}F)`}
+          aria-label="Buscar en la terminal"
+          aria-pressed={findOpen}
+          className={findOpen ? "!text-accent" : ""}
+        >
           <Search size={12} />
           <span className={LBL}>Buscar</span>
         </BarBtn>
@@ -140,22 +152,28 @@ export const StatusBar = memo(function StatusBar({
             <span className={LBL}>Historial</span>
           </BarBtn>
         )}
+        {/* Interruptor con estado: nombre fijo "Grabar log"; encendido = punto rojo relleno y aria-pressed. */}
         <BarBtn
           onClick={onToggleLog}
           disabled={!connected && !logging}
-          title={logging ? `Grabando en ${state.logPath}` : "Grabar la sesión en un archivo de texto"}
+          title={logging ? `Grabando en ${state.logPath}. Clic para detener` : "Grabar la sesión en un archivo de texto"}
+          aria-label="Grabar log"
+          aria-pressed={logging}
           className={logging ? "!text-danger" : ""}
         >
           {logging ? <CircleDot size={12} /> : <Circle size={12} />}
-          <span className={LBL}>{logging ? "Grabando" : "Log"}</span>
+          <span className={LBL}>Grabar log</span>
+          {logging && <span className="sr-only">(grabando)</span>}
         </BarBtn>
+        {/* Separador: Desconectar corta la sesión y no debe quedar pegado al interruptor del log. */}
+        <span aria-hidden className="w-px h-3.5 mx-1 bg-line" />
         {connected || state.status === "connecting" ? (
-          <BarBtn onClick={onDisconnect} title="Desconectar (la pestaña queda abierta)">
+          <BarBtn onClick={onDisconnect} title="Desconectar (la pestaña queda abierta)" aria-label="Desconectar">
             <Unplug size={12} />
             <span className={LBL}>Desconectar</span>
           </BarBtn>
         ) : (
-          <BarBtn onClick={onReconnect} title="Reconectar (o Enter en la terminal)" className="!text-accent">
+          <BarBtn onClick={onReconnect} title="Reconectar (o Enter en la terminal)" aria-label="Reconectar" className="!text-accent">
             <RotateCcw size={12} />
             <span className={LBL}>Reconectar</span>
           </BarBtn>
