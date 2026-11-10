@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Check,
   ChevronsDownUp,
   Copy,
   FileDown,
@@ -23,6 +24,8 @@ import {
 import { ConnStatus, Session, sessionTarget } from "../types";
 import { SessionIcon } from "./SessionIcon";
 import { modLabel } from "../lib/platform";
+import { TreeRow, treeKey } from "../lib/kbNav";
+import { focusOrigin, setMenuOrigin } from "../lib/useModal";
 import {
   FolderNode,
   SidebarOrder,
@@ -84,7 +87,8 @@ interface Props {
 
 /** [etiqueta, icono, acción, deshabilitado, atajo que se muestra a la derecha]. */
 type MenuItem = [string, React.ReactNode, () => void, boolean?, string?, boolean?];
-type Menu = { x: number; y: number; items: MenuItem[] };
+/** `radio`: el cuarto elemento de cada ítem marca la opción elegida (menuitemradio con check) en vez de deshabilitarla. */
+type Menu = { x: number; y: number; items: MenuItem[]; radio?: boolean };
 type Selected = { kind: "session"; id: string } | { kind: "folder"; path: string } | null;
 
 /** Dónde cae lo arrastrado sobre una fila: antes, después o dentro de una carpeta. */
@@ -118,6 +122,11 @@ export const Sidebar = memo(function Sidebar(p: Props) {
   const expandTimer = useRef<number | undefined>(undefined);
   const [notice, setNotice] = useState("");
   const closeMenu = useCallback(() => setMenu(null), []);
+  // Teclado (árbol WAI-ARIA con tabindex móvil): la fila que recibe el foco con Tab y la que debe tomarlo tras el próximo dibujo.
+  const [focusKey, setFocusKey] = useState<string | null>(null);
+  const pendingFocus = useRef<{ key: string; tries: number } | null>(null);
+  /** Enter o Esc en el campo de renombrar devuelven el foco a la fila; un clic fuera no. */
+  const refocusRename = useRef(false);
 
   useEffect(() => {
     try {
@@ -172,11 +181,17 @@ export const Sidebar = memo(function Sidebar(p: Props) {
 
   const commitRename = (path: string, raw: string) => {
     setRenaming(null);
+    const refocus = refocusRename.current;
+    refocusRename.current = false;
     const name = raw.replace(/\//g, "-").trim();
-    if (!name || name === baseName(path)) return;
+    if (!name || name === baseName(path)) return refocus && focusLater(`f:${path}`);
     const target = joinPath(parentOf(path), name);
-    if (folders.includes(target)) return flash(`Ya existe la carpeta "${name}"`);
+    if (folders.includes(target)) {
+      flash(`Ya existe la carpeta "${name}"`);
+      return refocus && focusLater(`f:${path}`);
+    }
     moveFolderTo(path, target);
+    if (refocus) focusLater(`f:${target}`);
   };
 
   const deleteFolder = (path: string) => {
@@ -228,13 +243,21 @@ export const Sidebar = memo(function Sidebar(p: Props) {
 
   // ---------- Menús contextuales ----------
 
-  const openMenu = (e: React.MouseEvent, items: MenuItem[]) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setMenu({ x: e.clientX, y: e.clientY, items });
+  /** Con el mouse el menú nace en el puntero; desde el teclado (tecla de menú, Shift+F10, Enter en "Más acciones"), bajo la fila. */
+  const openMenu = (anchor: React.MouseEvent | HTMLElement, items: MenuItem[]) => {
+    if (anchor instanceof HTMLElement) {
+      const r = anchor.getBoundingClientRect();
+      return setMenu({ x: r.left + 28, y: r.bottom, items });
+    }
+    anchor.preventDefault();
+    anchor.stopPropagation();
+    setMenu({ x: anchor.clientX, y: anchor.clientY, items });
   };
+  /** Clic del mouse o activación con teclado (detail 0) sobre un botón dentro de una fila. */
+  const anchorOf = (e: React.MouseEvent<HTMLElement>): React.MouseEvent | HTMLElement =>
+    e.detail === 0 ? (e.currentTarget.closest<HTMLElement>("[data-rowkey]") ?? e.currentTarget) : e;
 
-  const folderMenu = (e: React.MouseEvent, node: FolderNode) => {
+  const folderMenu = (e: React.MouseEvent | HTMLElement, node: FolderNode) => {
     setSelected({ kind: "folder", path: node.path });
     openMenu(e, [
       [`Conectar todas (${node.total})`, <Play size={13} />, () => connectAll(node.path), node.total === 0],
@@ -247,7 +270,7 @@ export const Sidebar = memo(function Sidebar(p: Props) {
     ]);
   };
 
-  const sessionMenu = (e: React.MouseEvent, s: Session) => {
+  const sessionMenu = (e: React.MouseEvent | HTMLElement, s: Session) => {
     setSelected({ kind: "session", id: s.id });
     openMenu(e, [
       ["Conectar", <Play size={13} />, () => p.onOpen(s)],
@@ -410,12 +433,86 @@ export const Sidebar = memo(function Sidebar(p: Props) {
 
   // ---------- Render ----------
 
-  const renderFolder = (node: FolderNode, depth: number): React.ReactNode => {
+  // ---------- Teclado ----------
+
+  const rowKey = (it: TreeItem) => (it.kind === "folder" ? `f:${it.node.path}` : `s:${it.session.id}`);
+  const focusLater = (key: string) => {
+    setFocusKey(key);
+    pendingFocus.current = { key, tries: 3 };
+  };
+  /** Foco a la fila `i` de la lista visible; con ventana virtual, antes se desplaza para que esté dibujada. */
+  const focusRow = (i: number) => {
+    const r = rows[i];
+    const nav = navRef.current;
+    if (!r) return;
+    if (virtual && nav) {
+      const y = i * rowH;
+      if (y < nav.scrollTop) nav.scrollTop = y;
+      else if (y + rowH > nav.scrollTop + nav.clientHeight) nav.scrollTop = y + rowH - nav.clientHeight;
+      setView({ top: nav.scrollTop, height: nav.clientHeight });
+    }
+    focusLater(rowKey(r.it));
+  };
+  const toggleFolder = (path: string, open?: boolean) =>
+    setCollapsed((c) => ({ ...c, [path]: open === undefined ? !c[path] : !open }));
+
+  /** Teclas de una fila del árbol: flechas, Inicio/Fin, Enter, F2, Supr y menú contextual (tecla de menú o Shift+F10). */
+  const onRowKey = (e: React.KeyboardEvent<HTMLElement>, index: number) => {
+    if (e.target !== e.currentTarget) return;
+    const it = rows[index]?.it;
+    if (!it) return;
+    if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+      e.preventDefault();
+      e.stopPropagation();
+      return it.kind === "folder" ? folderMenu(e.currentTarget, it.node) : sessionMenu(e.currentTarget, it.session);
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "F2" && it.kind === "folder") return setRenaming(it.node.path);
+    if (e.key === "Delete") return it.kind === "folder" ? deleteFolder(it.node.path) : deleteSession(it.session);
+    if (e.key === " ") {
+      e.preventDefault();
+      return setSelected(it.kind === "folder" ? { kind: "folder", path: it.node.path } : { kind: "session", id: it.session.id });
+    }
+    const page = Math.max(1, Math.floor((navRef.current?.clientHeight ?? 400) / rowH) - 1);
+    const mv = treeKey(treeRows, index, e.key, page);
+    if (!mv) return;
+    e.preventDefault();
+    if ("focus" in mv) focusRow(mv.focus);
+    else if ("expand" in mv) it.kind === "folder" && toggleFolder(it.node.path, true);
+    else if ("collapse" in mv) it.kind === "folder" && toggleFolder(it.node.path, false);
+    else if (it.kind === "session") p.onOpen(it.session);
+    else {
+      setSelected({ kind: "folder", path: it.node.path });
+      if (!q) toggleFolder(it.node.path);
+    }
+  };
+
+  /** Estado de la fila para el árbol: atributos ARIA, tabindex móvil y selección. */
+  const rowProps = (key: string, index: number, level: number, label: string, selected: boolean, expanded?: boolean) => ({
+    role: "treeitem" as const,
+    "aria-level": level,
+    "aria-selected": selected,
+    "aria-expanded": expanded,
+    "aria-label": label,
+    "data-rowkey": key,
+    tabIndex: key === tabKey ? 0 : -1,
+    onFocus: () => setFocusKey((k) => (k === key ? k : key)),
+    onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => onRowKey(e, index),
+  });
+
+  // ---------- Render ----------
+
+  /** Barra de acento de 2 px además del tinte: el tinte solo no llega a 3:1 contra el fondo (WCAG 1.4.11). */
+  const SEL_BAR = "shadow-[inset_2px_0_0_0_var(--accent)]";
+
+  const renderFolder = (node: FolderNode, depth: number, index: number): React.ReactNode => {
     const isCollapsed = !q && own(collapsed, node.path);
     const isSel = selected?.kind === "folder" && selected.path === node.path;
+    const key = `f:${node.path}`;
+    const stop = key === tabKey;
     return (
         <div
-          key={`f:${node.path}`}
+          key={key}
           data-row
           draggable={renaming !== node.path}
           onDragStart={(e) => {
@@ -424,33 +521,31 @@ export const Sidebar = memo(function Sidebar(p: Props) {
           }}
           onDragEnd={endDrag}
           {...rowDropProps({ kind: "folder", node }, parentOf(node.path))}
-          tabIndex={0}
+          {...rowProps(key, index, Math.max(0, depth) + 1, `${node.name}, carpeta, ${node.total ? plural(node.total, "sesión", "sesiones") : "vacía"}`, isSel, !isCollapsed)}
           onClick={() => {
             setSelected({ kind: "folder", path: node.path });
             setCollapsed((c) => ({ ...c, [node.path]: !c[node.path] }));
           }}
           onContextMenu={(e) => folderMenu(e, node)}
-          onKeyDown={(e) => {
-            if (e.key === "F2") setRenaming(node.path);
-            if (e.key === "Delete") deleteFolder(node.path);
-          }}
           style={{ paddingLeft: 6 + depth * 14 }}
-          className={`group flex items-center gap-1.5 pr-1 h-7 rounded-md outline-none ${
-            hintClass({ kind: "folder", node }, parentOf(node.path)) || (isSel ? "bg-hover" : "hover:bg-hover")
+          className={`group flex items-center gap-1.5 pr-1 h-7 rounded-md focus-visible:outline-offset-[-2px] ${
+            hintClass({ kind: "folder", node }, parentOf(node.path)) || (isSel ? `bg-hover ${SEL_BAR}` : "hover:bg-hover")
           }`}
         >
           <ChevronRight
             size={12}
+            aria-hidden
             className={`shrink-0 text-muted transition-transform ${isCollapsed ? "" : "rotate-90"}`}
           />
           {isCollapsed ? (
-            <Folder size={14} className="shrink-0 text-muted" />
+            <Folder size={14} aria-hidden className="shrink-0 text-muted" />
           ) : (
-            <FolderOpen size={14} className="shrink-0 text-muted" />
+            <FolderOpen size={14} aria-hidden className="shrink-0 text-muted" />
           )}
           {renaming === node.path ? (
             <input
               autoFocus
+              aria-label={`Nuevo nombre de la carpeta ${node.name}`}
               className="field !h-6 !px-1.5 flex-1 min-w-0"
               defaultValue={node.name}
               onClick={(e) => e.stopPropagation()}
@@ -458,27 +553,42 @@ export const Sidebar = memo(function Sidebar(p: Props) {
               onBlur={(e) => commitRename(node.path, e.currentTarget.value)}
               onKeyDown={(e) => {
                 e.stopPropagation();
-                if (e.key === "Enter") e.currentTarget.blur();
-                if (e.key === "Escape") setRenaming(null);
+                if (e.key === "Enter") {
+                  refocusRename.current = true;
+                  e.currentTarget.blur();
+                }
+                if (e.key === "Escape") {
+                  setRenaming(null);
+                  focusLater(key);
+                }
               }}
             />
           ) : (
             <span className="truncate flex-1 font-medium text-[12.5px]">{node.name}</span>
           )}
-          <span className="text-[11px] text-muted group-hover:hidden">{node.total || ""}</span>
-          <RowBtn title="Más acciones" className="hidden group-hover:grid" onClick={(e) => folderMenu(e, node)}>
+          <span aria-hidden className="text-[11px] text-muted group-hover:hidden group-focus-within:hidden">{node.total || ""}</span>
+          <RowBtn
+            title="Más acciones"
+            aria-label={`Más acciones de la carpeta ${node.name}`}
+            tabIndex={stop ? 0 : -1}
+            className="hidden group-hover:grid group-focus-within:grid"
+            onClick={(e) => folderMenu(anchorOf(e), node)}
+          >
             <MoreHorizontal size={14} />
           </RowBtn>
         </div>
     );
   };
 
-  const renderSession = (s: Session, depth: number) => {
+  const renderSession = (s: Session, depth: number, index: number) => {
     const isSel = selected?.kind === "session" && selected.id === s.id;
     const status = p.live[s.id];
+    const key = `s:${s.id}`;
+    const stop = key === tabKey;
+    const statusWord = status === "connected" ? "conectada" : status === "connecting" ? "conectando" : "cerrada";
     return (
       <div
-        key={`s:${s.id}`}
+        key={key}
         data-row
         draggable
         onDragStart={(e) => {
@@ -487,37 +597,37 @@ export const Sidebar = memo(function Sidebar(p: Props) {
         }}
         onDragEnd={endDrag}
         {...rowDropProps({ kind: "session", session: s }, normPath(s.folder))}
-        tabIndex={0}
+        {...rowProps(key, index, Math.max(0, depth) + 1, status ? `${s.name}, pestaña abierta, ${statusWord}` : s.name, isSel)}
         onClick={() => setSelected({ kind: "session", id: s.id })}
         onDoubleClick={() => p.onOpen(s)}
         onContextMenu={(e) => sessionMenu(e, s)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") p.onOpen(s);
-          if (e.key === "Delete") deleteSession(s);
-        }}
-        title={`${sessionTarget(s)}\nDoble clic para conectar · clic derecho para más opciones`}
+        title={`${sessionTarget(s)}\nDoble clic o Enter: conectar · clic derecho o Shift+F10: más opciones`}
         style={{ paddingLeft: 24 + depth * 14 }}
-        className={`group flex items-center gap-2 pr-1 h-7 rounded-md outline-none ${
-          hintClass({ kind: "session", session: s }, normPath(s.folder)) || (isSel ? "bg-selected" : "hover:bg-hover")
+        className={`group flex items-center gap-2 pr-1 h-7 rounded-md focus-visible:outline-offset-[-2px] ${
+          hintClass({ kind: "session", session: s }, normPath(s.folder)) || (isSel ? `bg-selected ${SEL_BAR}` : "hover:bg-hover")
         }`}
       >
         <SessionIcon type={s.type} size={14} />
         <span className="truncate flex-1 text-[13px]">{s.name}</span>
         {status && (
-          <span
-            className="w-1.5 h-1.5 rounded-full shrink-0 group-hover:hidden"
-            title="Pestaña abierta"
-            style={{
-              background:
-                status === "connected" ? "var(--ok)" : status === "connecting" ? "var(--warn)" : "var(--muted)",
-            }}
-          />
+          <>
+            {/* Estado por forma además de color: círculo relleno = conectada, rombo = conectando, anillo vacío = cerrada. */}
+            <span
+              aria-hidden
+              className={`w-2 h-2 shrink-0 group-hover:hidden group-focus-within:hidden ${
+                status === "closed" ? "rounded-full border-[1.5px] border-[var(--muted)]" : status === "connecting" ? "rotate-45 animate-pulse" : "rounded-full"
+              }`}
+              title="Pestaña abierta"
+              style={status === "connected" ? { background: "var(--ok)" } : status === "connecting" ? { background: "var(--warn)" } : undefined}
+            />
+            <span className="sr-only">Pestaña abierta, {statusWord}</span>
+          </>
         )}
-        <div className="hidden group-hover:flex items-center">
-          <RowBtn title="Editar" onClick={() => p.onEdit(s)}>
+        <div className="hidden group-hover:flex group-focus-within:flex items-center">
+          <RowBtn title="Editar" aria-label={`Editar ${s.name}`} tabIndex={stop ? 0 : -1} onClick={() => p.onEdit(s)}>
             <Pencil size={12} />
           </RowBtn>
-          <RowBtn title="Más acciones" onClick={(e) => sessionMenu(e, s)}>
+          <RowBtn title="Más acciones" aria-label={`Más acciones de ${s.name}`} tabIndex={stop ? 0 : -1} onClick={(e) => sessionMenu(anchorOf(e), s)}>
             <MoreHorizontal size={14} />
           </RowBtn>
         </div>
@@ -577,7 +687,34 @@ export const Sidebar = memo(function Sidebar(p: Props) {
   const top = Math.max(0, Math.min(view.top, rows.length * rowH - view.height));
   const first = virtual ? Math.max(0, Math.floor(top / rowH) - OVERSCAN) : 0;
   const last = virtual ? Math.min(rows.length, Math.ceil((top + view.height) / rowH) + OVERSCAN) : rows.length;
-  const renderRow = ({ it, depth }: { it: TreeItem; depth: number }) => (it.kind === "folder" ? renderFolder(it.node, depth) : renderSession(it.session, depth));
+  const renderRow = ({ it, depth }: { it: TreeItem; depth: number }, index: number) =>
+    it.kind === "folder" ? renderFolder(it.node, depth, index) : renderSession(it.session, depth, index);
+
+  // Para el teclado: nivel y estado de cada fila visible, y la única fila que entra en el orden de Tab (la
+  // que tuvo el foco, si no la seleccionada, si no la primera dibujada).
+  const treeRows = useMemo<TreeRow[]>(
+    () =>
+      rows.map(({ it, depth }) => ({
+        level: Math.max(0, depth) + 1,
+        folder: it.kind === "folder",
+        // Con filtro las carpetas no se pliegan.
+        expanded: it.kind === "folder" && !q ? !own(collapsed, it.node.path) : undefined,
+      })),
+    [rows, collapsed, q],
+  );
+  const visibleKeys = rows.slice(first, last).map((r) => rowKey(r.it));
+  const selKey = selected ? (selected.kind === "folder" ? `f:${selected.path}` : `s:${selected.id}`) : null;
+  const tabKey = [focusKey, selKey].find((k) => k && visibleKeys.includes(k)) ?? visibleKeys[0] ?? null;
+  // Un foco pedido (flechas, Esc al renombrar) se aplica cuando la fila ya está dibujada.
+  useLayoutEffect(() => {
+    const want = pendingFocus.current;
+    if (!want) return;
+    const el = Array.from(navRef.current?.querySelectorAll<HTMLElement>("[data-rowkey]") ?? []).find((x) => x.dataset.rowkey === want.key);
+    if (el) {
+      el.focus();
+      pendingFocus.current = null;
+    } else if (--want.tries <= 0) pendingFocus.current = null;
+  });
 
   const empty = tree.children.length === 0 && tree.sessions.length === 0;
   const target = selectedFolder(selected, sessions);
@@ -592,8 +729,8 @@ export const Sidebar = memo(function Sidebar(p: Props) {
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
           <input
             className="field !h-7 !pl-8 !text-[12px]"
-            placeholder="Filtrar…"
-            title="Filtra por nombre, IP o carpeta"
+            placeholder="Filtrar sesiones…"
+            title="Filtra las sesiones por nombre, IP o carpeta"
             aria-label="Filtrar sesiones por nombre, IP o carpeta"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -616,10 +753,15 @@ export const Sidebar = memo(function Sidebar(p: Props) {
         </HeadBtn>
       </div>
 
-      {notice && <p className="px-3 pb-1 text-[11.5px] text-danger">{notice}</p>}
+      {notice && (
+        <p role="alert" className="px-3 pb-1 text-[11.5px] text-danger">
+          {notice}
+        </p>
+      )}
 
       <nav
         ref={navRef}
+        aria-label="Sesiones guardadas"
         className={`flex-1 overflow-y-auto px-1.5 pb-3 ${dropTarget === "" ? "bg-selected" : ""}`}
         onContextMenu={(e) =>
           openMenu(e, [
@@ -634,15 +776,17 @@ export const Sidebar = memo(function Sidebar(p: Props) {
         {...dropProps("")}
         onClick={(e) => e.target === e.currentTarget && setSelected(null)}
       >
-        {virtual && <div style={{ height: first * rowH }} aria-hidden />}
-        {rows.slice(first, last).map(renderRow)}
-        {virtual && <div style={{ height: (rows.length - last) * rowH }} aria-hidden />}
+        <div role="tree" aria-label="Sesiones y carpetas" aria-orientation="vertical">
+          {virtual && <div style={{ height: first * rowH }} role="presentation" aria-hidden />}
+          {rows.slice(first, last).map((r, k) => renderRow(r, first + k))}
+          {virtual && <div style={{ height: (rows.length - last) * rowH }} role="presentation" aria-hidden />}
+        </div>
 
         {empty && (
           <div className="px-3 py-8 text-center text-[12px] text-muted">
             {q ? "Sin coincidencias" : "Crea una sesión o una carpeta. Clic derecho para más opciones."}
             {!q && p.onImportFile && (
-              <button className="block mx-auto mt-2 text-accent hover:underline" onClick={p.onImportFile}>
+              <button className="block mx-auto mt-2 min-h-6 px-1 text-accent hover:underline" onClick={p.onImportFile}>
                 Importar desde PuTTY, SecureCRT, MobaXterm…
               </button>
             )}
@@ -693,7 +837,9 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
   // Teclado: el foco entra al primer ítem, las flechas lo mueven y, si la acción no deja el foco
   // en otro lado (un campo, un diálogo), vuelve a donde estaba (p. ej. la terminal).
   useEffect(() => {
-    const prev = document.activeElement as HTMLElement | null;
+    const prev = focusOrigin();
+    // Un diálogo abierto desde el menú devuelve el foco a quien abrió el menú, no al ítem que desaparece.
+    setMenuOrigin(prev);
     ref.current?.querySelector<HTMLElement>('button:not([disabled])')?.focus({ preventScroll: true });
     return () => {
       const cur = document.activeElement;
@@ -709,7 +855,11 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
     else if (e.key === "ArrowUp") next = (i - 1 + items.length) % items.length;
     else if (e.key === "Home") next = 0;
     else if (e.key === "End") next = items.length - 1;
-    else return;
+    else if (e.key === "Tab") {
+      // Como en un menú nativo: Tab lo cierra y el foco vuelve a donde estaba.
+      e.preventDefault();
+      return onClose();
+    } else return;
     e.preventDefault();
     items[next].focus();
   };
@@ -726,8 +876,9 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
         <button
           key={label}
           data-sep={separated ? "" : undefined}
-          role="menuitem"
-          disabled={disabled}
+          role={menu.radio ? "menuitemradio" : "menuitem"}
+          aria-checked={menu.radio ? !!disabled : undefined}
+          disabled={menu.radio ? false : disabled}
           onClick={() => {
             onClose();
             action();
@@ -737,7 +888,8 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
           } ${separated ? "mt-1 border-t border-line pt-1 h-8 rounded-none" : ""}`}
         >
           <span className="text-muted">{icon}</span>
-          <span className="flex-1">{label}</span>
+          <span className={`flex-1 ${menu.radio && disabled ? "font-medium" : ""}`}>{label}</span>
+          {menu.radio && <Check size={13} aria-hidden className={`text-accent ${disabled ? "" : "invisible"}`} />}
           {shortcut && <kbd className="ml-4 text-[11px] text-muted font-sans">{shortcut}</kbd>}
         </button>
       ))}
@@ -748,6 +900,7 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
 function HeadBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
+      aria-label={props.title}
       {...props}
       className="w-7 h-7 shrink-0 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
     />

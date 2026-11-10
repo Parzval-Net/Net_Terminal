@@ -1,11 +1,12 @@
 import { persist, stored } from "../lib/prefs";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Columns2, LayoutGrid, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, PanelTop, Plus, Rows2, X } from "lucide-react";
 import { tabTitle } from "../types";
 import { ContextMenu } from "./Sidebar";
 import { SessionIcon, isQuickSession } from "./SessionIcon";
-import { TabBarProps, closeBtnClass, dotColor, dropMark } from "./TabBar";
+import { TabBarProps, closeBtnClass, dotColor, dropMark, tabLabel } from "./TabBar";
 import { useTabDrag } from "../lib/tabDrag";
+import { useTabKeys } from "../lib/useTabKeys";
 import { MenuItem, layoutItem, newTabMenuItems, splitMenuItems, tabMenuItems } from "./tabMenu";
 import { layoutLabel } from "../lib/split";
 import { focusLabel, modLabel } from "../lib/platform";
@@ -28,9 +29,8 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
   const [width, setWidth] = useState(() => clamp(stored("vtabsWidth", DEFAULT_W)));
   const [collapsed, setCollapsed] = useState(() => stored("vtabsCollapsed", false));
   const [editing, setEditing] = useState<string | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; radio?: boolean } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
-  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => persist("vtabsCollapsed", collapsed), [collapsed]);
 
@@ -73,25 +73,21 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
     el.addEventListener("pointercancel", up);
   };
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    if (target.getAttribute("role") !== "tab") return;
-    const items = Array.from(listRef.current?.querySelectorAll<HTMLElement>('[role="tab"]') ?? []);
-    const i = items.indexOf(target);
-    const id = target.dataset.id!;
-    let next = -1;
-    if (e.key === "ArrowDown") next = (i + 1) % items.length;
-    else if (e.key === "ArrowUp") next = (i - 1 + items.length) % items.length;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = items.length - 1;
-    else if (e.key === "Enter" || e.key === " ") onSelect(id);
-    else if (e.key === "F2") rename(id);
-    else if (e.key === "Delete") onClose(id);
-    else return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (next >= 0) items[next]?.focus();
-  };
+  // Teclado de la lista (flechas, Inicio/Fin, Enter, F2, Supr, tecla de menú): lógica común con la barra horizontal.
+  const ids = useMemo(() => tabs.map((t) => t.id), [tabs]);
+  const keys = useTabKeys({
+    orientation: "vertical",
+    attr: "data-id",
+    ids,
+    onSelect,
+    onClose,
+    onRename: (id) => rename(id),
+    onMenu: (id, el) => {
+      const t = tabs.find((x) => x.id === id);
+      const r = el.getBoundingClientRect();
+      if (t) setMenu({ x: r.left + 24, y: r.bottom, items: tabMenuItems(t, states[id], props, () => rename(id)) });
+    },
+  });
 
   const rowBase = collapsed
     ? "group relative mx-auto w-8 h-8 grid place-items-center rounded-md"
@@ -132,10 +128,11 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
           <button
             onClick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
-              setMenu({ x: r.left, y: r.bottom + 4, items: splitMenuItems(split ?? null, onSplit) });
+              setMenu({ x: r.left, y: r.bottom + 4, items: splitMenuItems(split ?? null, onSplit), radio: true });
             }}
             title={split ? `Vista dividida: ${layoutLabel[split]}` : "Vista dividida: ver 2 o 4 pestañas a la vez"}
             aria-label="Vista dividida"
+            aria-haspopup="menu"
             aria-pressed={!!split}
             className={`w-7 h-7 shrink-0 grid place-items-center rounded-md hover:bg-hover ${split ? "text-accent" : "text-muted hover:text-fg"}`}
           >
@@ -165,11 +162,11 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
       </div>
 
       <div
-        ref={listRef}
+        ref={keys.listRef}
         role="tablist"
         aria-orientation="vertical"
         aria-label="Pestañas abiertas"
-        onKeyDown={onKeyDown}
+        onKeyDown={keys.onKeyDown}
         onContextMenu={(e) => {
           if (e.target !== e.currentTarget || !onTabLayout) return;
           e.preventDefault();
@@ -188,6 +185,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
               role="tab"
               data-id={t.id}
               aria-selected={active}
+              aria-label={tabLabel(title, status, marker)}
               tabIndex={focusId === t.id ? 0 : -1}
               onMouseDown={(e) => {
                 if (e.button === 1) {
@@ -237,29 +235,35 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                       onBlur={(e) => commit(t.id, e.currentTarget.value)}
                       onKeyDown={(e) => {
                         e.stopPropagation();
-                        if (e.key === "Enter") e.currentTarget.blur();
-                        if (e.key === "Escape") setEditing(null);
+                        if (e.key === "Enter") {
+                          e.currentTarget.blur();
+                          keys.focusTab(t.id);
+                        }
+                        if (e.key === "Escape") {
+                          setEditing(null);
+                          keys.focusTab(t.id);
+                        }
                       }}
                     />
                   ) : (
                     <span className={`truncate flex-1 min-w-0 ${t.title ? "italic" : ""}`}>{title}</span>
                   )}
                   {marker === "alert" ? (
-                    <span className="text-[11px] font-semibold text-danger shrink-0" title="Alerta por palabra clave">
+                    <span aria-hidden className="text-[11px] font-semibold text-danger shrink-0" title="Alerta por palabra clave">
                       ▲
                     </span>
                   ) : marker === "activity" ? (
-                    <span className="text-[11px] font-semibold text-accent shrink-0" title="Salida nueva">
+                    <span aria-hidden className="text-[11px] font-semibold text-accent shrink-0" title="Salida nueva">
                       ●
                     </span>
                   ) : null}
                   <span
-                    className="w-1.5 h-1.5 rounded-full shrink-0 group-hover:hidden"
+                    aria-hidden
+                    className="w-1.5 h-1.5 rounded-full shrink-0 group-hover:hidden group-focus-within:hidden"
                     style={{ background: dotColor(status, active) }}
-                    aria-label={status === "connected" ? "Conectada" : status === "connecting" ? "Conectando" : "Cerrada"}
                   />
                   <button
-                    tabIndex={-1}
+                    tabIndex={focusId === t.id ? 0 : -1}
                     aria-label={`Cerrar ${title}`}
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={() => onClose(t.id)}

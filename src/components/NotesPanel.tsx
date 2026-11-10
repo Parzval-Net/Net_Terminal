@@ -451,6 +451,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
         {renaming !== null ? (
           <input
             autoFocus
+            aria-label="Nuevo nombre de la nota"
             className="field !h-7 flex-1"
             defaultValue={renaming}
             onFocus={(e) => e.currentTarget.select()}
@@ -474,6 +475,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
                 </span>
               ))}
             <select
+              aria-label="Nota abierta"
               className="field !h-7 flex-1 min-w-0 !text-[12.5px]"
               title={current ?? undefined}
               value={current ?? ""}
@@ -496,7 +498,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
         >
           <Workflow size={14} />
         </HeadBtn>
-        <HeadBtn title="Buscar en todas las notas" onClick={() => toggleTool("search")} className={tool === "search" ? "!text-accent" : ""}>
+        <HeadBtn title="Buscar en todas las notas" aria-pressed={tool === "search"} onClick={() => toggleTool("search")} className={tool === "search" ? "!text-accent" : ""}>
           <Search size={14} />
         </HeadBtn>
         </span>
@@ -738,6 +740,7 @@ const NARROW_ONLY = "@[19rem]:hidden";
 function HeadBtn({ className = "", ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
+      aria-label={props.title}
       {...props}
       className={`w-7 h-7 shrink-0 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover ${className}`}
     />
@@ -747,7 +750,8 @@ function HeadBtn({ className = "", ...props }: React.ButtonHTMLAttributes<HTMLBu
 function MenuItem(p: { icon: React.ReactNode; label: string; hint?: string; onClick: () => void; disabled?: boolean; active?: boolean; danger?: boolean; className?: string }) {
   return (
     <button
-      role="menuitem"
+      role={p.active === undefined ? "menuitem" : "menuitemcheckbox"}
+      aria-checked={p.active === undefined ? undefined : p.active}
       disabled={p.disabled}
       title={p.hint ?? p.label}
       onClick={p.onClick}

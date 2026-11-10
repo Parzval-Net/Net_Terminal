@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useModal } from "../lib/useModal";
 import { FileCode2, TriangleAlert } from "lucide-react";
 import { resolveTargets, useBroadcastTarget, useWorkspace } from "../lib/broadcast";
 import { useDragResize } from "../lib/useDragResize";
@@ -47,6 +48,7 @@ export function ScriptLaunchDialog({ script, onRun, onCancel }: Props) {
   const title = (t: Tab) => ws.tabs.find((x) => x.id === t.id)?.title ?? t.session.name;
   const n = resolved.targets.length;
 
+  const modal = useModal();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -59,11 +61,12 @@ export function ScriptLaunchDialog({ script, onRun, onCancel }: Props) {
   }, [onCancel]);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onCancel}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onCancel}>
       <form
         role="dialog"
         aria-modal="true"
         aria-labelledby="sl-title"
+        tabIndex={-1}
         {...win.box}
         onMouseDown={(e) => e.stopPropagation()}
         onSubmit={(e) => {

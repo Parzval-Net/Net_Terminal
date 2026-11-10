@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Zap } from "lucide-react";
 import { SerialPortInfo, Session, SessionType } from "../types";
@@ -55,11 +56,7 @@ export function QuickConnectDialog({ onClose, onOpen }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.type]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const modal = useModal({ onClose: onClose });
 
   const changeType = (type: QuickType) => {
     setError("");
@@ -91,8 +88,9 @@ export function QuickConnectDialog({ onClose, onOpen }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
       <form
+        {...modal.dialog}
         {...win.box}
         className="w-[440px] max-w-[96vw] max-h-[94vh] bg-panel border border-line rounded-xl shadow-pop overflow-hidden flex flex-col"
         onMouseDown={(e) => e.stopPropagation()}
@@ -102,21 +100,22 @@ export function QuickConnectDialog({ onClose, onOpen }: Props) {
         }}
       >
         <header {...win.handle} className="flex items-center justify-between h-12 px-5 border-b border-line select-none">
-          <h2 className="flex items-center gap-2 text-[14px] font-semibold">
+          <h2 id={modal.titleId} className="flex items-center gap-2 text-[14px] font-semibold">
             <Zap size={15} className="text-warn" />
             Conexión rápida
           </h2>
-          <button type="button" onClick={onClose} aria-label="Cerrar" className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover">
+          <button type="button" onClick={onClose} aria-label="Cerrar" data-modal-close className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover">
             <X size={16} />
           </button>
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
-          <div className="grid grid-cols-4 gap-1 p-1 rounded-lg bg-hover">
+          <div role="group" aria-label="Tipo de conexión" className="grid grid-cols-4 gap-1 p-1 rounded-lg bg-hover">
             {TYPES.map((t) => (
               <button
                 key={t}
                 type="button"
+                aria-pressed={s.type === t}
                 onClick={() => changeType(t)}
                 className={`flex items-center justify-center gap-1.5 h-8 rounded-md text-[12.5px] font-medium ${
                   s.type === t ? "bg-panel shadow-sm text-fg" : "text-muted hover:text-fg"
@@ -245,7 +244,7 @@ export function QuickConnectDialog({ onClose, onOpen }: Props) {
             </div>
           </details>
 
-          {error && <p className="text-[12px] text-danger">{error}</p>}
+          {error && <p role="alert" className="text-[12px] text-danger">{error}</p>}
           <p className="text-[11.5px] text-muted">
             La sesión no se guarda. Después puedes guardarla desde el menú de la pestaña o la barra de estado ("Guardar como sesión…").
           </p>

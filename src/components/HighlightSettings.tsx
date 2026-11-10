@@ -19,6 +19,7 @@ import {
 import { fontStack } from "../lib/theme";
 
 import { plural } from "../lib/plural";
+import { Item as Row, Switch } from "./controls";
 interface Props {
   settings: Settings;
   theme: ITheme;
@@ -118,16 +119,18 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
         <div className="rounded-lg border border-line divide-y divide-[var(--border)]">
           {schemes.map((sc) => (
             <div key={sc.id} className="flex items-center gap-3 px-3 py-2">
-              <input
-                type="checkbox"
-                className="accent-[var(--accent)]"
-                checked={s.highlightSchemes.includes(sc.id)}
-                onChange={() => toggleScheme(sc.id)}
-              />
-              <div className="min-w-0 flex-1">
-                <div>{sc.name}</div>
-                <div className="text-[11.5px] text-muted truncate">{sc.description}</div>
-              </div>
+              <label className="flex items-center gap-3 flex-1 min-w-0 cursor-default">
+                <input
+                  type="checkbox"
+                  className="accent-[var(--accent)]"
+                  checked={s.highlightSchemes.includes(sc.id)}
+                  onChange={() => toggleScheme(sc.id)}
+                />
+                <div className="min-w-0 flex-1">
+                  <div>{sc.name}</div>
+                  <div className="text-[11.5px] text-muted truncate">{sc.description}</div>
+                </div>
+              </label>
               <button
                 onClick={() => customize(sc.id)}
                 title="Copiar estas reglas a personalizadas para cambiar colores"
@@ -147,7 +150,7 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
       <div>
         <div className="flex items-center justify-between mb-2">
           <Label inline>Vista previa</Label>
-          <button onClick={() => setEditSample((v) => !v)} className="text-[11.5px] text-accent hover:underline">
+          <button onClick={() => setEditSample((v) => !v)} aria-pressed={editSample} className="min-h-6 px-1 text-[11.5px] text-accent hover:underline">
             {editSample ? "Listo" : "Probar con mi salida"}
           </button>
         </div>
@@ -203,6 +206,7 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
                   <input
                     type="checkbox"
                     title="Activa"
+                    aria-label={`Regla ${rule.name || "sin nombre"} activa`}
                     className="accent-[var(--accent)]"
                     checked={rule.enabled !== false}
                     onChange={(e) => updateRule(rule.id, { enabled: e.target.checked })}
@@ -210,11 +214,13 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
                   <input
                     className="field !h-7 flex-1"
                     value={rule.name}
+                    aria-label="Nombre de la regla"
                     placeholder="Nombre"
                     onChange={(e) => updateRule(rule.id, { name: e.target.value })}
                   />
                   <button
                     title="Eliminar regla"
+                    aria-label={`Eliminar regla ${rule.name || "sin nombre"}`}
                     onClick={() => setRules(rules.filter((r) => r.id !== rule.id))}
                     className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-danger hover:bg-hover"
                   >
@@ -224,6 +230,7 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
                 <input
                   className={`field !h-7 font-mono !text-[12px] ${err ? "!border-danger" : ""}`}
                   value={rule.pattern}
+                  aria-label="Expresión regular de la regla"
                   placeholder={String.raw`Expresión regular, ej: \bVLAN\s?(?:100|200)\b`}
                   spellCheck={false}
                   onChange={(e) => updateRule(rule.id, { pattern: e.target.value })}
@@ -231,6 +238,7 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
                 {err && <p className="text-[11px] text-danger">{err}</p>}
                 <div className="flex flex-wrap items-center gap-1.5">
                   <select
+                    aria-label="Color del texto"
                     className="field !h-7 !w-36 !text-[12px]"
                     value={custom ? "custom" : (rule.style.color ?? "")}
                     onChange={(e) =>
@@ -250,6 +258,7 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
                   {custom && (
                     <input
                       type="color"
+                      aria-label="Color personalizado"
                       className="w-7 h-7 rounded border border-line bg-transparent"
                       value={rule.style.color}
                       onChange={(e) => updateStyle(rule.id, { color: e.target.value })}
@@ -257,6 +266,7 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
                   )}
                   <select
                     title="Fondo"
+                    aria-label="Color de fondo"
                     className="field !h-7 !w-32 !text-[12px]"
                     value={rule.style.bg ?? ""}
                     onChange={(e) => updateStyle(rule.id, { bg: e.target.value || undefined })}
@@ -288,7 +298,7 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
                   >
                     Aa
                   </Toggle>
-                  <label className="flex items-center gap-1 text-[11.5px] text-muted" title="Colorear solo un grupo de captura">
+                  <label className="flex items-center gap-1 min-h-6 text-[11.5px] text-muted" title="Colorear solo un grupo de captura">
                     Grupo
                     <input
                       type="number"
@@ -385,38 +395,11 @@ function Label({ children, inline }: { children: React.ReactNode; inline?: boole
   return <div className={`text-[12px] font-medium text-muted ${inline ? "" : "mb-2"}`}>{children}</div>;
 }
 
-function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4 min-h-8">
-      <div>
-        <div>{label}</div>
-        {hint && <div className="text-[11.5px] text-muted">{hint}</div>}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative shrink-0 w-9 h-5 rounded-full transition-colors before:absolute before:-inset-[3px] before:content-[''] ${checked ? "bg-accent" : "bg-line"}`}
-    >
-      <span
-        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-          checked ? "translate-x-4" : ""
-        }`}
-      />
-    </button>
-  );
-}
-
 function Toggle({ on, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { on: boolean }) {
   return (
     <button
+      aria-pressed={on}
+      aria-label={props.title}
       {...props}
       className={`min-w-7 h-7 px-1.5 rounded-md border text-[12px] ${
         on ? "border-accent bg-selected text-fg" : "border-line text-muted hover:text-fg"

@@ -123,7 +123,7 @@ Construido con [Tauri 2](https://tauri.app) (backend en Rust) y xterm.js. Usa el
 | Terminal local | ⌘T | Ctrl+Shift+T |
 | Cerrar pestaña | ⌘W | Ctrl+Shift+W |
 | Cerrar todas las pestañas (con aviso) | ⌘⇧W | Ctrl+Shift+Alt+W |
-| Buscar en la salida | ⌘F | Ctrl+Shift+F |
+| Buscar en la terminal (salida de la sesión) | ⌘F | Ctrl+Shift+F |
 | Mostrar/ocultar sesiones (botón Sesiones de la barra de actividad) | ⌘B | Ctrl+Shift+B |
 | Modo foco (solo pestañas y terminal) | ⌘⇧M | Ctrl+Shift+M |
 | Historial de comandos enviados | ⌘Y | Ctrl+Shift+Y |
@@ -135,6 +135,22 @@ Construido con [Tauri 2](https://tauri.app) (backend en Rust) y xterm.js. Usa el
 En Windows/Linux los atajos usan Ctrl+Shift para no interferir con Ctrl+C, Ctrl+W, etc. dentro de la terminal.
 
 Conexión rápida (⌘K): `ssh admin@192.0.2.1:2222`, `telnet 192.0.2.5 23`, `admin@router` o solo la IP. Para Serial o TCP crudo usa el formulario del rayo en la pantalla de inicio.
+
+### Teclado y accesibilidad
+
+Criterio de diseño: WCAG 2.1 AA y las heurísticas de Nielsen (visibilidad del estado, control del usuario, consistencia). Todo lo que aparece al pasar el mouse también aparece con el foco del teclado, y el estado no depende solo del color.
+
+| Zona | Teclado |
+| --- | --- |
+| Barra de sesiones (árbol, `role="tree"`) | Tab entra por una sola fila (tabindex móvil). ↑↓ mueven, → abre la carpeta o entra en su primer hijo, ← la cierra o sube al padre, Inicio/Fin y Re Pág/Av Pág, Enter conecta (en una carpeta, abre/cierra), Espacio selecciona, F2 renombra una carpeta, Supr elimina (con aviso), tecla de menú o Shift+F10 abren el menú contextual bajo la fila. "Editar" y "Más acciones" aparecen con el foco en la fila y son el siguiente Tab. |
+| Pestañas (`role="tablist"`, horizontales y verticales) | Tab entra por la pestaña activa. ←→ (↑↓ en vertical), Inicio/Fin mueven el foco; Enter o Espacio activan; F2 renombra; Supr cierra y el foco pasa a la vecina; tecla de menú o Shift+F10 abren el menú de la pestaña. El botón Cerrar se ve con el foco en la pestaña. El arrastre con el mouse y el doble clic para renombrar no cambian. |
+| Catálogo de comandos | Cada comando es una tarjeta enfocable: ↑↓ la recorren, Enter o Espacio la seleccionan; con el foco o la selección se ven Ejecutar, Escribir, Copiar, Fuente y la estrella de favoritos (24 px). La fila de acciones reserva su alto: la lista no salta al pasar el mouse. |
+| Menús (`role="menu"`) | ↑↓, Inicio/Fin, Enter; Esc o Tab cierran y el foco vuelve a donde estaba. La opción vigente de un grupo (vista dividida) es un `menuitemradio` con check visible, no una opción deshabilitada. |
+| Diálogos | Todos usan `useModal` (`src/lib/useModal.ts`): `role="dialog"` o `"alertdialog"`, `aria-modal`, nombre desde el título, foco inicial en el primer campo, Tab y Mayús+Tab atrapados, Esc que cierra aunque el foco haya quedado en el fondo y devolución del foco a quien lo abrió (también si lo abrió un menú contextual). Con varios abiertos (un aviso sobre Ajustes) solo el de arriba atiende Esc y Tab. En confirmaciones destructivas (`danger`) el foco inicial va a Cancelar y Enter no confirma. |
+| Ajustes | Interruptores `role="switch"` con el nombre de su fila; opciones excluyentes como `radiogroup` (flechas eligen); `aria-current="page"` en la sección activa. |
+| Barra de estado | Estado de conexión con forma además de color (check, anillo punteado, círculo tachado) y texto para lectores aunque la barra sea angosta; "Grabar log" y "Buscar" con `aria-pressed`; "Enviar a: …" con `aria-haspopup` y `aria-expanded`. |
+
+Otras reglas: la selección de una fila lleva una barra de acento de 2 px además del tinte (contraste de selección ≥ 3:1); el piso de texto es 11 px; casillas y radios de 16 px dentro de etiquetas clicables (objetivos ≥ 24 px); con `prefers-reduced-motion` se anulan pulsos, giros y transiciones (lo que indicaba progreso queda estático). La lógica de teclado es pura y tiene pruebas: `src/lib/kbNav.ts` (flechas, árbol, trampa de foco, pila de diálogos) y `node scripts/tests/kbNav.test.mjs`. `useTabKeys` (`src/lib/useTabKeys.ts`) comparte el teclado de las dos barras de pestañas.
 
 ### Tecla Retroceso
 
@@ -571,8 +587,8 @@ La narración usa Kokoro TTS local, con la voz de macOS como respaldo. El entorn
 ```
 assets/icon.svg           Fuente del ícono (regenerar con: npx tauri icon assets/icon.png)
 src/                      Frontend React
-  components/             Sidebar, barra de actividad, pestañas, terminal, modal, paleta, barra de estado
-  lib/                    Atajos, temas, ajustes y motor de resaltado
+  components/             Sidebar, barra de actividad, pestañas, terminal, modal, paleta, barra de estado, controles de Ajustes (controls.tsx)
+  lib/                    Atajos, temas, ajustes y motor de resaltado; accesibilidad: kbNav, useModal, useTabKeys
 src-tauri/src/
   connection.rs           Conexiones: PTY (local/SSH), Telnet, Serial y logs
   telnet.rs               Protocolo Telnet (con tests)

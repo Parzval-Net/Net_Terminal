@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, Lock, ShieldCheck } from "lucide-react";
+import { CircleAlert, CircleCheck, KeyRound, Lock, ShieldCheck } from "lucide-react";
 import { CredStatus, credStatus, masterStrength, needsUnlock, strengthText } from "../lib/credentials";
 import { HopCredInfo, lastUsedText } from "../lib/hopCred";
 import { VaultUnlock } from "./VaultUnlock";
@@ -52,11 +52,18 @@ export function CredentialSettings() {
               ? "La llave vive en el llavero del sistema: el archivo copiado a otro equipo no sirve."
               : "La llave se deriva de tu contraseña maestra (Argon2id) y queda en memoria solo mientras la app está abierta y desbloqueada."}
           </p>
-          <p className="text-[11.5px]">
+          {/* Estado con ícono y color de estado (no el del enlace): verde si está lista, gris si no. */}
+          <p className="text-[11.5px] flex items-center gap-1">
             Estado:{" "}
-            <span className={st.exists && (keychain || st.unlocked) ? "text-accent" : "text-muted"}>
-              {!st.exists ? "sin bóveda" : keychain ? "activa" : st.unlocked ? "desbloqueada" : "bloqueada"}
-            </span>
+            {st.exists && (keychain || st.unlocked) ? (
+              <span className="inline-flex items-center gap-1 font-medium text-ok">
+                <CircleCheck size={12} aria-hidden /> {keychain ? "activa" : "desbloqueada"}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 font-medium text-muted">
+                {st.exists ? <Lock size={12} aria-hidden /> : <CircleAlert size={12} aria-hidden />} {!st.exists ? "sin bóveda" : "bloqueada"}
+              </span>
+            )}
           </p>
         </div>
       </div>
@@ -93,7 +100,11 @@ export function CredentialSettings() {
         </>
       )}
 
-      {msg && <p className={`text-[11.5px] ${msg.error ? "text-danger" : "text-accent"}`}>{msg.text}</p>}
+      {msg && (
+        <p role={msg.error ? "alert" : "status"} className={`text-[11.5px] ${msg.error ? "text-danger" : "text-accent"}`}>
+          {msg.text}
+        </p>
+      )}
 
       <HopCreds st={st} />
 
@@ -179,9 +190,9 @@ function CreateVault({ onCreate }: { onCreate: (master: string) => Promise<boole
         Elige una contraseña maestra larga (una frase de 4 o más palabras funciona bien). Si la olvidas, las contraseñas
         guardadas no se pueden recuperar.
       </p>
-      <input type="password" autoComplete="new-password" className="field" placeholder="Contraseña maestra" value={a} onChange={(e) => setA(e.target.value)} />
+      <input type="password" aria-label="Contraseña maestra" autoComplete="new-password" className="field" placeholder="Contraseña maestra" value={a} onChange={(e) => setA(e.target.value)} />
       <Strength pw={a} />
-      <input type="password" autoComplete="new-password" className="field" placeholder="Confirmar" value={b} onChange={(e) => setB(e.target.value)} />
+      <input type="password" aria-label="Confirmar contraseña maestra" autoComplete="new-password" className="field" placeholder="Confirmar" value={b} onChange={(e) => setB(e.target.value)} />
       {b && a !== b && <p className="text-[11.5px] text-danger">No coinciden</p>}
       <button
         disabled={!ok}
@@ -212,10 +223,10 @@ function ChangeMaster({ onChange }: { onChange: (old: string, next: string) => P
           }
         }}
       >
-        <input type="password" autoComplete="current-password" className="field" placeholder="Actual" value={old} onChange={(e) => setOld(e.target.value)} />
-        <input type="password" autoComplete="new-password" className="field" placeholder="Nueva" value={a} onChange={(e) => setA(e.target.value)} />
+        <input type="password" aria-label="Contraseña maestra actual" autoComplete="current-password" className="field" placeholder="Actual" value={old} onChange={(e) => setOld(e.target.value)} />
+        <input type="password" aria-label="Contraseña maestra nueva" autoComplete="new-password" className="field" placeholder="Nueva" value={a} onChange={(e) => setA(e.target.value)} />
         <Strength pw={a} />
-        <input type="password" autoComplete="new-password" className="field" placeholder="Confirmar nueva" value={b} onChange={(e) => setB(e.target.value)} />
+        <input type="password" aria-label="Confirmar contraseña maestra nueva" autoComplete="new-password" className="field" placeholder="Confirmar nueva" value={b} onChange={(e) => setB(e.target.value)} />
         {b && a !== b && <p className="text-[11.5px] text-danger">No coinciden</p>}
         <button disabled={!ok} className="px-3 h-8 rounded-md border border-line hover:bg-hover disabled:opacity-50">
           Cambiar
@@ -226,7 +237,7 @@ function ChangeMaster({ onChange }: { onChange: (old: string, next: string) => P
 }
 
 /**
- * Vecinos (saltos): contraseñas de equipos a los que Topología salta desde un pivote, una por IP y
+ * Vecinos (saltos): contraseñas de equipos a los que Topología salta desde otro equipo, una por IP y
  * usuario, en la misma bóveda. Se listan sin la contraseña; se reemplazan o se agregan desde un campo
  * oculto y se eliminan con confirmación.
  */
@@ -302,10 +313,10 @@ function HopCreds({ st }: { st: CredStatus }) {
                   </>
                 ) : (
                   <>
-                    <button onClick={() => setDialog({ ip: h.ip, user: h.user, edit: true })} className="px-2 h-6 rounded-md border border-line hover:bg-hover">
+                    <button onClick={() => setDialog({ ip: h.ip, user: h.user, edit: true })} aria-label={`Editar la contraseña de ${h.user} en ${h.ip}`} className="px-2 h-6 rounded-md border border-line hover:bg-hover">
                       Editar…
                     </button>
-                    <button onClick={() => setConfirm(h)} className="px-2 h-6 rounded-md border border-line text-danger hover:bg-hover">
+                    <button onClick={() => setConfirm(h)} aria-label={`Eliminar la contraseña de ${h.user} en ${h.ip}`} className="px-2 h-6 rounded-md border border-line text-danger hover:bg-hover">
                       Eliminar…
                     </button>
                   </>

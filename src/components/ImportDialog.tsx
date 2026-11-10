@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { homeDir, join } from "@tauri-apps/api/path";
@@ -46,11 +47,7 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
   // Sesiones que ya existen (misma carpeta y nombre) con datos de conexión distintos.
   const [overwrite, setOverwrite] = useState(true);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const modal = useModal({ onClose: onClose });
 
   const load = async (path: string, fmt: string) => {
     setBusy(true);
@@ -143,13 +140,14 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
   const count = selected.size;
 
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-[60] grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
       <div
+        {...modal.dialog}
         className="w-[680px] max-w-[96vw] max-h-[90vh] flex flex-col bg-panel border border-line rounded-xl shadow-pop overflow-hidden"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <header className="shrink-0 flex items-center justify-between px-5 h-12 border-b border-line">
-          <h2 className="text-[14px] font-semibold">Importar sesiones desde otro cliente</h2>
+          <h2 id={modal.titleId} className="text-[14px] font-semibold">Importar sesiones desde otro cliente</h2>
           <button onClick={onClose} aria-label="Cerrar" className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover">
             <X size={16} />
           </button>
@@ -221,11 +219,11 @@ export function ImportDialog({ folders, sessions, onImport, onClose }: Props) {
                     {plural(changing, "sesión ya existe", "sesiones ya existen")} en esa carpeta con datos de conexión distintos
                   </p>
                   <label className="flex items-center gap-2">
-                    <input type="radio" className="accent-[var(--accent)]" checked={overwrite} onChange={() => setOverwrite(true)} />
+                    <input type="radio" name="import-overwrite" className="accent-[var(--accent)]" checked={overwrite} onChange={() => setOverwrite(true)} />
                     Sobrescribir con lo importado (host, puerto, usuario, tipo y serial)
                   </label>
                   <label className="flex items-center gap-2">
-                    <input type="radio" className="accent-[var(--accent)]" checked={!overwrite} onChange={() => setOverwrite(false)} />
+                    <input type="radio" name="import-overwrite" className="accent-[var(--accent)]" checked={!overwrite} onChange={() => setOverwrite(false)} />
                     Conservar las existentes y omitirlas
                   </label>
                   {risky.length > 0 && (

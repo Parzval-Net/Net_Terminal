@@ -211,3 +211,45 @@ button {
     animation: none;
   }
 }
+
+/* Diálogos: el contenedor recibe el foco solo por programa (no hay nada enfocable dentro); sin anillo. */
+[role="dialog"]:focus,
+[role="alertdialog"]:focus {
+  outline: none;
+}
+
+/* Casillas y radios: 16 px (el tamaño nativo de 13 px queda corto) con 4 px de margen, así cada una
+   conserva 24 x 24 px de espacio propio (WCAG 2.5.8); su etiqueta también es clicable. */
+input[type="checkbox"],
+input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+label:has(> input[type="checkbox"]),
+label:has(> input[type="radio"]) {
+  min-height: 24px;
+}
+
+/* Movimiento reducido (WCAG 2.3.3): sin pulsos, giros ni transiciones largas. Lo que informaba
+   progreso queda estático y visible: el pulso pasa a una opacidad fija y las barras indeterminadas
+   mantienen su tercio de ancho (el texto "Leyendo…", "Buscando…" ya acompaña a cada indicador). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .animate-pulse {
+    animation: none !important;
+    opacity: 0.65;
+  }
+  .animate-spin,
+  .animate-ping,
+  .animate-bounce {
+    animation: none !important;
+  }
+}

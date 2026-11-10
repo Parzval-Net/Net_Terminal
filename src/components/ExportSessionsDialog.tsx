@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -32,11 +33,7 @@ export function ExportSessionsDialog({ sessions, folder, onClose }: Props) {
   const [q, setQ] = useState("");
   const [msg, setMsg] = useState("");
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const modal = useModal({ onClose: onClose });
 
   const shown = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -81,13 +78,14 @@ export function ExportSessionsDialog({ sessions, folder, onClose }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
+    <div {...modal.overlay} className="fixed inset-0 z-[60] grid place-items-center bg-black/25 p-4" onMouseDown={onClose}>
       <div
+        {...modal.dialog}
         className="w-[560px] max-w-[96vw] max-h-[90vh] flex flex-col bg-panel border border-line rounded-xl shadow-pop overflow-hidden"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <header className="shrink-0 flex items-center justify-between px-5 h-12 border-b border-line">
-          <h2 className="text-[14px] font-semibold">Exportar sesiones</h2>
+          <h2 id={modal.titleId} className="text-[14px] font-semibold">Exportar sesiones</h2>
           <button onClick={onClose} aria-label="Cerrar" className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover">
             <X size={16} />
           </button>
@@ -95,7 +93,7 @@ export function ExportSessionsDialog({ sessions, folder, onClose }: Props) {
 
         <div className="shrink-0 px-5 pt-4 pb-2 space-y-2">
           <div className="flex items-center gap-2">
-            <input className="field flex-1" placeholder="Filtrar por nombre, host o carpeta" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+            <input className="field flex-1" placeholder="Filtrar sesiones por nombre, host o carpeta" aria-label="Filtrar sesiones por nombre, host o carpeta" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
             <label className="flex items-center gap-2 text-[12.5px] shrink-0">
               <input type="checkbox" className="accent-[var(--accent)]" checked={allShown} onChange={(e) => setMany(shownIds, e.target.checked)} />
               {q ? "Todas las filtradas" : "Todas"}
