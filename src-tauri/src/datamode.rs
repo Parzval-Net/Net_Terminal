@@ -403,3 +403,98 @@ pub fn on_logs_dir(state: &AppState, dir: Option<&PathBuf>) -> Result<(), String
     datacrypt::register(d, &sh);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nt-datamode-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn encrypted_folder(tag: &str) -> PathBuf {
+        let d = tmp(tag);
+        std::fs::write(d.join("settings.json"), b"{}").unwrap();
+        let mut key = None;
+        datacrypt::enable(&datacrypt::Layout::new(&d, &[]), "maestra-de-prueba", crate::seal::Kdf { m: 64, t: 1, p: 1 }, &datacrypt::no_hook, &mut |_| {}, &mut key).unwrap();
+        d
+    }
+
+    fn release(m: &DataMode) {
+        if let Some(sh) = m.shared() {
+            datacrypt::unregister(&sh);
+        }
+    }
+
+    /// B3: datos cifrados sin datakey.ntk: la carpeta queda registrada y bloqueada con un error claro
+    /// (nada se escribe en claro); una carpeta en claro no se registra.
+    #[test]
+    fn missing_key_blocks_instead_of_opening_in_plain() {
+        let plain = tmp("plain");
+        std::fs::write(plain.join("settings.json"), b"{}").unwrap();
+        let m = DataMode::detect(&plain);
+        assert!(!m.active() && lk(&m.error).is_none());
+        let d = encrypted_folder("nokey");
+        std::fs::remove_file(d.join(datacrypt::KEY_FILE)).unwrap();
+        let m = DataMode::detect(&d);
+        assert!(m.active());
+        assert_eq!(lk(&m.error).as_deref(), Some(MISSING_KEY));
+        assert!(datacrypt::write_atomic(&d.join("settings.json"), b"{}").is_err(), "no escribe en claro");
+        assert!(!d.join("settings.json").exists());
+        release(&m);
+        for x in [plain, d] {
+            let _ = std::fs::remove_dir_all(x);
+        }
+    }
+
+    /// B5: una sola instancia por carpeta cifrada; al soltarla (cierre o caída) se puede volver a abrir.
+    #[test]
+    fn second_instance_is_refused() {
+        let d = encrypted_folder("inst");
+        let first = DataMode::detect(&d);
+        assert!(lk(&first.error).is_none(), "{:?}", lk(&first.error));
+        let second = DataMode::detect(&d);
+        assert_eq!(lk(&second.error).as_deref(), Some(ANOTHER_INSTANCE));
+        release(&second);
+        release(&first);
+        drop(first);
+        let third = DataMode::detect(&d);
+        assert!(lk(&third.error).is_none(), "el bloqueo se suelta al cerrar");
+        release(&third);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// B4: los comandos que leen, guardan o exportan datos rechazan la carpeta bloqueada. Revisión
+    /// de la fuente para que un comando nuevo no se olvide del chequeo.
+    #[test]
+    fn data_commands_check_the_lock() {
+        let lib = include_str!("lib.rs");
+        let body = |name: &str| {
+            let start = lib.find(&format!("\nfn {name}(")).unwrap_or_else(|| panic!("{name}"));
+            let rest = &lib[start..];
+            rest[..rest.find("\n}\n").unwrap()].to_string()
+        };
+        for name in [
+            "list_sessions", "save_session", "update_sessions", "add_sessions", "delete_session", "list_notes", "read_note", "save_note",
+            "rename_note", "delete_note", "search_notes", "note_protect", "note_unlock", "note_save_secure", "note_unprotect",
+            "note_change_password", "recent_targets", "recent_target_add", "recent_targets_clear", "cmd_history", "cmd_history_add",
+            "cmd_history_clear", "mcp_audit_tail", "backup_save", "backup_list", "backup_secrets", "backup_read", "save_topology",
+            "save_settings", "set_logging",
+        ] {
+            assert!(body(name).contains("data_ready(&state)?"), "{name} no revisa el bloqueo");
+        }
+        assert!(body("get_settings").contains("datacrypt::unavailable"));
+        for (file, names) in [
+            (include_str!("bundle.rs"), &["bundle_export", "bundle_inspect", "bundle_import_apply"][..]),
+            (include_str!("logsearch.rs"), &["logsearch_start", "logsearch_open", "logsearch_view", "logsearch_export"][..]),
+        ] {
+            for n in names {
+                let start = file.find(&format!("pub fn {n}(")).unwrap();
+                let head = &file[start..(start + 900).min(file.len())];
+                assert!(head.contains("datacrypt::unavailable(&state.data_dir)"), "{n} no revisa el bloqueo");
+            }
+        }
+    }
+}

@@ -1897,4 +1897,68 @@ mod tests {
         crate::datacrypt::unregister(&sh);
         std::fs::remove_dir_all(&d).unwrap();
     }
+
+    /// B1: tras un cambio de maestra cortado (dos ranuras), un cambio nuevo cortado en cualquier punto
+    /// deja siempre una contraseña que abre datos y bóveda (se conserva la ranura que abrió).
+    #[test]
+    fn data_mode_change_master_with_two_slots_survives_every_cut() {
+        for (opened_slot, cut_at) in [(0usize, 1u8), (0, 2), (1, 1), (1, 2), (1, 0)] {
+            let (d, c, sh) = data_mode("maestra-a-larga");
+            // Cambio anterior cortado: dos ranuras (A, la de la bóveda, y otra B). `opened_slot` dice en
+            // qué posición quedó A; con el error anterior se descartaba siempre la ranura 1.
+            let (dk, _) = crate::datacrypt::KeyFile::read(&d).unwrap().unwrap().unwrap("maestra-a-larga").unwrap();
+            let first = if opened_slot == 0 { "maestra-a-larga" } else { "maestra-b-larga" };
+            let second = if opened_slot == 0 { "maestra-b-larga" } else { "maestra-a-larga" };
+            let mut kf = crate::datacrypt::KeyFile::create(&dk, first, FAST).unwrap();
+            kf.add_slot(&dk, second, FAST, 0).unwrap();
+            kf.write(&d).unwrap();
+            let current = "maestra-a-larga";
+            let (_, idx) = crate::datacrypt::KeyFile::read(&d).unwrap().unwrap().unwrap(current).unwrap();
+            assert_eq!(idx, opened_slot, "caso preparado");
+            lock(&c.inner).throttle.retry_at = None;
+            let r = c.change_cut(current, "maestra-c-larga", &|n| if n == cut_at { Err("corte".into()) } else { Ok(()) });
+            assert_eq!(r.is_err(), cut_at != 0);
+            // Tras el corte: alguna de las dos contraseñas abre datos y bóveda a la vez.
+            let both = |pw: &str| {
+                c.lock();
+                lock(&c.inner).throttle.retry_at = None;
+                c.data_unlock(pw).map(|r| r.vault).unwrap_or(false)
+            };
+            assert!(both(current) || both("maestra-c-larga"), "caso {opened_slot}/{cut_at}: quedó sin contraseña que abra todo");
+            let _ = sh;
+            crate::datacrypt::unregister(&sh);
+            std::fs::remove_dir_all(&d).unwrap();
+        }
+    }
+
+    /// M4: con la carpeta cifrada, el plazo de inactividad lo renuevan solo el desbloqueo y la
+    /// actividad del usuario; leer o escribir datos (agentes, auditoría, tareas de fondo) no.
+    #[test]
+    fn data_mode_idle_counts_only_user_activity() {
+        let (d, c, sh) = data_mode("maestra-larga");
+        let t0 = sh.last_use();
+        std::thread::sleep(Duration::from_millis(20));
+        for _ in 0..5 {
+            crate::datacrypt::read(&d.join("settings.json")).unwrap();
+            crate::datacrypt::write_atomic(&d.join("command_history.json"), b"{}").unwrap();
+        }
+        let ev = crate::mcp_audit::Event { client: "Agente", client_version: "1", tool: "list_sessions", connection: None, target: None, command: None, risk: None, decision: "lectura" };
+        crate::mcp_audit::append(&d, &ev).unwrap();
+        // Usar la bóveda (autocompletar, consultar) tampoco cuenta con la carpeta cifrada.
+        let _ = c.has("s1");
+        assert_eq!(sh.last_use(), t0, "nada de eso renueva el plazo");
+        c.set_autolock(5, false).unwrap();
+        let gen = c.autolock_arm().unwrap();
+        let at = sh.last_use().unwrap();
+        assert_eq!(c.autolock_tick(gen, at.0 + Duration::from_secs(301), at.1 + Duration::from_secs(301)), Tick::Locked);
+        // La actividad del usuario sí.
+        lock(&c.inner).throttle.retry_at = None;
+        c.data_unlock("maestra-larga").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let before = sh.last_use();
+        sh.touch();
+        assert!(sh.last_use().unwrap().0 > before.unwrap().0);
+        crate::datacrypt::unregister(&sh);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }

@@ -859,7 +859,9 @@ const handlers = {
     vaultMaster: vault.backend === "vault",
     logsActive: 0,
     dataDir: "/Volumes/PENDRIVE/NetTerminal/data",
+    damaged: [],
   }),
+  datacrypt_ack_damaged: () => null,
   data_unlock: ({ master }) => {
     if (master.length < 8) throw "Contraseña maestra incorrecta o llave de datos alterada";
     dataState.unlocked = vault.unlocked = true;

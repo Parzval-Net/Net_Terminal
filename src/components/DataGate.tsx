@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { CircleAlert, LockKeyhole, RotateCcw, ShieldCheck } from "lucide-react";
 import { useModal } from "../lib/useModal";
 import { dataTouch, dataUnlock, datacryptResume, datacryptStatus } from "../lib/api";
-import { type DataOp, type DataProgress, type DataStatus, PLAIN_STATUS, gateView, progressRatio, progressText, reportText, throttle } from "../lib/dataCrypt";
+import { type DataOp, type DataProgress, type DataStatus, PLAIN_STATUS, convError, gateView, progressRatio, progressText, reportText, throttle } from "../lib/dataCrypt";
 
 /**
  * Puerta del modo portable cifrado. Con la carpeta cifrada la app no se monta (no lee sesiones,
@@ -201,17 +201,21 @@ function ResumeScreen({ op, onDone }: { op: DataOp; onDone: () => void }) {
   const [running, setRunning] = useState<DataOp | null>(null);
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
+  const [loss, setLoss] = useState<string[]>([]);
   const p = useConversionProgress(!!running);
   const modal = useModal({});
-  const run = async (which: DataOp) => {
+  const run = async (which: DataOp, accept?: string[]) => {
     setRunning(which);
     setError("");
     try {
-      const r = await datacryptResume(which);
+      const r = await datacryptResume(which, accept);
+      setLoss([]);
       setDone(reportText(r, which));
       onDone();
     } catch (e) {
-      setError(String(e));
+      const ce = convError(e);
+      setError(ce.message);
+      setLoss(ce.loss);
     } finally {
       setRunning(null);
     }
@@ -238,6 +242,7 @@ function ResumeScreen({ op, onDone }: { op: DataOp; onDone: () => void }) {
             {error}
           </p>
         )}
+        {loss.length > 0 && <LossConfirm loss={loss} busy={!!running} onAccept={() => void run("decrypt", loss)} />}
         {done && (
           <p role="status" className="text-[12px] text-ok">
             {done}
@@ -267,7 +272,34 @@ function ResumeScreen({ op, onDone }: { op: DataOp; onDone: () => void }) {
   );
 }
 
-/** La llave de datos no se pudo leer: se dice por qué y no se toca nada. */
+/**
+ * Lo que se perdería al dejar la carpeta en claro (una carpeta de logs que no está, archivos cifrados
+ * fuera de lo que se convierte): se muestra la lista y solo se sigue con una confirmación explícita.
+ */
+export function LossConfirm({ loss, busy, onAccept }: { loss: string[]; busy: boolean; onAccept: () => void }) {
+  const [ok, setOk] = useState(false);
+  return (
+    <div className="rounded-lg border border-danger p-3 space-y-2">
+      <p className="text-[12px]">Sin la llave estos archivos no se podrán abrir nunca más:</p>
+      <ul className="text-[11.5px] font-mono break-all max-h-32 overflow-auto">
+        {loss.map((l) => (
+          <li key={l}>{l}</li>
+        ))}
+      </ul>
+      <label className="flex items-start gap-2 text-[12px]">
+        <input type="checkbox" className="mt-0.5" checked={ok} onChange={(e) => setOk(e.target.checked)} />
+        <span>Acepto perder estos archivos y dejar el resto en claro.</span>
+      </label>
+      <div className="flex justify-end">
+        <button type="button" disabled={!ok || busy} onClick={onAccept} className="px-3 h-7 rounded-md bg-danger text-danger-fg font-medium hover:opacity-90 disabled:opacity-50">
+          Continuar de todas formas
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** La carpeta no se puede abrir (llave dañada, ausente o de otra versión, u otra ventana la tiene abierta). */
 function ErrorScreen({ message, dataDir }: { message: string; dataDir: string }) {
   const modal = useModal({});
   return (
@@ -283,9 +315,7 @@ function ErrorScreen({ message, dataDir }: { message: string; dataDir: string })
           <p role="alert" className="text-[12.5px]">
             {message}
           </p>
-          <p className="text-[12px] text-muted">
-            No se modificó ningún archivo{dataDir ? ` en ${dataDir}` : ""}. Si la carpeta se cifró con una versión más nueva de NetTerminal, ábrela con esa versión.
-          </p>
+          <p className="text-[12px] text-muted">No se leyó ni se modificó ningún archivo{dataDir ? ` en ${dataDir}` : ""}.</p>
           <p className="text-[12px] text-muted inline-flex items-center gap-1.5">
             <ShieldCheck size={13} aria-hidden /> Los datos siguen cifrados.
           </p>

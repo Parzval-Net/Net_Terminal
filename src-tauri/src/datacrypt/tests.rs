@@ -647,3 +647,118 @@ fn previous_versions_see_the_stub_and_never_the_encrypted_files() {
     assert_eq!(fs::read(d.join("sessions.json.nte")).unwrap(), before);
     let _ = fs::remove_dir_all(d);
 }
+
+
+/// M1: lo que cubre la conversión coincide con lo que cifra la capa; al desactivar nada queda sin
+/// llave sin que el usuario lo acepte con la lista exacta.
+#[test]
+fn coverage_roots_and_loss_check() {
+    let d = tmp("cov");
+    let files = fixture(&d);
+    fs::create_dir_all(d.join("mcp-audit/lecturas")).unwrap();
+    fs::write(d.join("mcp-audit/lecturas/audit.jsonl"), b"{\"tool\":\"read_output\"}\n").unwrap();
+    let ext = tmp("cov-ext");
+    fs::write(ext.join("core_20260101.log"), b"log propio").unwrap();
+    let (dk, _) = en(&Layout::new(&d, std::slice::from_ref(&ext)), "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+    assert!(d.join("mcp-audit/lecturas/audit.jsonl.nte").exists(), "subcarpeta de auditoría cubierta");
+    assert_eq!(read_roots(&d), vec![ext.clone()]);
+    // Más tarde el usuario cambió la carpeta de logs: la anterior sigue anotada y se convierte igual.
+    let now = tmp("cov-now");
+    add_roots(&d, std::slice::from_ref(&now)).unwrap();
+    let layout = Layout::new(&d, &read_roots(&d));
+    assert!(loss_check(&layout).is_empty(), "{:?}", loss_check(&layout));
+    // Un .nte que la conversión no cubre y una carpeta de logs que no está: se nombran y no se toca nada.
+    fs::write(d.join("tftp/huerfano.bin.nte"), b"x").unwrap();
+    let gone = tmp("cov-gone");
+    add_roots(&d, std::slice::from_ref(&gone)).unwrap();
+    fs::remove_dir_all(&gone).unwrap();
+    let layout = Layout::new(&d, &read_roots(&d));
+    let loss = loss_check(&layout);
+    assert_eq!(loss.len(), 2, "{loss:?}");
+    assert!(loss.iter().any(|l| l.contains("no disponible")) && loss.iter().any(|l| l.contains("huerfano.bin.nte")));
+    let e = disable(&layout, &dk, &[], &no_hook, &mut |_| {}).unwrap_err();
+    assert_eq!(e.loss, loss);
+    assert!(d.join(KEY_FILE).exists() && d.join("settings.json.nte").exists() && !d.join(JOURNAL_FILE).exists(), "no se tocó nada");
+    // Una lista distinta (incompleta) tampoco basta.
+    assert!(disable(&layout, &dk, &loss[..1], &no_hook, &mut |_| {}).is_err());
+    // Con la lista exacta sigue: todo lo demás vuelve a claro, también la carpeta de logs anterior.
+    disable(&layout, &dk, &loss, &no_hook, &mut |_| {}).unwrap();
+    assert_eq!(fs::read(ext.join("core_20260101.log")).unwrap(), b"log propio");
+    assert_eq!(fs::read(d.join("mcp-audit/lecturas/audit.jsonl")).unwrap(), b"{\"tool\":\"read_output\"}\n");
+    for (rel, body) in &files {
+        assert_eq!(&fs::read(d.join(rel)).unwrap(), body, "{rel}");
+    }
+    assert!(!d.join(KEY_FILE).exists() && !d.join(ROOTS_FILE).exists());
+    for x in [d, ext, now] {
+        let _ = fs::remove_dir_all(x);
+    }
+}
+
+#[test]
+fn logs_dir_inside_data_is_a_conflict() {
+    let d = tmp("conf");
+    for sub in ["logs", "otra", "notes", "logs/sub"] {
+        fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    let out = tmp("conf-fuera");
+    assert!(logs_dir_conflicts(&d, &d), "la carpeta de datos");
+    assert!(logs_dir_conflicts(&d, &d.join("otra")), "una subcarpeta");
+    assert!(logs_dir_conflicts(&d, &d.join("notes")));
+    assert!(logs_dir_conflicts(&d, &d.join("logs/sub")));
+    assert!(logs_dir_conflicts(&d, d.parent().unwrap()), "una que contiene la de datos");
+    assert!(!logs_dir_conflicts(&d, &d.join("logs")), "la predeterminada");
+    assert!(!logs_dir_conflicts(&d, &out));
+    let _ = fs::remove_dir_all(d);
+    let _ = fs::remove_dir_all(out);
+}
+
+/// B3: sin datakey.ntk, con señales de carpeta cifrada, no se abre en claro.
+#[test]
+fn orphan_encrypted_folder_is_detected() {
+    let d = tmp("orph");
+    assert!(!orphan_markers(&d), "carpeta vacía");
+    fixture(&d);
+    assert!(!orphan_markers(&d), "carpeta en claro");
+    en(&Layout::new(&d, &[]), "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+    fs::remove_file(d.join(KEY_FILE)).unwrap();
+    assert!(orphan_markers(&d));
+    fs::remove_file(d.join(README_FILE)).unwrap();
+    fs::remove_file(d.join("sessions.json")).unwrap();
+    assert!(orphan_markers(&d), "basta con los archivos de datos cifrados");
+    let _ = fs::remove_dir_all(d);
+}
+
+/// Logs con eco carácter a carácter: el búfer agrupa en bloques (antes cada tecla era un bloque y
+/// el archivo crecía unas 40 veces).
+#[test]
+fn buffered_log_keeps_size_close_to_the_text() {
+    let d = tmp("buf");
+    let dk = DataKey::generate();
+    let p = d.join("eco.log.nte");
+    let text: Vec<u8> = b"show interfaces status\r\n".iter().copied().cycle().take(64 * 1024).collect();
+    {
+        let (mut a, _) = open_append(&p, Some(&dk), OpenMode::CreateNew).unwrap();
+        for b in &text {
+            a.write_all(std::slice::from_ref(b)).unwrap();
+        }
+    }
+    let size = fs::metadata(&p).unwrap().len();
+    assert!((size as f64) < text.len() as f64 * 1.05, "{size} bytes para {}", text.len());
+    assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), text);
+    // Lo pendiente llega al disco por el hilo de vaciado (sin cerrar) y al bloquear (flush_all).
+    let q = d.join("vivo.log.nte");
+    let (mut a, _) = open_append(&q, Some(&dk), OpenMode::CreateNew).unwrap();
+    a.write_all(b"pendiente\n").unwrap();
+    let read_now = |q: &Path| {
+        let mut out = Vec::new();
+        let _ = EncReader::new(File::open(q).unwrap(), &dk, false).unwrap().read_to_end(&mut out);
+        out
+    };
+    std::thread::sleep(FLUSH_EVERY * 3);
+    assert_eq!(read_now(&q), b"pendiente\n", "vaciado por tiempo");
+    a.write_all(b"otro\n").unwrap();
+    flush_all(None);
+    assert_eq!(read_now(&q), b"pendiente\notro\n", "vaciado al bloquear");
+    drop(a);
+    let _ = fs::remove_dir_all(d);
+}

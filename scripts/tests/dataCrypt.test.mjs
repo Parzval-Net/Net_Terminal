@@ -93,7 +93,15 @@ assert.match(doc, /\| Excluida \| `dataLockStopLogs` \|/);
 
 // ---------- La contraseña nunca queda en el estado ni en los textos ----------
 const api = readFileSync(new URL("../../src/lib/api.ts", import.meta.url), "utf8");
-for (const cmd of ["data_unlock", "datacrypt_enable", "datacrypt_disable"]) assert.match(api, new RegExp(`"${cmd}", \\{ master \\}`), `${cmd} solo envía la maestra`);
+for (const cmd of ["data_unlock", "datacrypt_enable"]) assert.match(api, new RegExp(`"${cmd}", \\{ master \\}`), `${cmd} solo envía la maestra`);
+assert.match(api, /"datacrypt_disable", \{ master, acceptLoss \}/, "desactivar: la maestra y la lista aceptada");
+
+// ---------- Error de conversión con lista de pérdida ----------
+assert.deepEqual(D.convError("texto"), { message: "texto", loss: [] });
+assert.deepEqual(D.convError({ message: "m", loss: ["a", 3, "b"] }), { message: "m", loss: ["a", "b"] }, "solo textos");
+assert.deepEqual(D.convError({ message: "m" }), { message: "m", loss: [] });
+assert.deepEqual(D.convError(null), { message: "null", loss: [] });
+assert.deepEqual(D.PLAIN_STATUS.damaged, []);
 assert.ok(!/master/.test(JSON.stringify(D.PLAIN_STATUS)), "el estado no trae contraseñas");
 
 console.log("dataCrypt: OK");
