@@ -409,6 +409,8 @@ struct FileId(u64, u64, u64);
 /// dentro de `root`, sin enlaces simbólicos ni uniones en ningún tramo (mismo criterio que la
 /// búsqueda en logs). La interfaz sigue leyendo como siempre.
 fn regular_file_in(path: &Path, root: &Path) -> Result<FileId, ()> {
+    // En una carpeta cifrada el archivo en disco es `<nombre>.nte`: se verifica ese (el que se lee).
+    let path = &crate::datacrypt::physical(path);
     let meta = std::fs::symlink_metadata(path).map_err(|_| ())?;
     if !meta.file_type().is_file() {
         return Err(());
@@ -2247,5 +2249,41 @@ mod tests {
         let raw = "<HUAWEI>display version\nHuawei VRP\n  ---- More ----\x08\x08\x08 more lines\n<HUAWEI>";
         let o = command_output(raw, "display version");
         assert!(o.starts_with("Huawei VRP") && !o.contains("More") && !o.contains("<HUAWEI>"), "{o:?}");
+    }
+
+    /// Modo portable cifrado: las lecturas vía MCP verifican el archivo en disco (`<nombre>.nte`) y
+    /// entregan el texto descifrado y enmascarado; nunca el contenido cifrado en bruto.
+    #[test]
+    fn mcp_reads_work_with_an_encrypted_folder() {
+        let h = FakeHost::new();
+        let mut key = None;
+        let layout = crate::datacrypt::Layout::new(&h.dir, &[]);
+        crate::datacrypt::enable(&layout, "maestra-de-prueba", crate::seal::Kdf { m: 64, t: 1, p: 1 }, &crate::datacrypt::no_hook, &mut |_| {}, &mut key).unwrap();
+        assert!(h.dir.join("notes/red.txt.nte").exists() && !h.dir.join("notes/red.txt").exists());
+        let sh = crate::datacrypt::Shared::new();
+        crate::datacrypt::register(&h.dir, &sh);
+        sh.set_key(key);
+        let c = cfg();
+        let cl = client();
+        let ctx = Ctx { cfg: &c, client: &cl };
+        let raw = |text: &str| assert!(!text.contains("NTDATA") && !text.contains('\u{FFFD}'), "contenido cifrado en bruto: {text}");
+        let note = read_resource(&ctx, &h, "netterminal://notes/red").unwrap().to_string();
+        assert!(note.contains("Gi1/0/1 va al core"), "{note}");
+        raw(&note);
+        let bk = read_resource(&ctx, &h, "netterminal://backups/sw1/2026-11-01_100000.txt").unwrap().to_string();
+        assert!(bk.contains("description uplink") && bk.contains("****") && !bk.contains("ClaveRespaldoA"), "{bk}");
+        raw(&bk);
+        let diff = call_ok(&c, &h, "diff_backups", json!({ "device": "sw1" })).text;
+        assert!(diff.contains("description core") && diff.contains("shutdown"), "{diff}");
+        raw(&diff);
+        let found = call_ok(&c, &h, "search_logs", json!({ "query": "changed state", "kinds": ["logs"] })).text;
+        assert!(found.contains("core-sw01"), "{found}");
+        raw(&found);
+        let topo = call_ok(&c, &h, "get_topology", json!({})).text;
+        assert!(topo.contains("sw1"), "{topo}");
+        // Bloqueada: nada se entrega (ni en claro ni cifrado).
+        sh.set_key(None);
+        assert_eq!(read_resource(&ctx, &h, "netterminal://notes/red").unwrap_err().code, -32002);
+        crate::datacrypt::unregister(&sh);
     }
 }

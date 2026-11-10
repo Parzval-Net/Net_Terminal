@@ -22,6 +22,8 @@ export interface DataStatus {
   vaultMaster: boolean;
   logsActive: number;
   dataDir: string;
+  /** Archivos cifrados dañados que se apartaron (`.dañado-<fecha>`) en esta ejecución. */
+  damaged: string[];
 }
 
 export interface DataProgress {
@@ -57,7 +59,23 @@ export const PLAIN_STATUS: DataStatus = {
   vaultMaster: false,
   logsActive: 0,
   dataDir: "",
+  damaged: [],
 };
+
+/** Error de una conversión: el motivo y, si desactivar dejaría archivos sin llave, la lista exacta. */
+export interface ConvError {
+  message: string;
+  loss: string[];
+}
+
+/** Normaliza el error de `datacrypt_disable`/`datacrypt_resume` (objeto) o de otro comando (texto). */
+export function convError(e: unknown): ConvError {
+  if (e && typeof e === "object" && typeof (e as ConvError).message === "string") {
+    const loss = (e as ConvError).loss;
+    return { message: (e as ConvError).message, loss: Array.isArray(loss) ? loss.filter((x) => typeof x === "string") : [] };
+  }
+  return { message: String(e), loss: [] };
+}
 
 export type GateView = "loading" | "app" | "unlock" | "resume" | "error";
 

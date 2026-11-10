@@ -110,8 +110,10 @@ export const dataLock = () => invoke("data_lock");
 export const dataTouch = () => invoke("data_touch");
 export const datacryptSetPolicy = (stopLogs: boolean) => invoke("datacrypt_set_policy", { stopLogs });
 export const datacryptEnable = (master: string) => invoke<DataReport>("datacrypt_enable", { master });
-export const datacryptDisable = (master: string) => invoke<DataReport>("datacrypt_disable", { master });
-export const datacryptResume = (op: DataOp) => invoke<DataReport>("datacrypt_resume", { op });
+/** Si desactivar dejaría archivos sin llave, el error trae la lista (`loss`); solo se sigue reenviándola. */
+export const datacryptDisable = (master: string, acceptLoss?: string[]) => invoke<DataReport>("datacrypt_disable", { master, acceptLoss });
+export const datacryptResume = (op: DataOp, acceptLoss?: string[]) => invoke<DataReport>("datacrypt_resume", { op, acceptLoss });
+export const datacryptAckDamaged = () => invoke("datacrypt_ack_damaged");
 export const datacryptFixPlaintext = () => invoke<DataReport>("datacrypt_fix_plaintext");
 export const vaultCreate = (master: string) => invoke("vault_create", { master });
 

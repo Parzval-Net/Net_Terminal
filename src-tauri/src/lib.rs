@@ -74,29 +74,45 @@ impl AppState {
     }
 }
 
+/// Con la carpeta cifrada bloqueada (o convirtiéndose), los comandos que leen, guardan o exportan
+/// datos se rechazan aunque haya datos en memoria: la interfaz está oculta y nada sale sin la
+/// contraseña. Revisados: sesiones, notas (también las protegidas), historial, respaldos, auditoría,
+/// ajustes y topología, logs (activar), búsqueda y visor de logs, y el archivo .ntx (bundle.rs).
+fn data_ready(state: &AppState) -> Result<(), String> {
+    match datacrypt::unavailable(&state.data_dir) {
+        Some(why) => Err(why.into()),
+        None => Ok(()),
+    }
+}
+
 #[tauri::command]
-fn list_sessions(state: State<'_, AppState>) -> Vec<Session> {
-    state.store.list()
+fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String> {
+    data_ready(&state)?;
+    Ok(state.store.list())
 }
 
 #[tauri::command]
 fn save_session(session: Session, state: State<'_, AppState>) -> Result<Session, String> {
+    data_ready(&state)?;
     state.store.save(session)
 }
 
 #[tauri::command]
 fn update_sessions(sessions: Vec<Session>, state: State<'_, AppState>) -> Result<Vec<Session>, String> {
+    data_ready(&state)?;
     state.store.update_many(sessions)
 }
 
 /// Agrega sesiones importadas en una sola escritura.
 #[tauri::command]
 fn add_sessions(sessions: Vec<Session>, state: State<'_, AppState>) -> Result<Vec<Session>, String> {
+    data_ready(&state)?;
     state.store.add_many(sessions)
 }
 
 #[tauri::command(async)]
 fn delete_session(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     state.store.delete(&id)?;
     // Con la bóveda bloqueada la entrada queda huérfana y se limpia al guardar otra.
     let _ = state.creds.delete(&id);
@@ -484,6 +500,10 @@ fn set_logging(
     mask: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
+    // Apagar siempre se puede (también bloqueada); encender exige la carpeta disponible.
+    if enabled {
+        data_ready(&state)?;
+    }
     let opts = logfile::LogOptions {
         timestamps: timestamps.unwrap_or(false),
         pattern: pattern.unwrap_or_else(|| logfile::DEFAULT_PATTERN.into()),
@@ -538,7 +558,7 @@ fn logs_dir_set(path: Option<String>, state: State<'_, AppState>) -> Result<Logs
         Some(p) => Some(logfile::validate_dir(p)?),
         None => None,
     };
-    datamode::on_logs_dir(&state, dir.as_ref());
+    datamode::on_logs_dir(&state, dir.as_ref())?;
     *state.logs_root.lock().unwrap_or_else(|e| e.into_inner()) = dir;
     Ok(logs_dir_info(&state))
 }
@@ -564,22 +584,26 @@ fn open_dir(which: String, app: tauri::AppHandle, state: State<'_, AppState>) ->
 }
 
 #[tauri::command(async)]
-fn list_notes(state: State<'_, AppState>) -> Vec<notes::NoteInfo> {
-    notes::list(&state.notes_dir())
+fn list_notes(state: State<'_, AppState>) -> Result<Vec<notes::NoteInfo>, String> {
+    data_ready(&state)?;
+    Ok(notes::list(&state.notes_dir()))
 }
 
 #[tauri::command(async)]
 fn read_note(name: String, state: State<'_, AppState>) -> Result<String, String> {
+    data_ready(&state)?;
     notes::read(&state.notes_dir(), &name)
 }
 
 #[tauri::command]
 fn save_note(name: String, content: String, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     notes::save(&state.notes_dir(), &name, &content)
 }
 
 #[tauri::command]
 fn rename_note(from: String, to: String, state: State<'_, AppState>) -> Result<String, String> {
+    data_ready(&state)?;
     let name = notes::rename(&state.notes_dir(), &from, &to)?;
     state.secure_notes.renamed(&from, &name);
     Ok(name)
@@ -587,6 +611,7 @@ fn rename_note(from: String, to: String, state: State<'_, AppState>) -> Result<S
 
 #[tauri::command]
 fn delete_note(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     state.secure_notes.forget(&name);
     notes::delete(&state.notes_dir(), &name)
 }
@@ -596,12 +621,14 @@ fn delete_note(name: String, state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn note_protect(name: String, password: String, idle_secs: u64, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     let password = zeroize::Zeroizing::new(password);
     state.secure_notes.protect(&state.notes_dir(), &name, &password, idle_secs)
 }
 
 #[tauri::command(async)]
 fn note_unlock(name: String, password: String, idle_secs: u64, state: State<'_, AppState>) -> Result<String, String> {
+    data_ready(&state)?;
     let password = zeroize::Zeroizing::new(password);
     let text = state.secure_notes.unlock(&state.notes_dir(), &name, &password, idle_secs)?;
     Ok(String::clone(&text))
@@ -609,6 +636,7 @@ fn note_unlock(name: String, password: String, idle_secs: u64, state: State<'_, 
 
 #[tauri::command(async)]
 fn note_save_secure(name: String, content: String, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     let content = zeroize::Zeroizing::new(content);
     state.secure_notes.save(&state.notes_dir(), &name, &content)
 }
@@ -625,18 +653,21 @@ fn note_lock(state: State<'_, AppState>) {
 
 #[tauri::command(async)]
 fn note_unprotect(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     state.secure_notes.unprotect(&state.notes_dir(), &name)
 }
 
 #[tauri::command(async)]
 fn note_change_password(name: String, old: String, new: String, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     let (old, new) = (zeroize::Zeroizing::new(old), zeroize::Zeroizing::new(new));
     state.secure_notes.change(&state.notes_dir(), &name, &old, &new)
 }
 
 #[tauri::command(async)]
-fn search_notes(query: String, state: State<'_, AppState>) -> Vec<notes::NoteMatch> {
-    notes::search(&state.notes_dir(), &query)
+fn search_notes(query: String, state: State<'_, AppState>) -> Result<Vec<notes::NoteMatch>, String> {
+    data_ready(&state)?;
+    Ok(notes::search(&state.notes_dir(), &query))
 }
 
 // ---------- Importación de sesiones e historial ----------
@@ -648,32 +679,38 @@ fn import_sessions_file(path: String, format: Option<String>) -> Result<importer
 }
 
 #[tauri::command(async)]
-fn recent_targets(state: State<'_, AppState>) -> Vec<String> {
-    history::recent_list(&state.data_dir)
+fn recent_targets(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    data_ready(&state)?;
+    Ok(history::recent_list(&state.data_dir))
 }
 
 #[tauri::command(async)]
 fn recent_target_add(target: String, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    data_ready(&state)?;
     history::recent_add(&state.data_dir, &target)
 }
 
 #[tauri::command(async)]
 fn recent_targets_clear(state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     history::recent_clear(&state.data_dir)
 }
 
 #[tauri::command(async)]
-fn cmd_history(key: String, state: State<'_, AppState>) -> Vec<history::CmdEntry> {
-    history::cmd_list(&state.data_dir, &key)
+fn cmd_history(key: String, state: State<'_, AppState>) -> Result<Vec<history::CmdEntry>, String> {
+    data_ready(&state)?;
+    Ok(history::cmd_list(&state.data_dir, &key))
 }
 
 #[tauri::command(async)]
 fn cmd_history_add(key: String, command: String, state: State<'_, AppState>) -> Result<bool, String> {
+    data_ready(&state)?;
     history::cmd_add(&state.data_dir, &key, &command)
 }
 
 #[tauri::command(async)]
 fn cmd_history_clear(key: Option<String>, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     history::cmd_clear(&state.data_dir, key.as_deref())
 }
 
@@ -789,8 +826,9 @@ fn mcp_query_reply(id: String, data: serde_json::Value, state: State<'_, AppStat
 
 /// Últimos eventos del registro de auditoría MCP.
 #[tauri::command(async)]
-fn mcp_audit_tail(limit: usize, state: State<'_, AppState>) -> Vec<serde_json::Value> {
-    mcp_audit::tail(&state.data_dir, limit)
+fn mcp_audit_tail(limit: usize, state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    data_ready(&state)?;
+    Ok(mcp_audit::tail(&state.data_dir, limit))
 }
 
 // ---------- Herramientas de red ----------
@@ -1021,22 +1059,26 @@ fn save_text(dest: String, content: String) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn backup_save(device: String, content: String, mask: bool, state: State<'_, AppState>) -> Result<String, String> {
+    data_ready(&state)?;
     backups::save(&state.data_dir, &device, &content, mask)
 }
 
 #[tauri::command(async)]
-fn backup_list(state: State<'_, AppState>) -> serde_json::Value {
-    serde_json::to_value(backups::list(&state.data_dir)).unwrap_or_default()
+fn backup_list(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    data_ready(&state)?;
+    Ok(serde_json::to_value(backups::list(&state.data_dir)).unwrap_or_default())
 }
 
 /// Huellas de los secretos enmascarados de un respaldo (para avisar "secreto cambiado").
 #[tauri::command(async)]
 fn backup_secrets(device: String, file: String, state: State<'_, AppState>) -> Result<std::collections::BTreeMap<usize, Vec<String>>, String> {
+    data_ready(&state)?;
     backups::read_secrets(&state.data_dir, &device, &file)
 }
 
 #[tauri::command(async)]
 fn backup_read(device: String, file: String, state: State<'_, AppState>) -> Result<String, String> {
+    data_ready(&state)?;
     backups::read(&state.data_dir, &device, &file)
 }
 
@@ -1138,11 +1180,13 @@ fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, String>
 /// (por ejemplo, el tope de 64 MB) llega a la interfaz como texto del rechazo del comando.
 #[tauri::command(async)]
 fn save_topology(data: serde_json::Value, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     state.files.save(datafiles::Kind::Topology, data)
 }
 
 #[tauri::command(async)]
 fn save_settings(settings: serde_json::Value, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
     state.files.save(datafiles::Kind::Settings, settings)
 }
 
@@ -1366,6 +1410,7 @@ pub fn run() {
                 bundle: bundle::PendingSlot::default(),
                 crypt,
             });
+            datamode::install_notifier(app.handle());
             // Bloqueo automático de la bóveda según los ajustes guardados, sin esperar a la interfaz
             // (que lo vuelve a enviar al cargar; si no llega, igual queda aplicado).
             {
@@ -1460,6 +1505,7 @@ pub fn run() {
             datamode::datacrypt_disable,
             datamode::datacrypt_resume,
             datamode::datacrypt_fix_plaintext,
+            datamode::datacrypt_ack_damaged,
             tftp_files,
             tftp_add,
             tftp_delete,
@@ -1536,6 +1582,8 @@ pub fn run() {
         // La llave de la bóveda y la de la nota abierta se borran de memoria al salir.
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = app.try_state::<AppState>() {
+                // Lo pendiente de los logs cifrados queda en disco antes de salir.
+                datacrypt::flush_all(None);
                 state.creds.lock();
                 state.secure_notes.lock();
             }

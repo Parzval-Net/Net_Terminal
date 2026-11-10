@@ -37,6 +37,11 @@ const DOT_EXT: &str = ".nte";
 pub const KEY_FILE: &str = "datakey.ntk";
 pub const JOURNAL_FILE: &str = "datacrypt.journal";
 pub const README_FILE: &str = "LEEME-DATOS-CIFRADOS.txt";
+/// Carpetas de logs usadas con el modo activo (JSON en claro junto a la llave): al desactivar se
+/// convierten todas y se avisa si alguna no está accesible.
+pub const ROOTS_FILE: &str = "datakey.roots";
+/// Bloqueo de instancia única (una sola app sobre la carpeta cifrada).
+pub const LOCK_FILE: &str = "datakey.lock";
 pub const VAULT_FILE: &str = "credentials.vault";
 pub const LOCKED: &str = "Los datos están cifrados y bloqueados: desbloquéalos con la contraseña maestra";
 pub const BUSY: &str = "Hay una conversión de datos en curso: espera a que termine";
@@ -141,15 +146,17 @@ impl KeyFile {
         Err("Contraseña maestra incorrecta o llave de datos alterada".into())
     }
 
-    /// Agrega una ranura para `password` (cambio de maestra, paso 1). Con dos ranuras se reemplaza la segunda.
-    pub fn add_slot(&mut self, dk: &DataKey, password: &str, kdf: Kdf) -> Result<usize, String> {
+    /// Agrega una ranura para `password` (cambio de maestra, paso 1) y conserva solo `keep`, la ranura
+    /// que abrió la contraseña actual: tras un cambio anterior cortado (dos ranuras) nunca se descarta la
+    /// que sigue abriendo la bóveda. Devuelve el índice de la ranura nueva.
+    pub fn add_slot(&mut self, dk: &DataKey, password: &str, kdf: Kdf, keep: usize) -> Result<usize, String> {
         if dk.id != self.id {
             return Err("La llave de datos no corresponde a esta carpeta".into());
         }
         let s = Slot::new(dk, password, kdf)?;
-        self.slots.truncate(MAX_SLOTS - 1);
-        self.slots.push(s);
-        Ok(self.slots.len() - 1)
+        let kept = self.slots.get(keep).cloned().ok_or("Ranura inválida")?;
+        self.slots = vec![kept, s];
+        Ok(1)
     }
 
     /// Deja solo la ranura `i` (cambio de maestra, paso final; o al desbloquear tras un corte).
@@ -339,6 +346,9 @@ pub struct EncReader<R: Read> {
     done: bool,
     strict: bool,
     incomplete: bool,
+    /// Rescate: un bloque que no descifra termina la lectura como incompleta (archivo apartado por
+    /// dañado; se recupera lo íntegro anterior al daño).
+    salvage: bool,
 }
 
 /// Lee exactamente `buf.len()` bytes. Ok(false) si no había nada (fin limpio); error de fin
@@ -366,7 +376,14 @@ impl<R: Read> EncReader<R> {
         let fk = open_header(dk, &h)?;
         let mut head = [0u8; AAD_HEAD];
         head.copy_from_slice(&h[..AAD_HEAD]);
-        Ok(EncReader { r, fk, head, counter: 0, buf: Zeroizing::new(Vec::new()), pos: 0, done: false, strict, incomplete: false })
+        Ok(EncReader { r, fk, head, counter: 0, buf: Zeroizing::new(Vec::new()), pos: 0, done: false, strict, incomplete: false, salvage: false })
+    }
+
+    /// Lector de rescate para un archivo apartado por dañado (ver `salvage`).
+    pub fn salvage(mut self) -> Self {
+        self.salvage = true;
+        self.strict = false;
+        self
     }
 
     /// El archivo terminó sin el bloque de cierre (grabación en curso, corte o archivo truncado).
@@ -396,7 +413,7 @@ impl<R: Read> EncReader<R> {
         let last = raw & FINAL_BIT != 0;
         let len = (raw & !FINAL_BIT) as usize;
         if !(TAG..=CHUNK_MAX + TAG).contains(&len) {
-            return Err(bad(BAD_FILE));
+            return if self.salvage { self.cut() } else { Err(bad(BAD_FILE)) };
         }
         let mut nonce = [0u8; 24];
         let mut ct = vec![0u8; len];
@@ -408,7 +425,11 @@ impl<R: Read> EncReader<R> {
                 Err(e) => return Err(e),
             }
         }
-        let plain = seal::decrypt(&self.fk, &nonce, &ct, &chunk_aad(&self.head, self.counter, last)).map_err(|_| bad(BAD_FILE))?;
+        let plain = match seal::decrypt(&self.fk, &nonce, &ct, &chunk_aad(&self.head, self.counter, last)) {
+            Ok(p) => p,
+            Err(()) if self.salvage => return self.cut(),
+            Err(()) => return Err(bad(BAD_FILE)),
+        };
         self.counter += 1;
         if last {
             if !plain.is_empty() {
@@ -450,9 +471,30 @@ struct AppendState {
     head: [u8; AAD_HEAD],
     counter: u64,
     len: u64,
+    /// Texto en espera de formar un bloque (logs): se vacía al llegar a `BUF_MAX`, cuando lleva
+    /// `FLUSH_EVERY` esperando (un hilo lo revisa), al bloquear y al cerrar.
+    pending: Vec<u8>,
+    since: Option<Instant>,
 }
 
+/// Tope del búfer de un log cifrado antes de escribir un bloque.
+const BUF_MAX: usize = 16 * 1024;
+/// Espera máxima del texto en el búfer: lo que se pierde ante un corte de energía o un cierre forzado.
+pub const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl AppendState {
+    fn flush_pending(&mut self) -> io::Result<()> {
+        self.since = None;
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let p = std::mem::take(&mut self.pending);
+        for part in p.chunks(CHUNK_MAX) {
+            self.push(part, false)?;
+        }
+        Ok(())
+    }
+
     fn push(&mut self, plain: &[u8], last: bool) -> io::Result<()> {
         let mut rec = Vec::with_capacity(REC_HEAD + plain.len() + TAG);
         seal_chunk(&self.fk, &self.head, self.counter, last, plain, &mut rec)?;
@@ -469,8 +511,9 @@ impl AppendState {
 }
 
 impl Drop for AppendState {
-    /// Al soltar el último escritor del archivo se agrega el bloque de cierre.
+    /// Al soltar el último escritor del archivo se escribe lo pendiente y el bloque de cierre.
     fn drop(&mut self) {
+        let _ = self.flush_pending();
         if self.push(&[], true).is_ok() {
             let _ = self.file.sync_data();
         }
@@ -483,24 +526,104 @@ impl Drop for AppendState {
 pub struct Appender(Arc<Mutex<AppendState>>);
 
 impl Appender {
+    /// Escribe ya (un bloque por llamada): auditoría, donde cada evento debe quedar en disco.
     pub fn append(&self, plain: &[u8]) -> io::Result<()> {
         let mut st = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        st.flush_pending()?;
         for part in plain.chunks(CHUNK_MAX) {
             st.push(part, false)?;
         }
+        Ok(())
+    }
+
+    /// Agrupa en el búfer (logs): con eco carácter a carácter cada tecla sería un bloque de 45 bytes.
+    /// Se escribe al juntar 16 KiB, a los 250 ms (hilo de vaciado), al bloquear y al cerrar.
+    pub fn append_buffered(&self, plain: &[u8]) -> io::Result<()> {
+        if plain.is_empty() {
+            return Ok(());
+        }
+        let mut st = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        st.pending.extend_from_slice(plain);
+        st.since.get_or_insert_with(Instant::now);
+        if st.pending.len() >= BUF_MAX {
+            st.flush_pending()?;
+        }
+        drop(st);
+        start_flusher();
         Ok(())
     }
 }
 
 impl Write for Appender {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.append(buf)?;
+        self.append_buffered(buf)?;
         Ok(buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).flush_pending()
     }
 }
+
+/// Escribe lo pendiente de todos los logs cifrados abiertos (al bloquear y antes de cerrar la app).
+/// `older`: solo lo que lleva al menos ese tiempo esperando.
+pub fn flush_all(older: Option<std::time::Duration>) {
+    let open: Vec<_> = appenders().lock().unwrap_or_else(|e| e.into_inner()).values().filter_map(Weak::upgrade).collect();
+    for st in open {
+        let mut st = st.lock().unwrap_or_else(|e| e.into_inner());
+        if older.is_none_or(|d| st.since.is_some_and(|s| s.elapsed() >= d)) {
+            let _ = st.flush_pending();
+        }
+    }
+}
+
+/// Hilo de vaciado: existe solo desde que se abre el primer log cifrado (nunca con el modo apagado).
+fn start_flusher() {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(|| loop {
+        std::thread::sleep(FLUSH_EVERY / 2);
+        flush_all(Some(FLUSH_EVERY));
+    });
+}
+
+// ---------- Archivos dañados apartados ----------
+
+fn damaged() -> &'static Mutex<Vec<String>> {
+    static D: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    D.get_or_init(Mutex::default)
+}
+
+type Notify = Box<dyn Fn(&str) + Send + Sync>;
+
+fn notifier() -> &'static OnceLock<Notify> {
+    static N: OnceLock<Notify> = OnceLock::new();
+    &N
+}
+
+/// Aviso a la interfaz cuando un archivo cifrado dañado se aparta (lo instala `datamode`).
+pub fn set_notifier(f: Notify) {
+    let _ = notifier().set(f);
+}
+
+/// Archivos apartados por dañados en esta ejecución (hasta que el usuario los vea).
+pub fn damaged_list() -> Vec<String> {
+    damaged().lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn damaged_clear() {
+    damaged().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// `x.log.nte` → `x.dañado-<fecha>.log.nte` (sigue cifrado y en la carpeta, con un nombre que los
+/// recorridos reconocen y que la conversión descifra en modo rescate).
+fn damaged_name(phys: &Path) -> PathBuf {
+    let logical = phys.to_str().and_then(|s| s.strip_suffix(DOT_EXT)).map(PathBuf::from).unwrap_or_else(|| phys.to_path_buf());
+    with_ext(&aside_name(&logical, DAMAGED))
+}
+
+pub const DAMAGED: &str = ".dañado-";
 
 fn appenders() -> &'static Mutex<HashMap<PathBuf, Weak<Mutex<AppendState>>>> {
     static M: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<AppendState>>>>> = OnceLock::new();
@@ -555,14 +678,29 @@ pub fn open_append(phys: &Path, dk: Option<&DataKey>, mode: OpenMode) -> io::Res
     let dk = dk.ok_or_else(locked_err)?;
     let mut file = open_raw(phys, mode)?;
     let flen = file.metadata()?.len();
-    let st = if flen == 0 {
-        let (h, fk) = new_header(dk)?;
-        file.write_all(&h)?;
-        let mut head = [0u8; AAD_HEAD];
-        head.copy_from_slice(&h[..AAD_HEAD]);
-        AppendState { file, fk, head, counter: 0, len: HEADER_LEN as u64 }
-    } else {
-        resume_state(file, flen, dk)?
+    let resumed = if flen == 0 { None } else { resume_state(file.try_clone()?, flen, dk)? };
+    let st = match resumed {
+        Some(st) => st,
+        None => {
+            if flen > 0 {
+                // Dañado antes de la cola (no es un corte al escribir): no se trunca ni se escribe
+                // encima. Se aparta con otro nombre y se sigue en un archivo nuevo, con aviso.
+                drop(file);
+                let away = damaged_name(phys);
+                fs::rename(phys, &away)?;
+                let shown = away.to_string_lossy().into_owned();
+                damaged().lock().unwrap_or_else(|e| e.into_inner()).push(shown.clone());
+                if let Some(n) = notifier().get() {
+                    n(&shown);
+                }
+                file = open_raw(phys, OpenMode::CreateNew)?;
+            }
+            let (h, fk) = new_header(dk)?;
+            file.write_all(&h)?;
+            let mut head = [0u8; AAD_HEAD];
+            head.copy_from_slice(&h[..AAD_HEAD]);
+            AppendState { file, fk, head, counter: 0, len: HEADER_LEN as u64, pending: Vec::new(), since: None }
+        }
     };
     let had = st.counter > 0;
     let arc = Arc::new(Mutex::new(st));
@@ -573,57 +711,62 @@ pub fn open_append(phys: &Path, dk: Option<&DataKey>, mode: OpenMode) -> io::Res
     Ok((Appender(arc), had))
 }
 
-fn resume_state(mut file: File, flen: u64, dk: &DataKey) -> io::Result<AppendState> {
+/// Retoma un archivo cifrado para anexar. Verifica todos sus bloques: solo la cola incompleta de una
+/// escritura cortada (largo que pasa el fin del archivo o menos de 4 bytes) se recorta. Cualquier
+/// otro daño (cabecera, un bloque del medio o el último, un cierre fuera de lugar) devuelve `None`:
+/// quien llama aparta el archivo, nunca lo trunca en silencio.
+fn resume_state(mut file: File, flen: u64, dk: &DataKey) -> io::Result<Option<AppendState>> {
     let mut h = [0u8; HEADER_LEN];
     file.seek(SeekFrom::Start(0))?;
-    if !read_full(&mut file, &mut h).map_err(|_| bad(BAD_FILE))? {
-        return Err(bad(BAD_FILE));
+    if !matches!(read_full(&mut file, &mut h), Ok(true)) {
+        return Ok(None);
     }
-    let fk = open_header(dk, &h)?;
+    let Ok(fk) = open_header(dk, &h) else { return Ok(None) };
     let mut head = [0u8; AAD_HEAD];
     head.copy_from_slice(&h[..AAD_HEAD]);
-    // Recorre los largos (sin descifrar) hasta el último bloque completo.
     let mut r = BufReader::new(&mut file);
     let mut pos = HEADER_LEN as u64;
     let mut idx = 0u64;
-    let mut last: Option<(u64, u64, bool, usize)> = None;
+    // Posición y número del bloque de cierre (si el archivo quedó cerrado).
+    let mut fin_at: Option<(u64, u64)> = None;
     loop {
-        let mut lenb = [0u8; 4];
-        if !matches!(read_full(&mut r, &mut lenb), Ok(true)) {
-            break;
+        if flen - pos < 4 {
+            break; // cola incompleta (o fin exacto)
         }
+        let mut lenb = [0u8; 4];
+        r.read_exact(&mut lenb)?;
         let raw = u32::from_le_bytes(lenb);
         let len = (raw & !FINAL_BIT) as usize;
-        let end = pos + (REC_HEAD + len) as u64;
-        if !(TAG..=CHUNK_MAX + TAG).contains(&len) || end > flen {
-            break;
+        let last = raw & FINAL_BIT != 0;
+        if !(TAG..=CHUNK_MAX + TAG).contains(&len) || fin_at.is_some() {
+            return Ok(None); // largo imposible o algo después del cierre: daño
         }
-        last = Some((pos, idx, raw & FINAL_BIT != 0, len));
-        r.seek_relative((NONCE + len) as i64)?;
+        let end = pos + (REC_HEAD + len) as u64;
+        if end > flen {
+            break; // el último bloque quedó a medias al escribir: se recorta
+        }
+        let mut nonce = [0u8; 24];
+        let mut ct = vec![0u8; len];
+        r.read_exact(&mut nonce)?;
+        r.read_exact(&mut ct)?;
+        let ok = seal::decrypt(&fk, &nonce, &ct, &chunk_aad(&head, idx, last)).is_ok_and(|p| !last || p.is_empty());
+        if !ok {
+            return Ok(None);
+        }
+        if last {
+            fin_at = Some((pos, idx));
+        }
         pos = end;
         idx += 1;
     }
     drop(r);
-    let (cut_at, counter) = match last {
-        None => (HEADER_LEN as u64, 0),
-        Some((at, i, fin, len)) => {
-            // El último bloque tiene que ser íntegro y estar en su lugar.
-            file.seek(SeekFrom::Start(at + 4))?;
-            let mut nonce = [0u8; 24];
-            let mut ct = vec![0u8; len];
-            file.read_exact(&mut nonce)?;
-            file.read_exact(&mut ct)?;
-            seal::decrypt(&fk, &nonce, &ct, &chunk_aad(&head, i, fin)).map_err(|_| bad(BAD_FILE))?;
-            if fin {
-                (at, i)
-            } else {
-                (pos, i + 1)
-            }
-        }
+    let (cut_at, counter) = match fin_at {
+        Some((at, i)) => (at, i),
+        None => (pos, idx),
     };
     file.set_len(cut_at)?;
     file.seek(SeekFrom::Start(cut_at))?;
-    Ok(AppendState { file, fk, head, counter, len: cut_at })
+    Ok(Some(AppendState { file, fk, head, counter, len: cut_at, pending: Vec::new(), since: None }))
 }
 
 // ---------- Estado de la carpeta cifrada ----------
@@ -671,14 +814,14 @@ impl Shared {
         *self.last_use.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// La DEK para una operación de datos (cuenta como uso). Error si está bloqueada o convirtiendo.
+    /// La DEK para una operación de datos. Error si está bloqueada o convirtiendo. No cuenta como
+    /// actividad: una tarea de fondo o un agente que consulta no deben mantener la carpeta abierta (el
+    /// plazo de inactividad lo renuevan solo el desbloqueo y la actividad del usuario, `touch`).
     pub fn key(&self) -> io::Result<Arc<DataKey>> {
         if self.busy() {
             return Err(io::Error::new(io::ErrorKind::ResourceBusy, BUSY));
         }
-        let k = self.key.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(locked_err)?;
-        self.touch();
-        Ok(k)
+        self.key.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(locked_err)
     }
 
     /// La DEK sin mirar la conversión (la usa la propia conversión).
@@ -732,7 +875,7 @@ pub fn shared_for(p: &Path) -> Option<Arc<Shared>> {
 /// `.nte` y temporales.
 fn exempt(p: &Path) -> bool {
     let Some(name) = p.file_name().and_then(|n| n.to_str()) else { return true };
-    matches!(name, KEY_FILE | JOURNAL_FILE | README_FILE | VAULT_FILE) || name.ends_with(DOT_EXT) || name.ends_with(".ntenc") || name.ends_with(".tmp")
+    matches!(name, KEY_FILE | JOURNAL_FILE | README_FILE | VAULT_FILE | ROOTS_FILE | LOCK_FILE) || name.ends_with(DOT_EXT) || name.ends_with(".ntenc") || name.ends_with(".tmp")
 }
 
 fn with_ext(p: &Path) -> PathBuf {
@@ -912,20 +1055,60 @@ pub fn wrap_reader(file: File, dk: &DataKey) -> io::Result<EncReader<File>> {
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub data: PathBuf,
-    /// Carpetas de logs (la predeterminada `data/logs` y la elegida por el usuario, si hay).
+    /// Carpetas de logs: la primera es la predeterminada `data/logs` (de la app); las demás las eligió
+    /// el usuario (la actual y las usadas antes con el modo activo, de `datakey.roots`).
     pub logs: Vec<PathBuf>,
 }
 
 impl Layout {
-    pub fn new(data: &Path, extra_logs: Option<&Path>) -> Layout {
+    pub fn new(data: &Path, extra_logs: &[PathBuf]) -> Layout {
         let mut logs = vec![data.join("logs")];
-        if let Some(x) = extra_logs {
-            if !logs.iter().any(|l| l == x) {
-                logs.push(x.to_path_buf());
+        for x in extra_logs {
+            if !logs.contains(x) {
+                logs.push(x.clone());
             }
         }
         Layout { data: data.to_path_buf(), logs }
     }
+
+    /// Carpetas de logs elegidas por el usuario (no la de la app).
+    fn user_logs(&self) -> &[PathBuf] {
+        &self.logs[1..]
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct RootsFile {
+    logs: Vec<PathBuf>,
+}
+
+/// Carpetas de logs elegidas por el usuario que se usaron con el modo activo.
+pub fn read_roots(data: &Path) -> Vec<PathBuf> {
+    fs::read(data.join(ROOTS_FILE)).ok().and_then(|b| serde_json::from_slice::<RootsFile>(&b).ok()).map(|r| r.logs).unwrap_or_default()
+}
+
+/// Agrega carpetas de logs a `datakey.roots` (sin duplicados).
+pub fn add_roots(data: &Path, extra: &[PathBuf]) -> Result<(), String> {
+    let mut r = RootsFile { logs: read_roots(data) };
+    let before = r.logs.len();
+    for x in extra {
+        if !r.logs.contains(x) {
+            r.logs.push(x.clone());
+        }
+    }
+    if r.logs.len() == before && data.join(ROOTS_FILE).exists() {
+        return Ok(());
+    }
+    seal::write_atomic(&data.join(ROOTS_FILE), &serde_json::to_vec_pretty(&r).map_err(|e| e.to_string())?)
+}
+
+/// Una carpeta de logs elegida por el usuario no puede ser la de datos ni estar dentro de ella (salvo
+/// `data/logs`, que es la predeterminada): ahí se mezclaría con los datos de la app y los recorridos
+/// no la cubrirían completa. Compara rutas reales.
+pub fn logs_dir_conflicts(data: &Path, dir: &Path) -> bool {
+    let (Ok(d), Ok(x)) = (data.canonicalize(), dir.canonicalize()) else { return false };
+    let own = data.join("logs").canonicalize().ok();
+    x.starts_with(&d) && Some(&x) != own.as_ref() || d.starts_with(&x)
 }
 
 const DATA_STEMS: [&str; 3] = ["sessions", "settings", "topology"];
@@ -975,7 +1158,17 @@ pub struct Found {
     pub encrypted: bool,
 }
 
-fn consider(dir: &Path, e: &fs::DirEntry, accept: &dyn Fn(&str) -> bool, out: &mut Vec<Found>) {
+type Accept<'a> = &'a dyn Fn(&str, bool) -> bool;
+
+/// Nombre que genera la app para un log (`logfile::render` + `.log`): letras, dígitos, `-`, `_` y
+/// `.`, sin punto inicial. En una carpeta de logs elegida por el usuario solo se convierten estos en
+/// claro: un `.txt` o un `.log` ajeno con otros caracteres no se toca.
+fn app_log_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".log") else { return false };
+    !stem.is_empty() && !stem.starts_with('.') && stem.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn consider(dir: &Path, e: &fs::DirEntry, accept: Accept, out: &mut Vec<Found>) {
     let Ok(ft) = e.file_type() else { return };
     if !ft.is_file() {
         return;
@@ -988,20 +1181,20 @@ fn consider(dir: &Path, e: &fs::DirEntry, accept: &dyn Fn(&str) -> bool, out: &m
         Some(b) => (b.to_string(), true),
         None => (name.clone(), false),
     };
-    if logical.ends_with(".tmp") || !accept(&logical) {
+    if logical.ends_with(".tmp") || !accept(&logical, encrypted) {
         return;
     }
     out.push(Found { logical: dir.join(&logical), phys: e.path(), encrypted });
 }
 
-fn scan_dir(dir: &Path, accept: &dyn Fn(&str) -> bool, out: &mut Vec<Found>) {
+fn scan_dir(dir: &Path, accept: Accept, out: &mut Vec<Found>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         consider(dir, &e, accept, out);
     }
 }
 
-fn scan_logs(dir: &Path, depth: usize, skip: &[PathBuf], out: &mut Vec<Found>) {
+fn scan_logs(dir: &Path, depth: usize, skip: &[PathBuf], user: bool, out: &mut Vec<Found>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let Ok(ft) = e.file_type() else { continue };
@@ -1010,9 +1203,11 @@ fn scan_logs(dir: &Path, depth: usize, skip: &[PathBuf], out: &mut Vec<Found>) {
             if p.canonicalize().map(|c| skip.contains(&c)).unwrap_or(true) {
                 continue;
             }
-            scan_logs(&p, depth + 1, skip, out);
+            scan_logs(&p, depth + 1, skip, user, out);
         } else {
-            consider(dir, &e, &|n| ext_is(n, &["log", "txt"]), out);
+            // Cifrados: todos los de log (solo la app escribe `.nte`). En claro, en una carpeta del
+            // usuario, solo los nombres que genera la app.
+            consider(dir, &e, &|n, enc| if user && !enc { app_log_name(&strip_aside(n)) } else { ext_is(n, &["log", "txt"]) }, out);
         }
     }
 }
@@ -1021,16 +1216,25 @@ fn scan_logs(dir: &Path, depth: usize, skip: &[PathBuf], out: &mut Vec<Found>) {
 pub fn walk(layout: &Layout) -> Vec<Found> {
     let mut out = Vec::new();
     let d = &layout.data;
-    scan_dir(d, &data_root_file, &mut out);
-    scan_dir(&d.join("notes"), &|n| ext_is(n, &["txt"]), &mut out);
+    scan_dir(d, &|n, _| data_root_file(n), &mut out);
+    scan_dir(&d.join("notes"), &|n, _| ext_is(n, &["txt"]), &mut out);
     if let Ok(rd) = fs::read_dir(d.join("backups")) {
         for e in rd.flatten() {
             if e.file_type().is_ok_and(|t| t.is_dir()) {
-                scan_dir(&e.path(), &|_| true, &mut out);
+                scan_dir(&e.path(), &|_, _| true, &mut out);
             }
         }
     }
-    scan_dir(&d.join("mcp-audit"), &|n| n.starts_with("audit") && ext_is(n, &["jsonl"]), &mut out);
+    // Auditoría MCP y sus subcarpetas (las lecturas van aparte, en `mcp-audit/lecturas`).
+    let audit: Accept = &|n, _| n.starts_with("audit") && ext_is(n, &["jsonl"]);
+    scan_dir(&d.join("mcp-audit"), audit, &mut out);
+    if let Ok(rd) = fs::read_dir(d.join("mcp-audit")) {
+        for e in rd.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                scan_dir(&e.path(), audit, &mut out);
+            }
+        }
+    }
     // Una carpeta de logs no recorre las otras carpetas de la app que pueda contener.
     let canon = |p: &Path| p.canonicalize().ok();
     let skip: Vec<PathBuf> = ["notes", "backups", "mcp-audit", "tftp", "scripts", "plugins", "command-packs", "syslog"]
@@ -1039,17 +1243,18 @@ pub fn walk(layout: &Layout) -> Vec<Found> {
         .chain(canon(d))
         .collect();
     let mut seen: Vec<PathBuf> = Vec::new();
-    for l in &layout.logs {
+    for (i, l) in layout.logs.iter().enumerate() {
         let Some(c) = canon(l) else { continue };
         if seen.contains(&c) {
             continue;
         }
         seen.push(c.clone());
-        // Si la carpeta de logs es la de datos (o la contiene), solo se recorren sus subcarpetas de logs.
+        // Una carpeta de logs que es la de datos u otra de la app no se recorre como logs (con el modo
+        // activo no se acepta como carpeta de logs; `loss_check` nombra lo que quedaría sin convertir).
         if skip.contains(&c) {
             continue;
         }
-        scan_logs(l, 0, &skip, &mut out);
+        scan_logs(l, 0, &skip, i > 0, &mut out);
     }
     out.sort_by(|a, b| a.phys.cmp(&b.phys));
     out.dedup_by(|a, b| a.phys == b.phys);
@@ -1297,6 +1502,9 @@ fn decrypt_file(src: &Path, dest: &Path, dk: &DataKey, hook: Hook, prog: &mut dy
     let res = (|| {
         let mut out = create_temp(&tmp)?;
         let mut r = EncReader::new(File::open(src)?, dk, false)?;
+        if is_damaged(dest) {
+            r = r.salvage();
+        }
         let mut hasher = Sha256::new();
         let mut buf = Zeroizing::new(vec![0u8; WRITE_CHUNK]);
         loop {
@@ -1460,9 +1668,14 @@ pub fn convert(layout: &Layout, op: Op, dk: &DataKey, hook: Hook, progress: &mut
     Ok(rep)
 }
 
-/// Verifica todos los archivos cifrados (antes de descifrar). Err con la lista de los alterados.
+/// Verifica todos los archivos cifrados (antes de descifrar). Err con la lista de los alterados. Los
+/// apartados por dañados (`.dañado-`) no cuentan: se descifra lo que tienen de íntegro.
 pub fn verify_all(layout: &Layout, dk: &DataKey) -> Result<(), String> {
-    let bad: Vec<String> = walk(layout).into_iter().filter(|f| f.encrypted && hash_enc(&f.phys, dk).is_err()).map(|f| rel_of(layout, &f.logical)).collect();
+    let bad: Vec<String> = walk(layout)
+        .into_iter()
+        .filter(|f| f.encrypted && !is_damaged(&f.logical) && hash_enc(&f.phys, dk).is_err())
+        .map(|f| rel_of(layout, &f.logical))
+        .collect();
     if bad.is_empty() {
         Ok(())
     } else {
@@ -1491,6 +1704,7 @@ fn finish(layout: &Layout, op: Op, hook: Hook) -> Result<(), String> {
             sync_dir(&d.join(KEY_FILE));
             hook(Step::Finish).map_err(|e| e.to_string())?;
             let _ = fs::remove_file(d.join(README_FILE));
+            let _ = fs::remove_file(d.join(ROOTS_FILE));
         }
     }
     let _ = fs::remove_file(d.join(JOURNAL_FILE));
@@ -1515,6 +1729,7 @@ pub fn enable(layout: &Layout, password: &str, kdf: Kdf, hook: Hook, progress: &
     if k2.id != dk.id || *k2.key != *dk.key {
         return Err("La llave de datos escrita no coincide".into());
     }
+    add_roots(&layout.data, layout.user_logs())?;
     let dk = key.insert(dk);
     hook(Step::KeyFile).map_err(|e| e.to_string())?;
     let rep = convert(layout, Op::Encrypt, dk, hook, progress)?;
@@ -1522,10 +1737,10 @@ pub fn enable(layout: &Layout, password: &str, kdf: Kdf, hook: Hook, progress: &
     Ok(rep)
 }
 
-/// Retoma (o revierte, con la operación contraria) una conversión interrumpida.
+/// Retoma una activación interrumpida (para revertirla o desactivar: `disable`).
 pub fn resume(layout: &Layout, op: Op, dk: &DataKey, hook: Hook, progress: &mut dyn FnMut(&Progress)) -> Result<Report, String> {
     if op == Op::Decrypt {
-        verify_all(layout, dk)?;
+        return disable(layout, dk, &[], hook, progress).map_err(|e| e.message);
     }
     write_journal(layout, op)?;
     let rep = convert(layout, op, dk, hook, progress)?;
@@ -1533,10 +1748,86 @@ pub fn resume(layout: &Layout, op: Op, dk: &DataKey, hook: Hook, progress: &mut 
     Ok(rep)
 }
 
-/// Desactiva el cifrado: verifica todo antes de tocar nada, descifra y borra la llave de datos.
-#[cfg(test)]
-pub fn disable(layout: &Layout, dk: &DataKey, hook: Hook, progress: &mut dyn FnMut(&Progress)) -> Result<Report, String> {
-    resume(layout, Op::Decrypt, dk, hook, progress)
+/// Todos los `.nte` bajo la carpeta de datos y las de logs (recursivo, sin seguir enlaces).
+fn all_nte(layout: &Layout) -> Vec<PathBuf> {
+    fn rec(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() && depth < 10 {
+                rec(&e.path(), depth + 1, out);
+            } else if ft.is_file() && e.file_name().to_string_lossy().ends_with(DOT_EXT) {
+                out.push(e.path());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for root in std::iter::once(&layout.data).chain(layout.logs.iter()) {
+        rec(root, 0, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Lo que se perdería al desactivar (borrar `datakey.ntk` deja irrecuperable todo `.nte` que quede):
+/// carpetas de logs usadas con el modo activo que no están accesibles y archivos cifrados que la
+/// conversión no cubre. Vacío: se puede desactivar sin perder nada.
+pub fn loss_check(layout: &Layout) -> Vec<String> {
+    let mut out: Vec<String> = layout.user_logs().iter().filter(|r| !r.is_dir()).map(|r| format!("Carpeta de logs no disponible: {}", r.display())).collect();
+    let covered: std::collections::HashSet<PathBuf> = walk(layout).into_iter().filter(|f| f.encrypted).map(|f| f.phys).collect();
+    out.extend(all_nte(layout).into_iter().filter(|p| !covered.contains(p)).map(|p| format!("Archivo cifrado fuera de lo que se convierte: {}", p.display())));
+    out
+}
+
+/// Error de una conversión: el motivo y, si es por pérdida, la lista exacta que el usuario tiene que
+/// aceptar para continuar.
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvError {
+    pub message: String,
+    pub loss: Vec<String>,
+}
+
+impl From<String> for ConvError {
+    fn from(message: String) -> Self {
+        ConvError { message, loss: Vec::new() }
+    }
+}
+
+/// Desactiva el cifrado (o revierte una activación cortada). Antes de tocar nada: si algo quedaría
+/// irrecuperable, se detiene y lo nombra; solo sigue si `accept` es exactamente esa lista. Luego
+/// verifica todo, descifra y, antes de borrar la llave, vuelve a mirar que no quede ningún `.nte`
+/// fuera de lo aceptado.
+pub fn disable(layout: &Layout, dk: &DataKey, accept: &[String], hook: Hook, progress: &mut dyn FnMut(&Progress)) -> Result<Report, ConvError> {
+    let loss = loss_check(layout);
+    if !loss.is_empty() && loss != accept {
+        return Err(ConvError {
+            message: "Desactivar dejaría archivos cifrados sin su llave (no se podrían abrir nunca más). Revisa la lista: conecta la carpeta que falta o confirma que aceptas perderlos.".into(),
+            loss,
+        });
+    }
+    verify_all(layout, dk)?;
+    write_journal(layout, Op::Decrypt)?;
+    let rep = convert(layout, Op::Decrypt, dk, hook, progress)?;
+    let left: Vec<String> = all_nte(layout).into_iter().map(|p| format!("Archivo cifrado fuera de lo que se convierte: {}", p.display())).filter(|p| !accept.contains(p)).collect();
+    if !left.is_empty() {
+        return Err(ConvError { message: format!("Quedaron archivos cifrados sin convertir; la llave no se borró: {}", left.join(", ")), loss: Vec::new() });
+    }
+    finish(layout, Op::Decrypt, hook)?;
+    Ok(rep)
+}
+
+fn is_damaged(p: &Path) -> bool {
+    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(DAMAGED))
+}
+
+/// Carpeta sin `datakey.ntk` pero con señales de estar cifrada (el aviso, el sessions.json de aviso o
+/// los archivos de datos cifrados): no se abre en claro ni se escribe nada.
+pub fn orphan_markers(data: &Path) -> bool {
+    data.join(README_FILE).exists()
+        || is_stub_file(&data.join("sessions.json"))
+        || DATA_STEMS.iter().any(|s| data.join(format!("{s}.json{DOT_EXT}")).exists())
 }
 
 /// Archivos en claro dentro de una carpeta cifrada (los dejó una versión anterior u otra herramienta):

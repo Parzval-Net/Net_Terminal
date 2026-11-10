@@ -304,6 +304,10 @@ function Workspace({
           toast(`${script}: ${message}`, kind === "error" ? "error" : "info");
         }
       }),
+      // Modo portable cifrado: un archivo cifrado dañado se apartó y la app siguió en uno nuevo.
+      listen<string>("datacrypt-damaged", (e) =>
+        toast(`Un archivo cifrado estaba dañado y se apartó (sigue cifrado): ${e.payload}. Se siguió en un archivo nuevo; detalle en Ajustes › Credenciales.`, "error"),
+      ),
       // Carpeta cifrada bloqueada con «Detener las grabaciones de log al bloquear»: las pestañas lo reflejan.
       listen<string[]>("logs-stopped", (e) => {
         const conns = new Set(e.payload);

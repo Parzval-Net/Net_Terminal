@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 import { FileWarning, LockKeyhole, ShieldCheck, Unlock } from "lucide-react";
 import { useModal } from "../lib/useModal";
 import { masterStrength, strengthText } from "../lib/credentials";
-import { datacryptDisable, datacryptEnable, datacryptFixPlaintext, datacryptResume, datacryptSetPolicy, datacryptStatus, vaultCreate } from "../lib/api";
-import { type DataOp, type DataReport, type DataStatus, ENABLE_WARNINGS, enableCheck, reportText } from "../lib/dataCrypt";
+import { datacryptAckDamaged, datacryptDisable, datacryptEnable, datacryptFixPlaintext, datacryptResume, datacryptSetPolicy, datacryptStatus, vaultCreate } from "../lib/api";
+import { type DataOp, type DataReport, type DataStatus, ENABLE_WARNINGS, convError, enableCheck, reportText } from "../lib/dataCrypt";
 import type { Settings } from "../lib/settings";
 import { Item, Switch } from "./controls";
-import { ProgressBar, useConversionProgress } from "./DataGate";
+import { LossConfirm, ProgressBar, useConversionProgress } from "./DataGate";
 
 /**
  * Ajustes › Credenciales › Cifrado de la carpeta portable. Opcional, apagado por defecto y solo en la
@@ -18,9 +18,10 @@ export function DataCryptSettings({ settings, onChange, onVaultChanged }: { sett
   const [dialog, setDialog] = useState<"enable" | "disable" | null>(null);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [fixing, setFixing] = useState<DataOp | "fix" | null>(null);
+  const [loss, setLoss] = useState<string[]>([]);
   const refresh = () =>
     datacryptStatus()
-      .then((s) => setSt(s ?? null))
+      .then((s) => setSt(s ? { ...s, damaged: s.damaged ?? [] } : null))
       .catch(() => setSt(null));
   useEffect(() => {
     refresh();
@@ -50,8 +51,17 @@ export function DataCryptSettings({ settings, onChange, onVaultChanged }: { sett
     onVaultChanged();
   };
   const fail = (e: unknown) => {
-    setMsg({ text: String(e), error: true });
+    const ce = convError(e);
+    setMsg({ text: ce.message, error: true });
+    setLoss(ce.loss);
     refresh();
+  };
+  const resume = (op: DataOp, accept?: string[]) => {
+    setFixing(op);
+    datacryptResume(op, accept)
+      .then((r) => (setLoss([]), done(r, op)))
+      .catch(fail)
+      .finally(() => setFixing(null));
   };
 
   const body = !st.encrypted ? (
@@ -98,18 +108,31 @@ export function DataCryptSettings({ settings, onChange, onVaultChanged }: { sett
               <button
                 key={op}
                 disabled={!!fixing}
-                onClick={() => {
-                  setFixing(op);
-                  datacryptResume(op)
-                    .then((r) => done(r, op))
-                    .catch(fail)
-                    .finally(() => setFixing(null));
-                }}
+                onClick={() => resume(op)}
                 className="px-3 h-7 rounded-md border border-line hover:bg-hover disabled:opacity-50"
               >
                 {op === "encrypt" ? "Terminar de cifrar" : "Dejar en claro"}
               </button>
             ))}
+          </div>
+          {loss.length > 0 && <LossConfirm loss={loss} busy={!!fixing} onAccept={() => resume("decrypt", loss)} />}
+        </div>
+      )}
+      {st.damaged.length > 0 && (
+        <div className="rounded-lg border border-warn p-3 space-y-2" role="status">
+          <p className="text-[12px]">
+            {st.damaged.length === 1 ? "Un archivo cifrado estaba dañado" : `${st.damaged.length} archivos cifrados estaban dañados`} y se apartaron (siguen cifrados,
+            con «.dañado-» en el nombre); la app siguió en archivos nuevos. Al desactivar el cifrado se recupera lo que tenían de íntegro.
+          </p>
+          <ul className="text-[11.5px] font-mono break-all text-muted">
+            {st.damaged.map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+          </ul>
+          <div className="flex justify-end">
+            <button onClick={() => void datacryptAckDamaged().then(refresh)} className="px-3 h-7 rounded-md border border-line hover:bg-hover">
+              Entendido
+            </button>
           </div>
         </div>
       )}
@@ -301,6 +324,8 @@ function DisableDialog({ onClose, onDone }: { onClose: () => void; onDone: (r: D
   const [master, setMaster] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
+  const [loss, setLoss] = useState<string[]>([]);
+  const [accepted, setAccepted] = useState<string[] | undefined>(undefined);
   const p = useConversionProgress(running);
   const close = () => {
     if (running) return;
@@ -315,9 +340,12 @@ function DisableDialog({ onClose, onDone }: { onClose: () => void; onDone: (r: D
     const pw = master;
     setMaster("");
     try {
-      onDone(await datacryptDisable(pw));
+      onDone(await datacryptDisable(pw, accepted));
     } catch (e) {
-      setError(String(e));
+      const ce = convError(e);
+      setError(ce.message);
+      setLoss(ce.loss);
+      setAccepted(undefined);
     } finally {
       setRunning(false);
     }
@@ -341,12 +369,14 @@ function DisableDialog({ onClose, onDone }: { onClose: () => void; onDone: (r: D
           leerlos. Antes de tocar nada se verifica que todos los archivos cifrados estén íntegros. Las contraseñas siguen en la bóveda cifrada.
         </p>
         <Field label="Contraseña maestra" value={master} onChange={setMaster} autoComplete="current-password" />
-        {running && <ProgressBar p={p} label="Descifrando" />}
-        {error && (
+        {error && !accepted && (
           <p role="alert" className="text-[12px] text-danger">
             {error}
           </p>
         )}
+        {loss.length > 0 && !accepted && <LossConfirm loss={loss} busy={running} onAccept={() => setAccepted(loss)} />}
+        {accepted && <p className="text-[12px] text-warn">Pérdida aceptada: vuelve a escribir la contraseña y confirma.</p>}
+        {running && <ProgressBar p={p} label="Descifrando" />}
         <div className="flex justify-end gap-2">
           <button type="button" data-autofocus onClick={close} disabled={running} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover disabled:opacity-50">
             Cancelar
