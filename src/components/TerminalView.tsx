@@ -61,6 +61,7 @@ export interface TermController {
   connId: () => string;
   reconnect: () => void;
   openFind: () => void;
+  closeFind: () => void;
   focus: () => void;
   getSelection: () => string;
   isConnected: () => boolean;
@@ -80,6 +81,8 @@ export interface TermController {
   notice: (text: string) => void;
 }
 
+/** Coincidencias que cuenta la búsqueda (tope del addon: protege el rendimiento con historial grande). */
+const FIND_LIMIT = 1000;
 const NEWLINE = { cr: "\r", lf: "\n", crlf: "\r\n" } as const;
 /**
  * Comandos que muestran modelo y versión (abreviados o no): show version, display version,
@@ -117,6 +120,8 @@ interface Props {
    */
   onScreenHint?: (id: string) => void;
   register: (id: string, ctrl: TermController | null) => void;
+  /** La barra de búsqueda de la pestaña se abrió o cerró (la barra de estado refleja el botón Buscar). */
+  onFindState?: (id: string, open: boolean) => void;
   /** Catálogo de comandos: fuente de las sugerencias. */
   catalog?: CatalogVendor[];
 }
@@ -157,7 +162,7 @@ const NOOP = () => {};
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
-export const TerminalView = memo(function TerminalView({ id, session, active, visible = active, rect, onFocusPane, settings, theme, onStatus, onLog, logPath, onActivity, onEnableLegacy, onScreenHint, register, catalog }: Props) {
+export const TerminalView = memo(function TerminalView({ id, session, active, visible = active, rect, onFocusPane, settings, theme, onStatus, onLog, logPath, onActivity, onEnableLegacy, onScreenHint, register, onFindState, catalog }: Props) {
   const screenHintRef = useRef(onScreenHint);
   screenHintRef.current = onScreenHint;
   // "Visible" decide WebGL y el aviso de actividad; "active" (foco) decide el teclado.
@@ -238,7 +243,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       theme,
     });
     const fit = new FitAddon();
-    const search = new SearchAddon();
+    const search = new SearchAddon({ highlightLimit: FIND_LIMIT });
     term.loadAddon(fit);
     term.loadAddon(search);
     term.loadAddon(new WebLinksAddon((_e, uri) => openUrl(uri)));
@@ -963,6 +968,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         connect();
       },
       openFind: () => setFindOpen(true),
+      closeFind: () => closeFindRef.current(),
       focus: () => term.focus(),
       getSelection: () => term.getSelection(),
       isConnected: () => statusRef.current === "connected",
@@ -1114,9 +1120,21 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     ta.setAttribute("aria-activedescendant", `${listId}-${suggestList.sel}`);
   }, [suggestList, listId]);
 
-  const findNext = (back = false) => {
-    if (!query) return;
+  /**
+   * Busca `q` y deja el resultado a la vista. `incremental`: al escribir, la coincidencia actual se
+   * mantiene mientras siga valiendo (no salta a otra con cada letra). Sin coincidencias el addon no
+   * avisa en todos los casos: se marca aquí para que "Sin resultados" aparezca siempre.
+   */
+  const runFind = (q: string, back = false, incremental = false) => {
+    const addon = searchRef.current;
+    if (!addon) return;
+    if (!q) {
+      addon.clearDecorations();
+      setFound(null);
+      return;
+    }
     const opts = {
+      incremental,
       decorations: {
         matchOverviewRuler: "#e6c06b",
         activeMatchColorOverviewRuler: "#ef6b73",
@@ -1124,9 +1142,26 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         activeMatchBackground: "#ef6b73aa",
       },
     };
-    if (back) searchRef.current?.findPrevious(query, opts);
-    else searchRef.current?.findNext(query, opts);
+    const ok = back ? addon.findPrevious(q, opts) : addon.findNext(q, opts);
+    if (!ok) setFound({ index: -1, count: 0 });
   };
+  const findNext = (back = false) => runFind(query, back);
+
+  // Búsqueda en vivo mientras se escribe: con 150 ms de pausa, para no recorrer un historial grande
+  // en cada letra. El addon cuenta como máximo FIND_LIMIT coincidencias (se muestra "1000+").
+  useEffect(() => {
+    if (!findOpen) return;
+    const t = window.setTimeout(() => runFind(query, false, true), 150);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, findOpen]);
+
+  const onFindStateRef = useRef(onFindState);
+  onFindStateRef.current = onFindState;
+  useEffect(() => {
+    onFindStateRef.current?.(id, findOpen);
+    return () => onFindStateRef.current?.(id, false);
+  }, [id, findOpen]);
 
   const closeFind = () => {
     setFindOpen(false);
@@ -1134,6 +1169,8 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     searchRef.current?.clearDecorations();
     termRef.current?.focus();
   };
+  const closeFindRef = useRef(closeFind);
+  closeFindRef.current = closeFind;
 
   return (
     <div
@@ -1185,7 +1222,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
           }}
         >
           <h3 className="text-[13px] font-semibold">Bóveda de contraseñas bloqueada</h3>
-          <p className="text-[11.5px] text-muted">
+          <p className="text-[12px] text-muted">
             {session.name} tiene una contraseña guardada. Desbloquea la bóveda para completarla al conectar.
           </p>
           <VaultUnlock autoFocus onUnlocked={() => unlockResolve.current?.(true)} />
@@ -1211,12 +1248,18 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         />
       )}
       {findOpen && (
-        <div className="absolute top-2 right-4 flex items-center gap-1 bg-panel border border-line rounded-lg shadow-pop px-2 py-1.5 z-10">
+        <div
+          role="search"
+          aria-label="Buscar en la terminal"
+          className="absolute top-2 right-4 max-w-[calc(100%-2rem)] flex items-center gap-1 bg-panel border border-line rounded-lg shadow-pop px-2 py-1.5 z-10"
+        >
           <input
             autoFocus
-            className="field !h-7 !w-56"
-            placeholder="Buscar en la salida"
+            className="field !h-7 !w-48 min-w-0"
+            placeholder="Buscar en la terminal"
+            aria-label="Buscar en la terminal"
             value={query}
+            onFocus={(e) => e.currentTarget.select()}
             onChange={(e) => {
               setQuery(e.target.value);
               if (!e.target.value) setFound(null);
@@ -1226,18 +1269,26 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
               if (e.key === "Escape") closeFind();
             }}
           />
-          {query && found && (
-            <span className="min-w-12 text-center text-[11.5px] text-muted tabular-nums" aria-live="polite">
-              {found.count > 0 ? `${found.index + 1}/${found.count}` : "Sin resultados"}
-            </span>
-          )}
-          <IconBtn title="Anterior (Shift+Enter)" onClick={() => findNext(true)}>
+          {/* Región siempre montada: un lector de pantalla anuncia el cambio del conteo o "Sin resultados". */}
+          <span role="status" aria-live="polite" className="min-w-14 text-center text-[12px] tabular-nums">
+            {query && found ? (
+              found.count > 0 ? (
+                <span className="text-muted">
+                  {found.index >= 0 ? `${found.index + 1}/` : ""}
+                  {found.count >= FIND_LIMIT ? `${FIND_LIMIT}+` : found.count}
+                </span>
+              ) : (
+                <span className="text-warn font-medium">Sin resultados</span>
+              )
+            ) : null}
+          </span>
+          <IconBtn title="Coincidencia anterior (Shift+Enter)" onClick={() => findNext(true)}>
             <ChevronUp size={15} />
           </IconBtn>
-          <IconBtn title="Siguiente (Enter)" onClick={() => findNext()}>
+          <IconBtn title="Coincidencia siguiente (Enter)" onClick={() => findNext()}>
             <ChevronDown size={15} />
           </IconBtn>
-          <IconBtn title="Cerrar (Esc)" onClick={closeFind}>
+          <IconBtn title="Cerrar la búsqueda (Esc)" onClick={closeFind}>
             <X size={15} />
           </IconBtn>
         </div>
@@ -1312,8 +1363,8 @@ function PasteConfirm({ text, target, onDone }: { text: string; target: string; 
       <h3 id="paste-title" className="text-[13px] font-semibold mb-1">
         ¿Pegar {lines.length} líneas en {target}?
       </h3>
-      <p className="text-[11.5px] text-muted mb-2">Cada línea se ejecuta en el equipo como si la escribieras.</p>
-      <pre className="max-h-40 overflow-auto rounded-md bg-hover p-2 font-mono text-[11.5px] whitespace-pre">
+      <p className="text-[12px] text-muted mb-2">Cada línea se ejecuta en el equipo como si la escribieras.</p>
+      <pre className="max-h-40 overflow-auto rounded-md bg-hover p-2 font-mono text-[12px] whitespace-pre">
         {lines.slice(0, 12).join("\n")}
         {lines.length > 12 ? `\n… y ${lines.length - 12} líneas más` : ""}
       </pre>

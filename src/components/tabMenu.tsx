@@ -97,7 +97,10 @@ function closeManyItems(t: Tab, p: TabMenuHandlers): MenuItem[] {
   ];
 }
 
-/** Opciones de vista dividida (el booleano marca la opción actual como deshabilitada). */
+/**
+ * Opciones de vista dividida. El booleano marca la opción actual: quien abre el menú debe pasar
+ * `radio: true` a ContextMenu (menuitemradio con aria-checked y marca visible) en vez de deshabilitarla.
+ */
 export function splitMenuItems(split: SplitLayout | null, onSplit: (layout: SplitLayout | null) => void): MenuItem[] {
   const icons = { cols: <Columns2 size={13} />, rows: <Rows2 size={13} />, grid: <LayoutGrid size={13} /> };
   return [

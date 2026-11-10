@@ -108,9 +108,8 @@ pub fn save(dir: &Path, name: &str, content: &str) -> Result<(), String> {
 fn write_txt(dir: &Path, name: &str, content: &str) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = file_for(dir, name)?;
-    let tmp = path.with_extension("txt.tmp");
-    fs::write(&tmp, content).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    // Atómico (temporal único, fsync y rename): un corte a mitad de guardado deja la nota anterior intacta.
+    write_atomic(&path, content.as_bytes())
 }
 
 pub fn rename(dir: &Path, from: &str, to: &str) -> Result<String, String> {
@@ -494,6 +493,18 @@ mod tests {
         assert_eq!(list(&dir).len(), 1);
         delete(&dir, "cambio CR-123").unwrap();
         assert!(file_for(&dir, "..").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_only_the_note() {
+        let dir = std::env::temp_dir().join(format!("nt-notes-atomic-{}", uuid::Uuid::new_v4()));
+        save(&dir, "core", "primera").unwrap();
+        save(&dir, "core", "segunda versión").unwrap();
+        // Mismo nombre de archivo de siempre, contenido completo y sin temporales sobrantes.
+        let names: Vec<String> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["core.txt".to_string()]);
+        assert_eq!(read(&dir, "core").unwrap(), "segunda versión");
         let _ = fs::remove_dir_all(&dir);
     }
 

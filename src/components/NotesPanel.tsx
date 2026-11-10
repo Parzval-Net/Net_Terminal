@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { ITheme } from "@xterm/xterm";
 import { ArrowDownToLine, Check, FolderOpen, Lock, MoreHorizontal, Network, Pencil, Plus, Replace, Search, Send, SendHorizontal, ShieldCheck, Trash2, Workflow, X } from "lucide-react";
@@ -10,6 +10,9 @@ import { Compiled } from "../lib/highlight";
 import { fontStack } from "../lib/theme";
 import { isMac, modLabel } from "../lib/platform";
 import { PanelResize, panelClass } from "./PanelResize";
+
+/** Atajos del editor de notas: Ctrl o ⌘ más Enter (sin la tecla extra que usan los atajos globales de la app). */
+const sendKey = isMac ? "⌘" : "Ctrl+";
 
 interface NoteInfo {
   name: string;
@@ -63,6 +66,11 @@ interface Props {
   onResize: (w: number) => void;
   /** Ventana angosta: el panel se superpone a la terminal. */
   overlay?: boolean;
+  /** Por qué no se puede enviar ahora (Herramientas a la vista, sin conexión…); null si se puede. */
+  blocked?: string | null;
+  /** Vuelve a la última terminal (solo con Herramientas a la vista) y el nombre de esa pestaña. */
+  onReturn?: () => void;
+  returnLabel?: string;
   onClose: () => void;
   compiled: Compiled[];
   theme: ITheme;
@@ -95,6 +103,8 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     };
   }, [menuOpen]);
   const [notice, setNotice] = useState("");
+  const footId = useId();
+  const findInfoId = useId();
   const [diagrams, setDiagrams] = useState(() => {
     try {
       return localStorage.getItem(PREVIEW_KEY) === "1";
@@ -435,8 +445,14 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     flash("Selección agregada al final");
   };
 
+  const blocked = p.blocked ?? "Conecta una sesión para enviar.";
+  const lineReason = locked ? "Desbloquea la nota para enviar" : !p.target ? blocked : null;
+  const allReason = locked ? "Desbloquea la nota para enviar" : !p.target ? blocked : !content.trim() ? "La nota está vacía" : null;
+
   return (
     <aside
+      role="complementary"
+      aria-label="Notas"
       className={panelClass(!!p.overlay)}
       style={{ width: p.width }}
       onKeyDownCapture={activity}
@@ -476,7 +492,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
               ))}
             <select
               aria-label="Nota abierta"
-              className="field !h-7 flex-1 min-w-0 !text-[12.5px]"
+              className="field !h-7 flex-1 min-w-0 !text-[13px]"
               title={current ?? undefined}
               value={current ?? ""}
               onChange={(e) => open(e.target.value)}
@@ -511,7 +527,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
             <MoreHorizontal size={14} />
           </HeadBtn>
           {menuOpen && (
-            <div role="menu" className="absolute right-0 top-full mt-1 z-40 w-60 bg-panel border border-line rounded-lg shadow-pop p-1 text-[12.5px]">
+            <div role="menu" className="absolute right-0 top-full mt-1 z-40 w-60 bg-panel border border-line rounded-lg shadow-pop p-1 text-[13px]">
               {/* Panel angosto: diagramas y búsqueda pasan del encabezado a este menú. */}
               <MenuItem
                 className={NARROW_ONLY}
@@ -539,7 +555,13 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
               <MenuItem
                 icon={<Network size={14} />}
                 label="Insertar diagrama de red"
-                hint="Agrega al final de la nota un diagrama Mermaid de ejemplo y abre la vista de diagramas"
+                hint={
+                  locked
+                    ? "Desbloquea la nota primero"
+                    : !current
+                      ? "Elige o crea una nota primero"
+                      : "Agrega al final de la nota un diagrama Mermaid de ejemplo y abre la vista de diagramas"
+                }
                 disabled={locked || !current}
                 onClick={() => {
                   edit(content + (content && !content.endsWith("\n\n") ? (content.endsWith("\n") ? "\n" : "\n\n") : "") + NETWORK_TEMPLATE);
@@ -660,12 +682,14 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
             <button
               onClick={replaceAll}
               disabled={!hits.length}
+              aria-describedby={hits.length ? undefined : findInfoId}
+              title={hits.length ? `Reemplazar las ${hits.length} coincidencias` : find ? "No hay coincidencias para reemplazar" : "Escribe el texto a reemplazar"}
               className="px-2 h-7 shrink-0 rounded-md border border-line hover:bg-hover disabled:opacity-40"
             >
               Reemplazar todo
             </button>
           </div>
-          <p className="text-[11px] text-muted">
+          <p id={findInfoId} className="text-[11px] text-muted">
             {find ? `${hits.length >= 10000 ? "10.000+" : hits.length} ${hits.length === 1 ? "coincidencia" : "coincidencias"} en ${current ?? "la nota"}` : "Texto plano, sin expresiones regulares"}
           </p>
         </div>
@@ -683,7 +707,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
           theme={p.theme}
           font={fontStack(p.font)}
           fontSize={p.fontSize}
-          placeholder={"Comandos, plantillas o configuración.\nCtrl/⌘+Enter envía la línea o selección a la sesión."}
+          placeholder={`Comandos, plantillas o config.\n${sendKey}Enter: envía la línea o selección\n${sendKey}${isMac ? "⇧" : "Shift+"}Enter: envía todo`}
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
               e.preventDefault();
@@ -707,23 +731,48 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
       <footer className="border-t border-line px-2 py-1.5 space-y-1">
         {/* En un panel angosto los botones bajan a una segunda fila en vez de partir su texto. */}
         <div className="flex flex-wrap items-center gap-1">
-          <FootBtn onClick={sendSelectionOrLine} disabled={!p.target || locked} title={`${isMac ? "⌘" : "Ctrl+"}Enter`}>
+          <FootBtn
+            onClick={sendSelectionOrLine}
+            disabled={!!lineReason}
+            aria-describedby={lineReason ? footId : undefined}
+            title={lineReason ?? `Enviar la línea o selección (${sendKey}Enter)`}
+          >
             <SendHorizontal size={13} />
             {/* Panel angosto: texto corto para que los botones quepan en una fila. */}
             <span className="@[20rem]:hidden">Línea</span>
             <span className="hidden @[20rem]:inline">Línea / selección</span>
           </FootBtn>
-          <FootBtn onClick={() => p.onSend(content)} disabled={!p.target || locked || !content.trim()} title={`${isMac ? "⌘⇧" : "Ctrl+Shift+"}Enter`}>
+          <FootBtn
+            onClick={() => p.onSend(content)}
+            disabled={!!allReason}
+            aria-describedby={allReason ? footId : undefined}
+            title={allReason ?? `Enviar toda la nota (${sendKey}${isMac ? "⇧" : "Shift+"}Enter)`}
+          >
             <Send size={13} /> Todo
           </FootBtn>
-          <FootBtn onClick={capture} disabled={locked} title="Agregar a la nota el texto seleccionado en la terminal">
+          <FootBtn
+            onClick={capture}
+            disabled={locked}
+            aria-describedby={locked ? footId : undefined}
+            title={locked ? "Desbloquea la nota para capturar" : "Agregar a la nota el texto seleccionado en la terminal"}
+          >
             <ArrowDownToLine size={13} /> Capturar
           </FootBtn>
         </div>
-        <div className="flex items-center gap-2 text-[11px] text-muted h-6">
-          <span className="truncate flex-1 min-w-0" title={notice || (p.target ? `Destino: ${p.target}` : "Sin sesión conectada")}>
-            {notice || (p.target ? `Destino: ${p.target}` : "Sin sesión conectada")}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted min-h-6">
+          <span
+            id={footId}
+            role="status"
+            className={`flex-1 min-w-0 ${p.target || notice ? "truncate" : "text-warn leading-snug"}`}
+            title={notice || (p.target ? `Destino: ${p.target}` : blocked)}
+          >
+            {notice || (p.target ? `Destino: ${p.target}` : blocked)}
           </span>
+          {!p.target && !notice && p.onReturn && (
+            <button onClick={p.onReturn} className="shrink-0 h-6 px-2 rounded-md border border-line bg-panel text-fg hover:bg-hover max-w-full truncate">
+              Volver a {p.returnLabel ?? "la terminal"}
+            </button>
+          )}
           <span className="flex items-center gap-1 shrink-0">
             {locked ? <Lock size={11} /> : saved ? <Check size={11} /> : null}
             {locked ? "Bloqueada" : saved ? (unlocked ? "Cifrada" : "Guardado") : "Guardando…"}

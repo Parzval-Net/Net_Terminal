@@ -26,6 +26,11 @@ interface Props {
   onResize: (w: number) => void;
   /** Ventana angosta: el panel se superpone a la terminal. */
   overlay?: boolean;
+  /** Por qué no se puede ejecutar ahora (Herramientas a la vista, sin conexión…); null si se puede. */
+  blocked?: string | null;
+  /** Vuelve a la última terminal (solo con Herramientas a la vista) y el nombre de esa pestaña. */
+  onReturn?: () => void;
+  returnLabel?: string;
   catalog: CatalogVendor[];
   vendor: string;
   onVendor: (v: string) => void;
@@ -101,6 +106,7 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
   const [onlyFav, setOnlyFav] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({ Sistema: true });
   const [copied, setCopied] = useState<string | null>(null);
+  const footId = useId();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const vendor = p.catalog.find((v) => v.id === p.vendor) ?? p.catalog[0];
@@ -160,7 +166,7 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
   const platLabel = useCallback((id: string) => vendor?.platforms.find((x) => x.id === id)?.label ?? id, [vendor]);
 
   return (
-    <aside aria-label="Catálogo de comandos" className={panelClass(!!p.overlay)} style={{ width: p.width }}>
+    <aside role="complementary" aria-label="Catálogo de comandos" className={panelClass(!!p.overlay)} style={{ width: p.width }}>
       <PanelResize width={p.width} onResize={p.onResize} />
       <header className="flex items-center gap-1 px-2 h-9 border-b border-line">
         {/* Lista agrupada: con equipos de red y sistemas operativos ya no caben como pestañas. */}
@@ -218,7 +224,7 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
                 title={`Detectar ejecutando "${vendor.detectCommand}" en la sesión`}
                 aria-label="Detectar la plataforma"
                 aria-busy={p.detecting}
-                className="shrink-0 flex items-center gap-1 px-2 h-7 rounded-md border border-line text-[11.5px] hover:bg-hover disabled:opacity-40"
+                className="shrink-0 flex items-center gap-1 px-2 h-7 rounded-md border border-line text-[12px] hover:bg-hover disabled:opacity-40"
               >
                 <Radar size={12} className={p.detecting ? "animate-pulse" : ""} />
                 {/* Panel angosto: solo el ícono, para que el selector de plataforma se lea. */}
@@ -239,7 +245,7 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
             onKeyDown={(e) => e.key === "Escape" && setQuery("")}
           />
         </div>
-        <div className="flex items-center gap-3 text-[11.5px] text-muted whitespace-nowrap">
+        <div className="flex items-center gap-3 text-[12px] text-muted whitespace-nowrap">
           <label className="flex items-center gap-1.5 min-h-6" title="Solo consultas: oculta lo que cambia configuración o puede cortar servicio">
             <input type="checkbox" className="accent-[var(--accent)]" checked={onlyRead} onChange={(e) => setOnlyRead(e.target.checked)} />
             <span className="@[19rem]:hidden">Consultas</span>
@@ -286,6 +292,8 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
                     showVariants={!platform}
                     platLabel={platLabel}
                     target={p.target}
+                    blocked={p.blocked ?? "Conecta una sesión para ejecutar."}
+                    blockedId={footId}
                     copied={copied === c.cmd}
                     selected={selectedKey === `${vendor.id}:${c.cmd}`}
                     tabbable={tabKey === `${vendor.id}:${c.cmd}`}
@@ -298,14 +306,27 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
         {total === 0 && <p className="p-4 text-center text-[12px] text-muted">Sin resultados</p>}
       </div>
 
-      <footer className="flex items-center gap-2 px-3 py-1.5 border-t border-line text-[11px] text-muted">
-        <span
-          className="flex-1 min-w-0 truncate"
-          title={`${p.target ? `Destino: ${p.target}` : "Sin sesión conectada"}${platform ? ` · ${platLabel(platform)}` : ""} · verifica la sintaxis en tu versión`}
-        >
-          {p.target ? `Destino: ${p.target}` : "Sin sesión conectada"}
-          {platform ? ` · ${platLabel(platform)}` : ""} · verifica la sintaxis en tu versión
-        </span>
+      <footer className="px-3 py-1.5 border-t border-line text-[11px] text-muted">
+        {/* Sin destino se dice por qué y cómo seguir; con Herramientas a la vista, un botón vuelve a la terminal. */}
+        <div id={footId} role="status" className="flex items-center gap-2 min-w-0">
+          {p.target ? (
+            <span className="flex-1 min-w-0 truncate" title={`Destino: ${p.target}${platform ? ` · ${platLabel(platform)}` : ""}`}>
+              Destino: {p.target}
+              {platform ? ` · ${platLabel(platform)}` : ""}
+            </span>
+          ) : (
+            <span className="flex-1 min-w-0 text-warn leading-snug">{p.blocked ?? "Conecta una sesión para ejecutar."}</span>
+          )}
+          {!p.target && p.onReturn && (
+            <button
+              onClick={p.onReturn}
+              className="shrink-0 h-6 px-2 rounded-md border border-line bg-panel text-fg text-[11px] hover:bg-hover max-w-[55%] truncate"
+            >
+              Volver a {p.returnLabel ?? "la terminal"}
+            </button>
+          )}
+        </div>
+        <div className="mt-0.5 leading-snug">Verifica la sintaxis en tu versión{platform && !p.target ? ` · ${platLabel(platform)}` : ""}.</div>
       </footer>
     </aside>
   );
@@ -319,6 +340,8 @@ const CommandRow = memo(function CommandRow({
   showVariants,
   platLabel,
   target,
+  blocked,
+  blockedId,
   copied,
   selected,
   tabbable,
@@ -331,6 +354,8 @@ const CommandRow = memo(function CommandRow({
   showVariants: boolean;
   platLabel: (id: string) => string;
   target: string | null;
+  blocked: string;
+  blockedId: string;
   copied: boolean;
   selected: boolean;
   tabbable: boolean;
@@ -371,7 +396,7 @@ const CommandRow = memo(function CommandRow({
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
           <CmdText cmd={cmd} />
-          <p id={`${id}-d`} className="text-[11.5px] text-muted mt-0.5 leading-snug">{c.desc}</p>
+          <p id={`${id}-d`} className="text-[12px] text-muted mt-0.5 leading-snug">{c.desc}</p>
           {showVariants && c.variants?.length ? (
             <div className="mt-1 space-y-0.5">
               {c.variants.map((v) => (
@@ -407,11 +432,23 @@ const CommandRow = memo(function CommandRow({
         </button>
       </div>
       <div className={`flex flex-wrap gap-1 mt-1.5 ${showActions}`}>
-        <PanelBtn tabIndex={ti} disabled={!target} onClick={() => actions.run(c, cmd)} title={target ? `Ejecutar en ${target}` : "Conecta una sesión"}>
+        <PanelBtn
+          tabIndex={ti}
+          disabled={!target}
+          aria-describedby={target ? undefined : blockedId}
+          onClick={() => actions.run(c, cmd)}
+          title={target ? `Ejecutar en ${target}` : blocked}
+        >
           <Play size={11} /> Ejecutar
         </PanelBtn>
         {!cmd.includes("\n") && (
-          <PanelBtn tabIndex={ti} disabled={!target} onClick={() => actions.type(cmd)} title="Escribir en la terminal sin Enter">
+          <PanelBtn
+            tabIndex={ti}
+            disabled={!target}
+            aria-describedby={target ? undefined : blockedId}
+            onClick={() => actions.type(cmd)}
+            title={target ? "Escribir en la terminal sin Enter" : blocked}
+          >
             <TextCursorInput size={11} /> Escribir
           </PanelBtn>
         )}
@@ -441,7 +478,7 @@ function PanelBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
       {...props}
-      className="inline-flex items-center gap-1 px-2 h-6 rounded-md border border-line bg-panel text-[11.5px] hover:bg-hover disabled:opacity-40"
+      className="inline-flex items-center gap-1 px-2 h-6 rounded-md border border-line bg-panel text-[12px] hover:bg-hover disabled:opacity-40"
     />
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Send, Trash2 } from "lucide-react";
 
@@ -30,6 +30,7 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
   const [items, setItems] = useState<Entry[] | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const box = useRef<HTMLDivElement>(null);
+  const noteId = useId();
 
   useEffect(() => {
     invoke<Entry[]>("cmd_history", { key: historyKey })
@@ -78,6 +79,12 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
           </button>
         )}
       </div>
+      {/* Sin conexión los comandos no se pueden reenviar: se dice por qué (y no solo en el tooltip). */}
+      {!connected && !!items?.length && (
+        <p id={noteId} className="px-3 py-1.5 border-b border-line text-[11px] text-warn">
+          {tabName} no está conectada: reconecta para reenviar un comando.
+        </p>
+      )}
       <ul className="max-h-[320px] overflow-y-auto p-1">
         {items === null && <li className="px-2 py-3 text-muted">Cargando…</li>}
         {items?.length === 0 && (
@@ -92,6 +99,7 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
             <li key={e.ts + e.cmd}>
               <button
                 disabled={!connected}
+                aria-describedby={connected ? undefined : noteId}
                 title={connected ? `Reenviar a ${tabName}:\n${e.cmd}` : `Conecta ${tabName} para reenviar`}
                 onClick={() => {
                   onClose();

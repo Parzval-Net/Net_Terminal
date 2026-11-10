@@ -54,10 +54,8 @@ fn store<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string(value).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    crate::session_store::restrict(&tmp);
-    fs::rename(&tmp, path).map_err(|e| e.to_string())
+    // Atómico (temporal único, fsync y rename) y con permisos restringidos: mismo mecanismo que el resto.
+    crate::seal::write_atomic(path, serde_json::to_string(value).map_err(|e| e.to_string())?.as_bytes())
 }
 
 fn clean(value: &str, max: usize) -> Option<String> {
@@ -179,6 +177,25 @@ mod tests {
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("nt-hist-{tag}-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn store_is_atomic_and_leaves_no_temp_files() {
+        let dir = tmp("atomic");
+        recent_add(&dir, "ssh admin@192.0.2.1 22").unwrap();
+        cmd_add(&dir, "s1", "show version").unwrap();
+        recent_add(&dir, "ssh admin@192.0.2.2 22").unwrap();
+        // Mismos archivos de siempre y ningún temporal sobrante.
+        let mut names: Vec<String> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec![CMD_FILE.to_string(), RECENT_FILE.to_string()]);
+        assert_eq!(recent_list(&dir).len(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(dir.join(RECENT_FILE)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

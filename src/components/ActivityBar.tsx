@@ -10,6 +10,8 @@ interface Props {
   sidebarOpen: boolean;
   /** Barra de sesiones flotante activa (ajuste) y cerrada: el mouse sobre Sesiones la abre. */
   floatingSessions: boolean;
+  /** La app ocultó la barra acoplada porque un panel derecho necesita el espacio (vuelve al cerrarlo). */
+  sessionsAutoHidden?: boolean;
   /** La vista de Herramientas es la que se ve ahora. */
   toolsActive: boolean;
   /** Herramientas montada (sus monitoreos y servidores siguen vivos aunque se vea una terminal). */
@@ -58,7 +60,11 @@ export const ActivityBar = memo(function ActivityBar(p: Props) {
     >
       <ActivityBtn
         label="Sesiones"
-        title={`Mostrar/ocultar sesiones (${modLabel}B)${p.floatingSessions ? "\nPasa el mouse para verlas sobre la terminal" : ""}`}
+        title={
+          p.sessionsAutoHidden
+            ? `Sesiones oculta mientras el panel derecho está abierto (ventana angosta). Clic o ${modLabel}B: verlas encima`
+            : `Mostrar/ocultar sesiones (${modLabel}B)${p.floatingSessions ? "\nPasa el mouse para verlas sobre la terminal" : ""}`
+        }
         sessions={{ enter: p.onSessionsEnter, leave: p.onSessionsLeave, floating: p.floatingSessions }}
         active={p.sidebarOpen}
         onClick={p.onSessions}

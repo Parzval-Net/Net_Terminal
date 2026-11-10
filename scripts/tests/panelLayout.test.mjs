@@ -1,0 +1,60 @@
+// Pruebas del reparto de ancho entre barra de sesiones, terminal y panel derecho:
+// `node scripts/tests/panelLayout.test.mjs` (Node 22.15+).
+import assert from "node:assert/strict";
+const { panelLayout, minTermFor, PANEL_MIN } = await import("../../src/lib/panelLayout.ts");
+
+const base = { rootW: 1024, vtabsW: 0, focusMode: false, sidebarOpen: true, sidebarW: 256, panelOpen: true, panelW: 307, minTerm: minTermFor(13) };
+const L = (o) => panelLayout({ ...base, ...o });
+
+// ~60 columnas a 13 px: 60 * 13 * 0,602 + 30
+assert.equal(minTermFor(13), 500);
+
+// Panel cerrado: nada se oculta ni se superpone.
+let r = L({ panelOpen: false });
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.panelOverlay], [false, true, false]);
+assert.equal(r.termWidth, 1024 - 44 - 256);
+
+// 1024 px: con sesiones no cabe (724 - 307 = 417 < 500): se oculta la barra y el panel se acopla entero.
+r = L({});
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.panelOverlay], [true, false, false]);
+assert.equal(r.panelWidth, 307);
+assert.equal(r.termWidth, 1024 - 44 - 307);
+assert.ok(r.termWidth >= 500, "la terminal conserva ~60 columnas");
+
+// 1280 px: cabe todo, la barra de sesiones se queda.
+r = L({ rootW: 1280 });
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.panelOverlay], [false, true, false]);
+assert.ok(r.termWidth >= 500);
+
+// Entre medio: el panel se achica (hasta 260) antes de ocultar la barra o superponerse.
+r = L({ rootW: 1100 });
+assert.equal(r.sidebarAutoHidden, false);
+assert.ok(r.panelWidth >= PANEL_MIN && r.panelWidth <= 307);
+assert.ok(r.termWidth >= 500);
+
+// Pestañas verticales de 220 px a 1024: el panel se achica a ~260 en vez de superponerse.
+r = L({ vtabsW: 220, sidebarOpen: false });
+assert.equal(r.panelOverlay, false);
+assert.equal(r.panelWidth, PANEL_MIN);
+assert.ok(r.termWidth >= 500);
+
+// 720 px: ni sin barra cabe: panel superpuesto, reducido, con ~400 px de terminal a la vista.
+r = L({ rootW: 720 });
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.panelOverlay], [true, false, true]);
+assert.ok(r.panelWidth >= PANEL_MIN && r.panelWidth < 307);
+assert.equal(r.termWidth, 720 - 44, "superpuesto: la terminal ocupa todo el área");
+
+// Sin barra de sesiones elegida por el usuario: nunca se marca como oculta por la app.
+r = L({ rootW: 720, sidebarOpen: false });
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown], [false, false]);
+
+// Sin medir (ancho 0) o en modo foco: no se toca nada.
+r = L({ rootW: 0 });
+assert.deepEqual([r.sidebarAutoHidden, r.panelOverlay], [false, false]);
+r = L({ focusMode: true });
+assert.deepEqual([r.sidebarAutoHidden, r.panelOverlay], [false, false]);
+
+// La preferencia no cambia: al cerrar el panel la barra vuelve sola.
+assert.equal(L({ panelOpen: false }).sidebarShown, true);
+
+console.log("panelLayout: ok");

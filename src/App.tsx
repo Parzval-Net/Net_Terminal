@@ -15,6 +15,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { hopCloseNote, runningHops } from "./lib/hopTab";
 import { CloseManyMessage } from "./components/CloseManyMessage";
 import { CloseScope, summarizeClose, tabsToClose } from "./lib/closeAll";
+import { minTermFor, panelLayout } from "./lib/panelLayout";
 import { NotesPanel } from "./components/NotesPanel";
 import { CommandsPanel } from "./components/CommandsPanel";
 import { vendorFor } from "./lib/commands";
@@ -34,7 +35,7 @@ import type { ScriptLaunch } from "./components/ScriptLaunchDialog";
 import type { Section } from "./components/SettingsModal";
 import type { Macro, UpdateInfo } from "./lib/settings";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Pin, Sparkles, X as XIcon } from "lucide-react";
+import { BookOpen, NotebookPen, Pin, Search as SearchIcon, Sparkles, SquareTerminal, Wrench, X as XIcon, Zap, Plus } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { ConnStatus, Session, Tab, TabState, historyKey, tabTitle } from "./types";
 import { closeAllLabel, focusLabel, historyLabel, isMac, localOsVendor, modLabel, shortcutFor } from "./lib/platform";
@@ -218,20 +219,44 @@ function Workspace({
   const [notesWidth, setNotesWidth] = useState(() =>
     stored("notesWidth", Math.round(Math.max(300, Math.min(380, window.innerWidth * 0.3)))),
   );
-  // Ancho del área de terminal + panel: si el panel dejaría la terminal bajo MIN_TERM px, se
-  // superpone (salidas de show ... brief se parten en anchos menores).
-  const MIN_TERM = 560;
-  const [rowWidth, setRowWidth] = useState(0);
+  // Paneles derechos (Comandos y Notas). Orden de preferencia cuando la terminal se angosta:
+  // 1) el panel se acopla y la terminal se reajusta; 2) si no cabe el mínimo, se oculta la barra de
+  // sesiones acoplada mientras el panel está abierto (la preferencia del usuario no cambia: al cerrar
+  // el panel vuelve sola); 3) si aun así no cabe, el panel se superpone con un ancho reducido.
+  // Mínimo de terminal: ~60 columnas del tamaño de letra actual más el relleno de xterm.
+  const minTerm = minTermFor(settings.fontSize);
+  const [rootW, setRootW] = useState(0);
+  const [vtabsW, setVtabsW] = useState(0);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const rowRef = useRef<HTMLDivElement | null>(null);
+  const areaRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    const el = rowRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(([e]) => setRowWidth(e.contentRect.width));
-    ro.observe(el);
+    const root = rootRef.current;
+    const row = rowRef.current;
+    if (!root || !row) return;
+    const measure = () => {
+      setRootW(root.clientWidth);
+      // Las pestañas verticales ocupan el borde izquierdo de la fila: el área de terminal empieza tras ellas.
+      setVtabsW(areaRef.current?.offsetLeft ?? 0);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(root);
+    ro.observe(row);
+    // El área cambia sola al arrastrar el borde de las pestañas verticales (la fila no cambia de ancho).
+    if (areaRef.current) ro.observe(areaRef.current);
     return () => ro.disconnect();
   }, []);
-  const panelOverlay = rowWidth > 0 && rowWidth - notesWidth < MIN_TERM;
-  const panelWidth = panelOverlay ? Math.min(notesWidth, Math.max(260, rowWidth - 48)) : notesWidth;
+  const { sidebarAutoHidden, sidebarShown, panelOverlay, panelWidth } = panelLayout({
+    rootW,
+    vtabsW,
+    focusMode,
+    sidebarOpen,
+    sidebarW: sidebarWidth,
+    panelOpen: commandsOpen || notesOpen,
+    panelW: notesWidth,
+    minTerm,
+  });
   useEffect(() => persist("notesOpen", notesOpen), [notesOpen]);
   useEffect(() => persist("notesWidth", notesWidth), [notesWidth]);
 
@@ -530,6 +555,12 @@ function Workspace({
     [sessions, openTab],
   );
 
+  /** Pestañas con la barra de búsqueda abierta (el botón Buscar de la barra de estado lo refleja). */
+  const [findOpenIds, setFindOpenIds] = useState<Record<string, boolean>>({});
+  const onFindState = useCallback(
+    (tabId: string, open: boolean) => setFindOpenIds((m) => (!!m[tabId] === open ? m : { ...m, [tabId]: open })),
+    [],
+  );
   const activeTab = tabs.find((t) => t.id === activeId);
   const activeCtrl = () => (activeId ? controllers.current.get(activeId) : undefined);
   const activeConnected = !!activeTab && states[activeTab.id]?.status === "connected";
@@ -648,6 +679,24 @@ function Workspace({
   }, [tabs, states, activeId, visiblePanes]);
   /** Destino que muestran Notas y catálogo: la pestaña activa o el grupo de difusión. */
   const sendTarget = broadcastMode ? targetLabel(bcTarget, workspace) : activeConnected ? tabTitle(activeTab!) : null;
+  /**
+   * Por qué Notas y Catálogo no pueden enviar ahora. Con Herramientas a la vista nunca se envía a la
+   * "última terminal": el destino sería una pestaña que el usuario no está viendo. Se le dice y se le
+   * ofrece volver a ella (la sesión sigue conectada).
+   */
+  const lastTermTab = tabs.find((t) => t.id === lastTermRef.current);
+  const sendBlocked = sendTarget
+    ? null
+    : activeId === "tools"
+      ? lastTermTab
+        ? `Estás en Herramientas. Vuelve a ${tabTitle(lastTermTab)} para ejecutar.`
+        : "Estás en Herramientas. Abre una sesión para ejecutar."
+      : !activeTab
+        ? "Abre una sesión para ejecutar comandos."
+        : states[activeTab.id]?.status === "connecting"
+          ? `Conectando ${tabTitle(activeTab)}…`
+          : `${tabTitle(activeTab)} está desconectada. Reconecta para ejecutar.`;
+  const returnToTerminal = activeId === "tools" && lastTermTab ? () => setActiveId(lastTermTab.id) : undefined;
   const openBroadcast = (text: string, declared?: Risk) => {
     if (isBroadcastRunning()) return toast("Hay un envío a varias sesiones en curso", "error");
     if (isLabRunning()) return toast("El CLI Lab está ejecutando un script: espera a que termine o usa Detener", "error");
@@ -1191,6 +1240,9 @@ function Workspace({
     requestClose,
     requestCloseMany,
     toggleSidebar: () => {
+      // Con un panel derecho abierto en ventana angosta la barra queda oculta por la app: el atajo la
+      // muestra superpuesta (sin tocar la preferencia) en vez de alternar algo que no se ve.
+      if (sidebarAutoHidden) return setPeek((p) => !p);
       setPeek(false);
       setSidebarOpen((o) => !o);
     },
@@ -1202,18 +1254,18 @@ function Workspace({
      * clic fuera o al salir el mouse); si no, acopla u oculta.
      */
     clickSessions: () => {
-      if (settings.floatingSidebar && !sidebarOpen) {
+      if (sidebarAutoHidden) setPeek((p) => !p);
+      else if (settings.floatingSidebar && !sidebarOpen) {
         window.clearTimeout(peekTimer.current);
         setPeek(true);
-      }
-      else {
+      } else {
         setPeek(false);
         setSidebarOpen((o) => !o);
       }
     },
     peekEnter: () => {
       window.clearTimeout(peekTimer.current);
-      if (settings.floatingSidebar && !sidebarOpen && !focusMode) setPeek(true);
+      if (settings.floatingSidebar && !sidebarShown && !focusMode) setPeek(true);
     },
     peekLeave: () => {
       window.clearTimeout(peekTimer.current);
@@ -1422,6 +1474,11 @@ function Workspace({
     onTabLayout: h.setTabLayout,
   };
 
+  // Con la barra acoplada a la vista no queda barra flotante pendiente.
+  useEffect(() => {
+    if (sidebarShown) setPeek(false);
+  }, [sidebarShown]);
+
   // Barra flotante: Esc o un clic fuera la cierran (sin consumir la tecla: la terminal la sigue recibiendo).
   useEffect(() => {
     if (!peek) return;
@@ -1465,11 +1522,12 @@ function Workspace({
   );
 
   return (
-    <div className="h-full flex bg-bg text-fg relative">
+    <div ref={rootRef} className="h-full flex bg-bg text-fg relative overflow-clip">
       {!focusMode && (
         <ActivityBar
-          sidebarOpen={sidebarOpen || peek}
-          floatingSessions={settings.floatingSidebar && !sidebarOpen}
+          sidebarOpen={sidebarShown || peek}
+          floatingSessions={settings.floatingSidebar && !sidebarShown}
+          sessionsAutoHidden={sidebarAutoHidden}
           toolsActive={activeId === "tools"}
           toolsOpen={toolsOpen}
           alerts={monitors.downCount}
@@ -1488,9 +1546,9 @@ function Workspace({
           onSettings={h.openSettings}
         />
       )}
-      {!focusMode && sidebarOpen && sidebarEl()}
+      {!focusMode && sidebarShown && sidebarEl()}
       {/* Barra de sesiones flotante: encima de la terminal, sin empujarla. */}
-      {!focusMode && !sidebarOpen && settings.floatingSidebar && peek && (
+      {!focusMode && !sidebarShown && peek && (
         <div
           ref={peekRef}
           onMouseEnter={h.peekEnter}
@@ -1500,15 +1558,18 @@ function Workspace({
         >
           <div className="h-8 shrink-0 flex items-center gap-1 pl-3 pr-1.5 border-b border-line text-[11px] font-semibold uppercase tracking-wide text-muted">
             <span className="flex-1">Sesiones</span>
-            <button
-              onClick={h.pinSessions}
-              title="Fijar: acoplar la barra de sesiones junto a la terminal"
-              aria-label="Fijar la barra de sesiones"
-              className="h-6 px-1.5 flex items-center gap-1 rounded-md normal-case font-normal text-[12px] hover:text-fg hover:bg-hover"
-            >
-              <Pin size={13} />
-              Fijar
-            </button>
+            {/* Con la barra oculta por un panel derecho no se puede fijar: no cabría junto a la terminal. */}
+            {!sidebarAutoHidden && (
+              <button
+                onClick={h.pinSessions}
+                title="Fijar: acoplar la barra de sesiones junto a la terminal"
+                aria-label="Fijar la barra de sesiones"
+                className="h-6 px-1.5 flex items-center gap-1 rounded-md normal-case font-normal text-[12px] hover:text-fg hover:bg-hover"
+              >
+                <Pin size={13} />
+                Fijar
+              </button>
+            )}
           </div>
           <div className="flex-1 min-h-0">
             {sidebarEl({
@@ -1521,10 +1582,10 @@ function Workspace({
           </div>
         </div>
       )}
-      <main className="flex-1 min-w-0 flex flex-col">
+      <main className="flex-1 min-w-0 flex flex-col overflow-clip">
         {update_ && (
           <div className="shrink-0 border-b border-line bg-selected">
-            <div className="flex items-center gap-3 px-3 h-9 text-[12.5px]">
+            <div className="flex items-center gap-3 px-3 h-9 text-[13px]">
               <Sparkles size={14} className="text-accent shrink-0" />
               <span className="flex-1 truncate">
                 Nueva versión <b>{update_.latest}</b> disponible (tienes {update_.current}).
@@ -1575,7 +1636,7 @@ function Workspace({
 
         <div ref={rowRef} className="relative flex-1 min-h-0 flex">
         {settings.tabLayout === "vertical" && <VerticalTabs {...tabBarProps} />}
-        <div className="relative flex-1 min-w-0">
+        <div ref={areaRef} className="relative flex-1 min-w-0 overflow-clip">
           {tabs.map((t) => {
             const pane = splitOn ? split!.panes.indexOf(t.id) : -1;
             return (
@@ -1596,6 +1657,7 @@ function Workspace({
               onEnableLegacy={h.enableLegacy}
               onScreenHint={h.screenHint}
               register={register}
+              onFindState={onFindState}
               catalog={catalog}
             />
             );
@@ -1604,7 +1666,7 @@ function Workspace({
             <SplitPanes split={split!} tabs={tabs} states={states} activeId={activeId} onPick={h.pickPane} onFocus={setActiveId} />
           )}
           {toolsOpen && (
-            <Suspense fallback={null}>
+            <Suspense fallback={<ToolsLoading active={activeId === "tools"} />}>
               <ToolsView
                 active={activeId === "tools"}
                 onBack={h.toggleTools}
@@ -1625,13 +1687,24 @@ function Workspace({
             </Suspense>
           )}
           {tabs.length === 0 && activeId !== "tools" && (
-            <EmptyState onLocal={newLocal} onPalette={() => setPaletteOpen(true)} onQuick={h.openQuick} onNew={() => setModal({})} onTools={h.toggleTools} />
+            <EmptyState
+              onLocal={newLocal}
+              onPalette={() => setPaletteOpen(true)}
+              onQuick={h.openQuick}
+              onNew={() => setModal({})}
+              onTools={h.toggleTools}
+              onCommands={h.toggleCommands}
+              onNotes={h.toggleNotes}
+            />
           )}
         </div>
         {!focusMode && commandsOpen && (
           <CommandsPanel
             width={panelWidth}
             overlay={panelOverlay}
+            blocked={sendBlocked}
+            onReturn={returnToTerminal}
+            returnLabel={lastTermTab ? tabTitle(lastTermTab) : undefined}
             onResize={h.resizeNotes}
             catalog={catalog}
             vendor={settings.catalogVendor}
@@ -1655,6 +1728,9 @@ function Workspace({
           <NotesPanel
             width={panelWidth}
             overlay={panelOverlay}
+            blocked={sendBlocked}
+            onReturn={returnToTerminal}
+            returnLabel={lastTermTab ? tabTitle(lastTermTab) : undefined}
             onResize={h.resizeNotes}
             onClose={h.closeNotes}
             compiled={notesRules}
@@ -1696,7 +1772,8 @@ function Workspace({
           aiEnabled={settings.mcpEnabled}
           onAi={h.openAi}
           onSaveAs={activeTab ? () => h.saveTabAs(activeTab.id) : undefined}
-          onFind={() => h.find()}
+          findOpen={!!activeId && !!findOpenIds[activeId]}
+          onFind={() => (activeId && findOpenIds[activeId] ? controllers.current.get(activeId)?.closeFind() : h.find())}
           onHistory={() => (historyFor ? h.closeHistory() : h.openHistory())}
           historyOpen={!!historyFor}
         />}
@@ -1925,40 +2002,63 @@ function Workspace({
   );
 }
 
+/** Mientras se descarga el módulo de Herramientas (primera apertura): estado visible y anunciado, no un hueco en blanco. */
+function ToolsLoading({ active }: { active: boolean }) {
+  if (!active) return null;
+  return (
+    <div role="status" className="absolute inset-0 grid place-items-center text-muted">
+      <div className="flex items-center gap-2">
+        <span aria-hidden className="w-4 h-4 rounded-full border-2 border-line border-t-accent animate-spin" />
+        Cargando Herramientas…
+      </div>
+    </div>
+  );
+}
+
 function EmptyState({
   onLocal,
   onPalette,
   onQuick,
   onNew,
   onTools,
+  onCommands,
+  onNotes,
 }: {
   onLocal: () => void;
   onPalette: () => void;
   onQuick: () => void;
   onNew: () => void;
   onTools: () => void;
+  onCommands: () => void;
+  onNotes: () => void;
 }) {
-  const items: [React.ReactNode, string, () => void][] = [
-    ["Conexión rápida sin guardar", `${modLabel}O`, onQuick],
-    ["Buscar sesión", `${modLabel}K`, onPalette],
-    ["Nueva sesión guardada", `${modLabel}N`, onNew],
-    ["Terminal local", `${modLabel}T`, onLocal],
-    ["Herramientas de red", `${modLabel}E`, onTools],
+  // Mismos nombres, íconos y atajos que la barra de actividad y la paleta: una sola forma de llamar a cada cosa.
+  const items: [React.ReactNode, React.ReactNode, string, () => void][] = [
+    [<Zap size={15} />, "Conexión rápida sin guardar", `${modLabel}O`, onQuick],
+    [<SearchIcon size={15} />, "Buscar sesión", `${modLabel}K`, onPalette],
+    [<Plus size={15} />, "Nueva sesión guardada", `${modLabel}N`, onNew],
+    [<SquareTerminal size={15} />, "Terminal local", `${modLabel}T`, onLocal],
+    [<Wrench size={15} />, "Herramientas de red", `${modLabel}E`, onTools],
+    [<BookOpen size={15} />, "Catálogo de comandos", `${modLabel}L`, onCommands],
+    [<NotebookPen size={15} />, "Notas", `${modLabel}J`, onNotes],
   ];
+  // m-auto en vez de place-items-center: con poca altura la lista se desplaza en lugar de cortarse arriba.
   return (
-    <div className="absolute inset-0 grid place-items-center">
-      <div className="w-[340px]">
-        <img src={logo} alt="" className="w-16 h-16 -ml-2 mb-2" draggable={false} />
+    <div className="absolute inset-0 flex overflow-y-auto">
+      <div className="w-[340px] max-w-full m-auto px-4 py-4">
+        <img src={logo} alt="" className="w-16 h-16 -ml-2 mb-2 [@media(max-height:560px)]:hidden" draggable={false} />
         <h1 className="text-[18px] font-semibold mb-1">NetTerminal</h1>
-        <p className="text-muted mb-5">SSH, Telnet y Serial sin complicaciones.</p>
-        <div className="space-y-1">
-          {items.map(([label, key, fn], i) => (
+        <p className="text-muted mb-4">SSH, Telnet y Serial sin complicaciones.</p>
+        <div className="space-y-0.5">
+          {items.map(([icon, label, key, fn], i) => (
             <button
               key={i}
               onClick={fn}
-              className="w-full flex items-center justify-between px-3 h-9 rounded-lg hover:bg-hover text-left"
+              title={`${label} (${key})`}
+              className="w-full flex items-center gap-2.5 px-3 h-9 rounded-lg hover:bg-hover text-left"
             >
-              {label}
+              <span aria-hidden className="text-muted shrink-0">{icon}</span>
+              <span className="flex-1 min-w-0 truncate">{label}</span>
               <kbd className="text-[11px] text-muted font-sans">{key}</kbd>
             </button>
           ))}

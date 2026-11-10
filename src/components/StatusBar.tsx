@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useId, useState } from "react";
 import { ArrowLeftRight, KeyRound, Bot, Circle, CircleCheck, CircleDashed, CircleDot, CircleOff, History, RotateCcw, Search, ShieldAlert, ShieldCheck, Unplug } from "lucide-react";
 import {
   DeviceInfo,
@@ -71,6 +71,7 @@ export const StatusBar = memo(function StatusBar({
   findOpen,
   device,
 }: Props) {
+  const logHintId = useId();
   const ai = aiEnabled && (
     <BarBtn onClick={onAi} title="Servidor MCP activo: los agentes de IA pueden conectarse" aria-label="Servidor MCP activo: agentes de IA" className="!text-accent">
       <Bot size={12} />
@@ -79,7 +80,7 @@ export const StatusBar = memo(function StatusBar({
   );
   if (!tab || !state)
     return (
-      <div className="@container h-7 shrink-0 flex items-center justify-end px-3 bg-chrome border-t border-line text-[11.5px] text-muted">
+      <div className="@container h-7 shrink-0 flex items-center justify-end px-3 bg-chrome border-t border-line text-[12px] text-muted">
         {ai}
       </div>
     );
@@ -89,7 +90,7 @@ export const StatusBar = memo(function StatusBar({
   const StatusIcon = statusIcon[state.status];
 
   return (
-    <div className="@container h-7 shrink-0 flex items-center gap-2 @[40rem]:gap-3 px-3 bg-chrome border-t border-line text-[11.5px] text-muted">
+    <div className="@container h-7 shrink-0 flex items-center gap-2 @[40rem]:gap-3 px-3 bg-chrome border-t border-line text-[12px] text-muted">
       <span role="status" className="flex items-center gap-1.5 shrink-0 whitespace-nowrap" title={statusText[state.status]}>
         <StatusIcon size={12} aria-hidden style={{ color: statusColor[state.status] }} />
         {/* Barra muy angosta: queda el ícono de forma propia; el estado se lee igual (texto solo para lectores) y va en el tooltip. */}
@@ -156,7 +157,14 @@ export const StatusBar = memo(function StatusBar({
         <BarBtn
           onClick={onToggleLog}
           disabled={!connected && !logging}
-          title={logging ? `Grabando en ${state.logPath}. Clic para detener` : "Grabar la sesión en un archivo de texto"}
+          aria-describedby={!connected && !logging ? logHintId : undefined}
+          title={
+            logging
+              ? `Grabando en ${state.logPath}. Clic para detener`
+              : connected
+                ? "Grabar la sesión en un archivo de texto"
+                : "Conecta la sesión para grabar un log"
+          }
           aria-label="Grabar log"
           aria-pressed={logging}
           className={logging ? "!text-danger" : ""}
@@ -164,6 +172,11 @@ export const StatusBar = memo(function StatusBar({
           {logging ? <CircleDot size={12} /> : <Circle size={12} />}
           <span className={LBL}>Grabar log</span>
           {logging && <span className="sr-only">(grabando)</span>}
+          {!connected && !logging && (
+            <span id={logHintId} className="sr-only">
+              Conecta la sesión para grabar un log
+            </span>
+          )}
         </BarBtn>
         {/* Separador: Desconectar corta la sesión y no debe quedar pegado al interruptor del log. */}
         <span aria-hidden className="w-px h-3.5 mx-1 bg-line" />

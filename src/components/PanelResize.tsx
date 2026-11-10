@@ -35,7 +35,12 @@ export function PanelResize({
   );
 }
 
-/** Clases del panel: en ventanas angostas se superpone a la terminal en vez de achicarla. */
+/**
+ * Clases del panel: acoplado junto a la terminal o, si no cabe el mínimo de terminal, superpuesto con
+ * un borde marcado y sombra para que se vea que está encima (y no que la terminal se cortó).
+ */
 export const panelClass = (overlay: boolean) =>
   // @container: los paneles adaptan sus textos a su propio ancho (260 px o más), no al de la ventana.
-  `@container shrink-0 flex flex-col border-l border-line bg-chrome ${overlay ? "absolute right-0 top-0 bottom-0 z-30 shadow-pop" : "relative"}`;
+  `@container shrink-0 flex flex-col bg-chrome ${
+    overlay ? "absolute right-0 top-0 bottom-0 z-30 border-l-2 border-[var(--field-border)] shadow-pop" : "relative border-l border-line"
+  }`;

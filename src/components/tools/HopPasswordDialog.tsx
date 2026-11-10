@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { KeyRound } from "lucide-react";
 import { CredStatus, credStatus, needsUnlock, storageLabel } from "../../lib/credentials";
 import { isIpLiteral, validHopUser } from "../../lib/hopCred";
+import { useModal } from "../../lib/useModal";
 import { VaultUnlock } from "../VaultUnlock";
 
 /**
@@ -34,11 +35,9 @@ export function HopPasswordDialog({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [st, setSt] = useState<CredStatus | null>(null);
-  const first = useRef<HTMLInputElement>(null);
   const refresh = () => credStatus().then(setSt).catch(() => setSt(null));
   useEffect(() => {
     refresh();
-    first.current?.focus();
   }, []);
   const locked = needsUnlock(st);
   const valid = isIpLiteral(ip.trim()) && validHopUser(user.trim()) && pw.length > 0 && !/[\r\n\0]/.test(pw);
@@ -62,35 +61,30 @@ export function HopPasswordDialog({
     setPw("");
     onClose();
   };
+  // Roles, foco inicial (primer campo editable: la IP al agregar, la contraseña al editar), trampa de
+  // foco, Esc y devolución del foco, como el resto de los diálogos.
+  const modal = useModal({ onClose: close });
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={close}>
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={close}>
       <form
-        role="dialog"
-        aria-label={title}
+        {...modal.dialog}
         className="w-[400px] max-w-full bg-panel border border-line rounded-xl shadow-pop p-5 space-y-3"
         onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") {
-            e.preventDefault();
-            e.stopPropagation();
-            close();
-          }
-        }}
         onSubmit={(e) => {
           e.preventDefault();
           void save();
         }}
       >
-        <h2 className="text-[14px] font-semibold">{title}</h2>
+        <h2 id={modal.titleId} className="text-[14px] font-semibold">{title}</h2>
         {note && <p className="text-[12px] text-muted">{note}</p>}
         <div className="grid grid-cols-[1fr_1fr] gap-2">
           <label className="block min-w-0">
-            <span className="block mb-1 text-[11.5px] font-medium text-muted">IP del vecino</span>
-            <input ref={editable ? first : undefined} className="field font-mono" value={ip} readOnly={!editable} maxLength={45} placeholder="192.0.2.12" onChange={(e) => setIp(e.target.value)} />
+            <span className="block mb-1 text-[12px] font-medium text-muted">IP del vecino</span>
+            <input className="field font-mono" value={ip} readOnly={!editable} maxLength={45} placeholder="192.0.2.12" onChange={(e) => setIp(e.target.value)} />
           </label>
           <label className="block min-w-0">
-            <span className="block mb-1 text-[11.5px] font-medium text-muted">Usuario</span>
+            <span className="block mb-1 text-[12px] font-medium text-muted">Usuario</span>
             <input className="field" value={user} readOnly={!editable} maxLength={64} placeholder="noc" onChange={(e) => setUser(e.target.value)} />
           </label>
         </div>
@@ -101,9 +95,8 @@ export function HopPasswordDialog({
           </div>
         ) : (
           <label className="block">
-            <span className="block mb-1 text-[11.5px] font-medium text-muted">Contraseña</span>
+            <span className="block mb-1 text-[12px] font-medium text-muted">Contraseña</span>
             <input
-              ref={editable ? undefined : first}
               type="password"
               className="field"
               autoComplete="new-password"
@@ -114,12 +107,12 @@ export function HopPasswordDialog({
             />
           </label>
         )}
-        <p className="text-[11.5px] text-muted">
+        <p className="text-[12px] text-muted">
           Se guarda en la {storageLabel(st)}, solo para este vecino y este usuario. No se muestra, no va en logs ni en exportaciones y solo se escribe cuando el equipo pide la contraseña.
         </p>
-        {ip.trim() && !isIpLiteral(ip.trim()) && <p className="text-[11.5px] text-danger">La IP debe ser una dirección IPv4 o IPv6.</p>}
-        {user.trim() && !validHopUser(user.trim()) && <p className="text-[11.5px] text-danger">Usuario no válido (sin espacios ni símbolos raros).</p>}
-        {error && <p className="text-[11.5px] text-danger">{error}</p>}
+        {ip.trim() && !isIpLiteral(ip.trim()) && <p className="text-[12px] text-danger">La IP debe ser una dirección IPv4 o IPv6.</p>}
+        {user.trim() && !validHopUser(user.trim()) && <p className="text-[12px] text-danger">Usuario no válido (sin espacios ni símbolos raros).</p>}
+        {error && <p className="text-[12px] text-danger">{error}</p>}
         <div className="flex justify-end gap-2">
           <button type="button" onClick={close} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover">
             Cancelar
