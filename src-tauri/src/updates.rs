@@ -54,13 +54,23 @@ pub struct UpdateInfo {
 
 /// Si esta instalación puede actualizarse sola, o por qué no.
 pub fn blocker() -> Option<&'static str> {
-    if crate::session_store::is_portable() {
+    blocker_for(
+        crate::session_store::is_portable(),
+        cfg!(target_os = "linux"),
+        std::env::var_os("APPIMAGE").is_some(),
+        cfg!(target_os = "macos") && std::env::current_exe().is_ok_and(|p| p.starts_with("/Volumes/")),
+    )
+}
+
+/// Decisión pura de `blocker` (portable, Linux, AppImage presente, macOS corriendo desde el .dmg).
+fn blocker_for(portable: bool, linux: bool, appimage: bool, on_dmg: bool) -> Option<&'static str> {
+    if portable {
         return Some("En modo portable la actualización es manual: reemplaza los archivos de la carpeta.");
     }
-    if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_none() {
+    if linux && !appimage {
         return Some("Instalada con .deb: actualiza con el paquete nuevo o con apt.");
     }
-    if cfg!(target_os = "macos") && std::env::current_exe().is_ok_and(|p| p.starts_with("/Volumes/")) {
+    if on_dmg {
         return Some("La app corre desde el .dmg: cópiala a Aplicaciones para poder actualizarla.");
     }
     None
@@ -148,6 +158,59 @@ mod tests {
         assert_eq!(repo_from_url("https://github.com/dueño/app.git"), "dueño/app");
         assert_eq!(repo_from_url("https://github.com/a/b/"), "a/b");
         assert!(endpoint().ends_with("/releases/latest/download/latest.json"));
+    }
+
+    #[test]
+    fn blocker_portable_deb_dmg_and_normal() {
+        // Portable manda sobre todo lo demás, incluso con AppImage.
+        assert!(blocker_for(true, false, false, false).unwrap().contains("portable"));
+        assert!(blocker_for(true, true, true, false).unwrap().contains("portable"));
+        // Linux sin AppImage: instalada con .deb, no se actualiza sola.
+        assert!(blocker_for(false, true, false, false).unwrap().contains(".deb"));
+        // Linux AppImage, Windows y macOS instalada: sí se actualizan.
+        assert_eq!(blocker_for(false, true, true, false), None);
+        assert_eq!(blocker_for(false, false, false, false), None);
+        // macOS corriendo desde el .dmg montado: se pide copiarla a Aplicaciones.
+        assert!(blocker_for(false, false, false, true).unwrap().contains(".dmg"));
+        // APPIMAGE definida fuera de Linux no cambia nada.
+        assert_eq!(blocker_for(false, false, true, false), None);
+    }
+
+    #[test]
+    fn endpoint_is_https_release_latest_json() {
+        let e = endpoint();
+        assert!(e.starts_with("https://"), "{e}");
+        assert!(e.contains(&format!("/{}/releases/", repo())));
+        let url = e.parse::<tauri::Url>().unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert!(url.query().is_none() && url.fragment().is_none());
+    }
+
+    #[test]
+    fn repo_from_url_variants_and_validation() {
+        assert_eq!(repo_from_url("https://github.com/Org/Repo"), "Org/Repo");
+        assert_eq!(repo_from_url("https://github.com/Org/Repo.git/"), "Org/Repo");
+        assert!(valid_repo(repo_from_url("https://github.com/Org/Repo.git")));
+        for bad in ["", "/", "a/", "/b", "a//b", "a/b?x=1", "a/b#c", "a/b\\c", "a:b/c", "a/b\nc", "a/b c", "a/..%2f", "a@b/c"] {
+            assert!(!valid_repo(bad), "{bad:?}");
+        }
+        for ok in ["a/b", "A-b_c.d/e.f-g", "Org-Net/Some_Repo"] {
+            assert!(valid_repo(ok), "{ok}");
+        }
+    }
+
+    #[test]
+    fn updater_config_pins_a_minisign_key_and_no_static_endpoints() {
+        // La clave pública (base64 de "untrusted comment: minisign public key...") va en la app y
+        // los endpoints no se fijan en tauri.conf.json: salen de repo() en el código. El plugin
+        // de Tauri hace la comparación de versiones, la elección de plataforma y la verificación
+        // de firma; sin red no hay forma de ejercitarlas desde aquí.
+        let conf = include_str!("../tauri.conf.json");
+        let v: serde_json::Value = serde_json::from_str(conf).unwrap();
+        let key = v["plugins"]["updater"]["pubkey"].as_str().unwrap();
+        assert!(key.starts_with("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu"), "{key}");
+        assert!(v["plugins"]["updater"].get("endpoints").is_none());
+        assert!(v["plugins"]["updater"].get("dangerousInsecureTransportProtocol").is_none());
     }
 
     #[test]
