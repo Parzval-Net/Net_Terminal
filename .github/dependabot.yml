@@ -34,3 +34,9 @@ updates:
         update-types: ["minor", "patch"]
       tauri-cargo:
         patterns: ["tauri", "tauri-*"]
+    ignore:
+      # Mismas versiones que ya trae tauri/wry en Windows (ICoreWebView2Settings5::cast).
+      - dependency-name: "webview2-com"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "windows-core"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
