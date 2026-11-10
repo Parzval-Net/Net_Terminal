@@ -5,7 +5,7 @@
   {
    "id": "junos-evo",
    "label": "Junos OS Evolved (PTX, ACX, QFX5220...)",
-   "detect": "Junos OS Evolved|junos-evo|\\d+\\.\\d+R\\d+[\\w.\\-]*-EVO",
+   "detect": "Junos OS Evolved|junos-evo|\\d+\\.\\d+R\\d+(?:[.\\-][\\w.\\-]*)?-EVO",
    "note": "Kernel Linux, modelo por nodos (re0, fpc0). La versión termina en -EVO. Evaluar antes que 'junos'."
   },
   {

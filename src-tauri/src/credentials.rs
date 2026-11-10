@@ -665,13 +665,20 @@ impl Credentials {
     // ---------- Exportación e importación cifrada (bundle.rs) ----------
 
     /// La bóveda se puede usar ahora sin pedir nada: con llavero (se crea sola si falta) o con
-    /// contraseña maestra ya desbloqueada.
+    /// contraseña maestra ya desbloqueada. Exportar e importar ya no lo consultan: toman la llave una
+    /// sola vez con `hold` (un chequeo previo podía vencer antes del uso); queda para las pruebas.
+    #[cfg(test)]
     pub fn usable(&self) -> bool {
         match self.read() {
             Ok(Some((h, _))) if h.mode == Mode::Master => {
                 let mut inner = lock(&self.inner);
                 inner.expire(Instant::now(), SystemTime::now());
-                inner.key.is_some()
+                // Consultarla para usarla enseguida cuenta como uso: renueva el plazo del bloqueo automático.
+                let ok = inner.key.is_some();
+                if ok {
+                    inner.touch();
+                }
+                ok
             }
             Ok(Some(_)) => self.keys.get().is_ok_and(|k| k.is_some_and(|k| k.len() == 32)),
             Ok(None) => self.keyring_available(),
@@ -710,15 +717,43 @@ impl Credentials {
         }
     }
 
-    /// Copia de las contraseñas pedidas, para cifrarlas directo en un archivo de exportación.
-    /// Solo las que existen; nunca pasa por la interfaz. Error si la bóveda está bloqueada.
-    pub(crate) fn export_secrets(&self, sessions: &[String], hops: &[(String, String)], snmp: &[String]) -> Result<ExportedSecrets, String> {
+    /// Toma la llave una sola vez para toda una exportación o importación (bundle.rs): si el bloqueo
+    /// automático vence a mitad del flujo, lo que ya empezó termina igual, sin dejar sesiones
+    /// importadas sin sus contraseñas. Ok(None): no hay bóveda (y `create` es false). Error si está
+    /// bloqueada o no se puede crear.
+    pub(crate) fn hold(&self, create: bool) -> Result<Option<KeyHold>, String> {
         let mut inner = lock(&self.inner);
-        let Some((_, bytes)) = self.ensure_key(&mut inner, false)? else {
-            return Ok(ExportedSecrets::default());
-        };
+        if self.ensure_key(&mut inner, create)?.is_none() {
+            return Ok(None);
+        }
         let key = inner.key.as_ref().ok_or(LOCKED)?;
-        let entries = Self::decrypt(key, &bytes)?;
+        Ok(Some(KeyHold { key: Zeroizing::new(**key) }))
+    }
+
+    /// Lee y reescribe la bóveda con una llave tomada con `hold` (serializado con las demás escrituras).
+    fn update_held(&self, hold: &KeyHold, f: impl FnOnce(&mut Entries)) -> Result<(), String> {
+        let mut inner = lock(&self.inner);
+        let (h, bytes) = self.read()?.ok_or(LOCKED)?;
+        let mut entries = Self::decrypt(&hold.key, &bytes)?;
+        f(&mut entries);
+        self.encrypt_write(&hold.key, h.mode, h.kdf, h.salt, &entries)?;
+        if inner.key.is_some() {
+            inner.touch();
+        }
+        Ok(())
+    }
+
+    /// Copia de las contraseñas pedidas, para cifrarlas directo en un archivo de exportación.
+    /// Solo las que existen; nunca pasa por la interfaz. Usa la llave tomada con `hold`.
+    pub(crate) fn export_secrets(&self, hold: &KeyHold, sessions: &[String], hops: &[(String, String)], snmp: &[String]) -> Result<ExportedSecrets, String> {
+        let entries = {
+            let mut inner = lock(&self.inner);
+            let (_, bytes) = self.read()?.ok_or(LOCKED)?;
+            if inner.key.is_some() {
+                inner.touch();
+            }
+            Self::decrypt(&hold.key, &bytes)?
+        };
         let mut out = ExportedSecrets::default();
         for id in sessions {
             if check_id(id).is_ok() && !reserved_id(id) {
@@ -745,13 +780,17 @@ impl Credentials {
 
     /// Guarda en una sola escritura las contraseñas de una importación: de sesiones (ids ya
     /// existentes), secretos SNMP por perfil y vecinos. Valores inválidos o sobre el tope de
-    /// vecinos se omiten y se cuentan. `valid`: ids de sesiones existentes (limpieza de huérfanas).
+    /// vecinos se omiten y se cuentan. `valid`: ids de sesiones existentes para limpiar entradas
+    /// huérfanas; None si sessions.json no se leyó sano en este arranque (dañado, restaurado desde un
+    /// respaldo o con entradas descartadas): ahí no se borra nada, porque las "huérfanas" pueden ser
+    /// las contraseñas de las sesiones que faltan. Usa la llave tomada con `hold`.
     pub(crate) fn import_entries(
         &self,
+        hold: &KeyHold,
         sessions: &[(String, Zeroizing<String>)],
         snmp: &[(String, Zeroizing<String>)],
         hops: &[(String, String, Zeroizing<String>)],
-        valid: &[String],
+        valid: Option<&[String]>,
     ) -> Result<ImportCounts, String> {
         let ok_pw = |p: &str| !p.is_empty() && p.len() <= MAX_PASSWORD && !p.chars().any(|c| matches!(c, '\r' | '\n' | '\0'));
         let mut counts = ImportCounts::default();
@@ -759,7 +798,7 @@ impl Credentials {
         if !any {
             return Ok(counts);
         }
-        self.update(true, |e| {
+        self.update_held(hold, |e| {
             let mut put = |k: String, v: String| {
                 if let Some(mut old) = e.0.insert(k, v) {
                     old.zeroize();
@@ -799,10 +838,12 @@ impl Credentials {
                 }
                 counts.hops += 1;
             }
-            let stale: Vec<String> = e.0.keys().filter(|k| !k.starts_with(NS_SNMP) && !k.starts_with(NS_HOP) && !valid.contains(k)).cloned().collect();
-            for k in stale {
-                if let Some(mut v) = e.0.remove(&k) {
-                    v.zeroize();
+            if let Some(valid) = valid {
+                let stale: Vec<String> = e.0.keys().filter(|k| !k.starts_with(NS_SNMP) && !k.starts_with(NS_HOP) && !valid.contains(k)).cloned().collect();
+                for k in stale {
+                    if let Some(mut v) = e.0.remove(&k) {
+                        v.zeroize();
+                    }
                 }
             }
         })?;
@@ -863,6 +904,23 @@ impl Credentials {
         inner.last_tick = Some((wall, wait));
         Tick::Wait(wait)
     }
+}
+
+/// Llave de la bóveda tomada para una exportación o importación completa. Se borra al soltarse.
+pub(crate) struct KeyHold {
+    key: Zeroizing<[u8; 32]>,
+}
+
+/// Bloqueo automático guardado en los ajustes (`vaultAutoLockMin`, `vaultLockOnSleep`): Rust lo
+/// aplica al arrancar sin esperar a la interfaz. Valores inválidos o fuera de rango: apagado.
+pub fn autolock_from_settings(settings: Option<&serde_json::Map<String, serde_json::Value>>) -> (u32, bool) {
+    let Some(s) = settings else { return (0, false) };
+    let minutes = s
+        .get("vaultAutoLockMin")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|m| *m <= u64::from(AUTOLOCK_MAX_MIN))
+        .map_or(0, |m| m as u32);
+    (minutes, s.get("vaultLockOnSleep").and_then(serde_json::Value::as_bool).unwrap_or(false))
 }
 
 /// Contraseñas copiadas para una exportación. Se borran de memoria al soltarse.
@@ -1481,17 +1539,19 @@ mod tests {
         assert!(c.verify_master("otra-maestra").is_err());
         lock(&c.inner).throttle.retry_at = None;
         c.verify_master("maestra-larga").unwrap();
-        let e = c.export_secrets(&["s1".into(), "no-existe".into(), "hop:192.0.2.12|noc".into()], &[("192.0.2.12".into(), "noc".into())], &["p9".into()]).unwrap();
+        let held = c.hold(false).unwrap().unwrap();
+        let e = c.export_secrets(&held, &["s1".into(), "no-existe".into(), "hop:192.0.2.12|noc".into()], &[("192.0.2.12".into(), "noc".into())], &["p9".into()]).unwrap();
         assert_eq!(e.sessions.len(), 1, "solo lo pedido y existente; nunca un id reservado");
         assert_eq!(e.sessions[0].1.as_str(), "uno");
         assert_eq!(e.hops[0].2.as_str(), "vecino");
         assert!(e.snmp.is_empty());
         let r = c
             .import_entries(
+                &held,
                 &[("s3".into(), Zeroizing::new("tres".into())), ("s4".into(), Zeroizing::new("a\nb".into()))],
                 &[("p1".into(), Zeroizing::new("{\"community\":\"x\"}".into())), ("p2".into(), Zeroizing::new("no-json".into()))],
                 &[("192.0.2.40".into(), "admin".into(), Zeroizing::new("v".into()))],
-                &["s1".into(), "s2".into(), "s3".into()],
+                Some(&["s1".into(), "s2".into(), "s3".into()]),
             )
             .unwrap();
         assert_eq!(r, ImportCounts { sessions: 1, snmp: 1, hops: 1, skipped: 2 });
@@ -1499,8 +1559,54 @@ mod tests {
         assert!(c.has("snmp:p1").unwrap() && !c.has("snmp:p2").unwrap());
         assert!(c.has("s1").unwrap(), "las existentes se conservan");
         c.lock();
-        assert_eq!(c.export_secrets(&["s1".into()], &[], &[]).err().as_deref(), Some(LOCKED));
+        assert_eq!(c.hold(false).err().as_deref(), Some(LOCKED));
         assert!(!c.usable());
+        // La llave tomada antes de bloquear sigue sirviendo para terminar el flujo en curso.
+        assert_eq!(c.export_secrets(&held, &["s1".into()], &[], &[]).unwrap().sessions.len(), 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// La llave se toma una vez: aunque el bloqueo automático venza a mitad de la importación, las
+    /// contraseñas se guardan (no quedan sesiones importadas sin ellas).
+    #[test]
+    fn held_key_survives_autolock_and_orphans_kept_when_untrusted() {
+        let d = dir();
+        let c = Credentials::with(&d, true, Box::new(MemKeys::default()), FAST);
+        c.create("maestra-larga").unwrap();
+        c.set("s1", "uno", &["s1".into()]).unwrap();
+        c.set_autolock(1, false).unwrap();
+        let held = c.hold(true).unwrap().unwrap();
+        // Vence el plazo: la bóveda queda bloqueada para cualquier otro uso.
+        lock(&c.inner).last_use = Some((Instant::now() - Duration::from_secs(120), SystemTime::now() - Duration::from_secs(120)));
+        assert!(!c.usable());
+        // sessions.json no confiable (None): no se borra la entrada "huérfana" s1.
+        let r = c.import_entries(&held, &[("s2".into(), Zeroizing::new("dos".into()))], &[], &[], None).unwrap();
+        assert_eq!(r.sessions, 1);
+        c.unlock("maestra-larga").unwrap();
+        assert!(c.has("s1").unwrap() && c.has("s2").unwrap());
+        // Con sessions.json sano, sí se limpian las huérfanas.
+        let held = c.hold(false).unwrap().unwrap();
+        c.import_entries(&held, &[("s3".into(), Zeroizing::new("tres".into()))], &[], &[], Some(&["s2".into(), "s3".into()])).unwrap();
+        assert!(!c.has("s1").unwrap() && c.has("s2").unwrap());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Consultar `usable` antes de exportar o importar renueva el plazo del bloqueo automático.
+    #[test]
+    fn usable_touches_and_autolock_from_settings() {
+        let d = dir();
+        let c = Credentials::with(&d, true, Box::new(MemKeys::default()), FAST);
+        c.create("maestra-larga").unwrap();
+        c.set_autolock(5, false).unwrap();
+        lock(&c.inner).last_use = Some((Instant::now() - Duration::from_secs(200), SystemTime::now() - Duration::from_secs(200)));
+        assert!(c.usable());
+        let (at, _) = lock(&c.inner).last_use.unwrap();
+        assert!(at.elapsed() < Duration::from_secs(5), "usable renovó el último uso");
+        let m = |v: serde_json::Value| v.as_object().unwrap().clone();
+        assert_eq!(autolock_from_settings(None), (0, false));
+        assert_eq!(autolock_from_settings(Some(&m(serde_json::json!({"vaultAutoLockMin": 15, "vaultLockOnSleep": true})))), (15, true));
+        assert_eq!(autolock_from_settings(Some(&m(serde_json::json!({"vaultAutoLockMin": 99999})))), (0, false), "fuera de rango: apagado");
+        assert_eq!(autolock_from_settings(Some(&m(serde_json::json!({"vaultAutoLockMin": "15"})))), (0, false));
         std::fs::remove_dir_all(&d).unwrap();
     }
 

@@ -19,7 +19,7 @@
 //! Todo el cifrado ocurre aquí: la contraseña del archivo llega por IPC en su propio campo y se
 //! borra de memoria al soltarse; las contraseñas de la bóveda nunca pasan por la interfaz.
 
-use crate::credentials::{Credentials, ImportCounts, LOCKED};
+use crate::credentials::{Credentials, ExportedSecrets, ImportCounts};
 use crate::importers::{clean_host, clean_jump, clean_path, clean_serial, clean_text, clean_user, folder_from_path};
 use crate::models::{Session, SessionType};
 use crate::seal::{self, derive, random, Kdf};
@@ -27,8 +27,9 @@ use crate::session_store::SessionStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use zeroize::{Zeroize, Zeroizing};
 
 pub const MAGIC: &[u8; 8] = b"NTBUNDLE";
@@ -47,8 +48,20 @@ pub const BUNDLE_KDF: Kdf = Kdf { m: 256 * 1024, t: 3, p: 1 };
 const PAYLOAD_FORMAT: &str = "netterminal-bundle";
 /// Palabra que el usuario escribe para aceptar que el archivo lleve contraseñas.
 pub const CONFIRM_WORD: &str = "EXPORTAR";
-/// Vida de una vista previa sin confirmar (el contenido descifrado queda solo en memoria).
+/// Vida de una vista previa sin confirmar (el contenido descifrado queda solo en memoria). Se cuenta
+/// en tiempo real (también el tiempo suspendido) y la borra un temporizador, no solo la consulta.
 const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
+/// Cada cuánto revisa el temporizador si la vista previa venció.
+const PENDING_SWEEP: Duration = Duration::from_secs(30);
+/// Topes de Argon2id al leer un archivo: el de exportación (256 MiB) y 4 pasadas. Uno armado a mano no
+/// puede pedir más memoria ni más tiempo que eso al derivar.
+const MAX_KDF_M: u32 = 256 * 1024;
+const MAX_KDF_T: u32 = 4;
+/// Exportación con contraseñas cancelada en el diálogo de Rust (no es un error).
+pub const EXPORT_CANCELLED: &str = "Exportación cancelada: no se escribió ningún archivo";
+/// Botones de la confirmación nativa: el primero (el que toma Enter) es Cancelar.
+const BTN_CANCEL: &str = "Cancelar";
+const BTN_EXPORT: &str = "Exportar con contraseñas";
 
 const MAX_SESSIONS: usize = 5000;
 const MAX_FOLDERS: usize = 2000;
@@ -70,7 +83,7 @@ pub const VAULT_NEEDED: &str =
 /// sensibles que vienen apagadas (API local, servidores, algoritmos legacy, bloqueo de la bóveda),
 /// rutas locales, datos del equipo y lo que se exporta aparte o no tiene sentido en otro equipo.
 /// La interfaz tiene la misma lista (`src/lib/bundle.ts`); una prueba de Node exige que coincidan.
-pub const SETTINGS_EXCLUDED: [&str; 27] = [
+pub const SETTINGS_EXCLUDED: [&str; 29] = [
     // API local (MCP): token, encendido, puerto, aprobación y solo lectura.
     "mcpToken",
     "mcpEnabled",
@@ -106,10 +119,22 @@ pub const SETTINGS_EXCLUDED: [&str; 27] = [
     "macros",
     "customRules",
     "extraFolders",
+    // Acceso a los servidores integrados (interfaz, clientes permitidos, auto-detención): política local.
+    "serverGuard",
+    // Packs desactivados: preferencia local (apagar uno quita sus comandos y su detección de riesgo).
+    "disabledPacks",
 ];
 
-/// Ajustes de seguridad que el archivo solo puede encender, nunca apagar.
-pub const SETTINGS_SAFE_ONLY: [(&str, bool); 3] = [("logMask", true), ("confirmSend", true), ("confirmClose", true)];
+/// Ajustes que el archivo solo puede fijar en su valor seguro: las protecciones solo se encienden;
+/// copiar o pegar solo y grabar todo a disco solo se apagan. Clasificación completa: docs/TECNICO.md.
+pub const SETTINGS_SAFE_ONLY: [(&str, bool); 6] = [
+    ("logMask", true),
+    ("confirmSend", true),
+    ("confirmClose", true),
+    ("copyOnSelect", false),
+    ("rightClickPaste", false),
+    ("autoLog", false),
+];
 
 // ---------- Cabecera y cifrado ----------
 
@@ -147,8 +172,8 @@ impl Header {
             return Err(BAD_FILE.into());
         }
         let kdf = Kdf::decode(&b[10..22]);
-        // Un archivo armado a mano no puede pedir memoria sin tope al derivar.
-        if b[9] != KDF_ARGON2ID || !kdf.sane() || kdf.m > 512 * 1024 || kdf.t > 8 || kdf.p > 4 {
+        // Un archivo armado a mano no puede pedir memoria ni pasadas sin tope al derivar.
+        if b[9] != KDF_ARGON2ID || !kdf.sane() || kdf.m > MAX_KDF_M || kdf.t > MAX_KDF_T || kdf.p > 4 {
             return Err(BAD_FILE.into());
         }
         let mut salt = [0u8; 16];
@@ -364,6 +389,17 @@ impl Extras {
     }
 }
 
+/// Extras de una sesión para revisarlos en la vista previa (ya validados; la interfaz los muestra
+/// como texto y calcula el riesgo de cada línea de `on_connect`).
+#[derive(Serialize, Debug)]
+pub struct ExtrasView {
+    pub index: usize,
+    pub ssh_args: Option<String>,
+    pub tunnels: Option<Vec<crate::models::Tunnel>>,
+    pub on_connect: Option<String>,
+    pub legacy_ssh: Option<bool>,
+}
+
 fn pick(v: Option<String>, ok: impl Fn(&str) -> bool) -> Option<String> {
     v.map(|x| x.trim().to_string()).filter(|x| !x.is_empty() && ok(x))
 }
@@ -564,6 +600,8 @@ pub struct Summary {
     pub rules: usize,
     pub passwords: PasswordCounts,
     pub bytes: usize,
+    /// Ruta escrita (la elige Rust cuando el archivo lleva contraseñas).
+    pub path: String,
 }
 
 fn related(folder: &str, extra: &str) -> bool {
@@ -627,9 +665,8 @@ pub fn build_payload(src: Sources<'_>, opts: &ExportOpts, master: Option<&str>) 
         if p.confirm.trim() != CONFIRM_WORD {
             return Err(format!("Para incluir contraseñas escribe {CONFIRM_WORD} en la confirmación"));
         }
-        if !src.creds.usable() {
-            return Err(LOCKED.into());
-        }
+        // La llave se toma una sola vez para todo el flujo (no puede vencer entre el chequeo y la copia).
+        let hold = src.creds.hold(false)?;
         if src.creds.is_master() {
             src.creds.verify_master(master.unwrap_or(""))?;
         }
@@ -644,7 +681,10 @@ pub fn build_payload(src: Sources<'_>, opts: &ExportOpts, master: Option<&str>) 
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        let found = src.creds.export_secrets(&ids, &hops, &snmp)?;
+        let found = match &hold {
+            Some(h) => src.creds.export_secrets(h, &ids, &hops, &snmp)?,
+            None => ExportedSecrets::default(),
+        };
         let mut secrets = Secrets::default();
         for (id, pw) in &found.sessions {
             secrets.sessions.insert(id.clone(), pw.to_string());
@@ -702,8 +742,17 @@ pub struct BundleSession {
 pub struct Pending {
     pub token: String,
     created: Instant,
+    /// Hora del sistema al crearla: cuenta el tiempo suspendido, que el reloj monótono puede no contar.
+    created_wall: SystemTime,
     pub sessions: Vec<BundleSession>,
     pub secrets: Secrets,
+}
+
+impl Pending {
+    fn expired(&self) -> bool {
+        let real = SystemTime::now().duration_since(self.created_wall).unwrap_or(Duration::ZERO);
+        self.created.elapsed().max(real) >= PENDING_TTL
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -715,6 +764,8 @@ pub struct Preview {
     pub sessions: Vec<Session>,
     /// Índices de sesiones con comandos al conectar, túneles, argumentos extra o SSH legacy.
     pub advanced: Vec<usize>,
+    /// Esos extras, para revisarlos antes de importarlos (nunca se importan sin marcarlos).
+    pub extras: Vec<ExtrasView>,
     /// Índices de sesiones con contraseña en el archivo (nunca el valor).
     pub with_password: Vec<usize>,
     pub folders: Vec<String>,
@@ -761,11 +812,22 @@ pub fn inspect(bytes: &[u8], password: &str) -> Result<(Pending, Preview), Strin
         }
     }
     let mut secrets = payload.secrets.take().unwrap_or_default();
-    // Contraseñas que la bóveda no aceptaría, o de sesiones descartadas: no se ofrecen.
-    secrets.sessions.retain(|id, pw| pw_ok(pw) && sessions.iter().any(|b| &b.bundle_id == id));
+    // Contraseñas que la bóveda no aceptaría, o de sesiones descartadas: no se ofrecen. Las que se
+    // descartan se borran de memoria (los vecinos lo hacen al soltarse, ver `HopSecret`).
+    secrets.sessions.retain(|id, pw| {
+        let keep = pw_ok(pw) && sessions.iter().any(|b| &b.bundle_id == id);
+        if !keep {
+            pw.zeroize();
+        }
+        keep
+    });
     secrets.hops.retain(|h| pw_ok(&h.pw) && crate::credentials::hop_key(&h.ip, &h.user).is_ok());
     secrets.snmp.retain(|id, v| {
-        crate::snmp::check_profile(id).is_ok() && v.len() <= 4096 && serde_json::from_str::<Value>(v).is_ok_and(|j| j.is_object())
+        let keep = crate::snmp::check_profile(id).is_ok() && v.len() <= 4096 && serde_json::from_str::<Value>(v).is_ok_and(|j| j.is_object());
+        if !keep {
+            v.zeroize();
+        }
+        keep
     });
     let (settings, ignored_settings) = match payload.settings.take() {
         Some(s) => {
@@ -781,6 +843,18 @@ pub fn inspect(bytes: &[u8], password: &str) -> Result<(Pending, Preview), Strin
         created: clean_text(&payload.created, 40),
         sessions: sessions.iter().map(|b| Session { id: b.bundle_id.clone(), ..b.session.clone() }).collect(),
         advanced: sessions.iter().enumerate().filter(|(_, b)| b.extras.any()).map(|(i, _)| i).collect(),
+        extras: sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.extras.any())
+            .map(|(index, b)| ExtrasView {
+                index,
+                ssh_args: b.extras.ssh_args.clone(),
+                tunnels: b.extras.tunnels.clone(),
+                on_connect: b.extras.on_connect.clone(),
+                legacy_ssh: b.extras.legacy_ssh,
+            })
+            .collect(),
         with_password: sessions.iter().enumerate().filter(|(_, b)| secrets.sessions.contains_key(&b.bundle_id)).map(|(i, _)| i).collect(),
         folders: payload.folders.iter().filter_map(|f| folder_from_path(f)).take(MAX_FOLDERS).collect(),
         settings,
@@ -794,7 +868,7 @@ pub fn inspect(bytes: &[u8], password: &str) -> Result<(Pending, Preview), Strin
         snmp_profiles: secrets.snmp.keys().cloned().collect(),
         warnings,
     };
-    Ok((Pending { token, created: Instant::now(), sessions, secrets }, preview))
+    Ok((Pending { token, created: Instant::now(), created_wall: SystemTime::now(), sessions, secrets }, preview))
 }
 
 /// Vista previa pendiente (una a la vez). Vence a los 15 minutos.
@@ -813,14 +887,28 @@ impl PendingSlot {
     /// Saca la vista previa con ese token si sigue vigente (si no, la descarta igual).
     pub fn take(&self, token: &str) -> Option<Pending> {
         let mut g = self.slot();
-        let ok = g.as_ref().is_some_and(|p| p.token == token && p.created.elapsed() < PENDING_TTL);
+        let ok = g.as_ref().is_some_and(|p| p.token == token && !p.expired());
         if ok {
             g.take()
         } else {
-            if g.as_ref().is_some_and(|p| p.created.elapsed() >= PENDING_TTL) {
+            if g.as_ref().is_some_and(Pending::expired) {
                 *g = None;
             }
             None
+        }
+    }
+
+    /// Paso del temporizador: borra la vista previa con ese token si venció. true mientras siga
+    /// pendiente (hay que volver a revisar); false si ya no está (aplicada, cancelada, vencida u otra).
+    pub fn sweep(&self, token: &str) -> bool {
+        let mut g = self.slot();
+        match g.as_ref() {
+            Some(p) if p.token == token && p.expired() => {
+                *g = None;
+                false
+            }
+            Some(p) => p.token == token,
+            None => false,
         }
     }
 
@@ -887,9 +975,16 @@ pub fn apply(p: &Pending, store: &SessionStore, creds: &Credentials, fresh: &[Fr
     let want_pw = (opts.passwords && !p.secrets.sessions.is_empty())
         || (opts.hops && !p.secrets.hops.is_empty())
         || opts.snmp_profiles.iter().any(|id| p.secrets.snmp.contains_key(id));
-    if want_pw && !creds.usable() {
-        return Err(VAULT_NEEDED.into());
-    }
+    // La llave se toma una sola vez, antes de escribir nada: si el bloqueo automático vence a mitad
+    // del flujo, las sesiones ya importadas reciben igual sus contraseñas.
+    let hold = if want_pw {
+        match creds.hold(true) {
+            Ok(Some(h)) => Some(h),
+            _ => return Err(VAULT_NEEDED.into()),
+        }
+    } else {
+        None
+    };
 
     // Actualizaciones de sesiones existentes.
     let mut upd: Vec<(usize, Session)> = Vec::new();
@@ -949,7 +1044,12 @@ pub fn apply(p: &Pending, store: &SessionStore, creds: &Credentials, fresh: &[Fr
         .collect();
     let hops: Vec<(String, String, Zeroizing<String>)> =
         if opts.hops { p.secrets.hops.iter().map(|h| (h.ip.clone(), h.user.clone(), Zeroizing::new(h.pw.clone()))).collect() } else { Vec::new() };
-    let counts = creds.import_entries(&pw_sessions, &snmp, &hops, &store.ids())?;
+    // Con sessions.json dañado o restaurado no se limpian "huérfanas": pueden ser las de las sesiones que faltan.
+    let valid = store.trusted().then(|| store.ids());
+    let counts = match &hold {
+        Some(h) => creds.import_entries(h, &pw_sessions, &snmp, &hops, valid.as_deref())?,
+        None => ImportCounts::default(),
+    };
     if counts.skipped > 0 {
         warnings.push(format!("{} contraseñas no se guardaron (valor no válido o tope de 100 vecinos)", counts.skipped));
     }
@@ -970,20 +1070,29 @@ pub fn apply(p: &Pending, store: &SessionStore, creds: &Credentials, fresh: &[Fr
 
 // ---------- Comandos ----------
 
-/// Exporta al archivo elegido por el usuario (`.ntx`). `password`: la del archivo; `master`: la
-/// maestra, solo si se incluyen contraseñas con una bóveda de contraseña maestra.
-#[tauri::command(async)]
-pub fn bundle_export(
-    dest: String,
-    password: String,
-    master: Option<String>,
-    opts: ExportOpts,
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<Summary, String> {
-    let password = Zeroizing::new(password);
-    let master = master.map(Zeroizing::new);
-    check_password(&password)?;
-    let path = std::path::PathBuf::from(dest.trim());
+/// Agrega `.ntx` si el nombre elegido no lo trae.
+fn with_ntx(path: PathBuf) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ntx")) {
+        return path;
+    }
+    let mut s = path.into_os_string();
+    s.push(".ntx");
+    PathBuf::from(s)
+}
+
+/// Ruta real de `p` (si no existe, la de su carpeta más el nombre): para compararla con la carpeta
+/// protegida aunque haya enlaces simbólicos o `..` en el camino.
+fn real_path(p: &Path) -> Option<PathBuf> {
+    if let Ok(c) = p.canonicalize() {
+        return Some(c);
+    }
+    Some(p.parent()?.canonicalize().ok()?.join(p.file_name()?))
+}
+
+/// Destino válido para un `.ntx`: ruta absoluta que termina en `.ntx`, no es carpeta y no queda dentro
+/// de la carpeta de datos (que incluye la que sirven TFTP, HTTP y FTP, los respaldos y las notas): un
+/// archivo con contraseñas no debe quedar descargable por un equipo de la red.
+pub fn check_dest(path: &Path, data_dir: &Path) -> Result<PathBuf, String> {
     let ext_ok = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ntx"));
     if !path.is_absolute() || !ext_ok {
         return Err("El archivo debe terminar en .ntx".into());
@@ -991,6 +1100,72 @@ pub fn bundle_export(
     if path.is_dir() {
         return Err("Elige un archivo, no una carpeta".into());
     }
+    let real = real_path(path).ok_or("La carpeta de destino no existe")?;
+    let data = data_dir.canonicalize().unwrap_or_else(|_| data_dir.to_path_buf());
+    if real.starts_with(&data) || path.starts_with(data_dir) {
+        return Err(format!(
+            "No se puede guardar dentro de la carpeta de datos de NetTerminal ({}): sus archivos los sirven TFTP, HTTP y FTP. Elige otra carpeta.",
+            data_dir.display()
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+/// Texto de la confirmación nativa de una exportación con contraseñas.
+pub fn confirm_text(p: &PasswordCounts, path: &Path, master: bool) -> String {
+    let total = p.sessions + p.hops + p.snmp;
+    let mut parts = Vec::new();
+    for (n, one, many) in [(p.sessions, "de sesión", "de sesiones"), (p.hops, "de vecino", "de vecinos"), (p.snmp, "de perfil SNMP", "de perfiles SNMP")] {
+        if n > 0 {
+            parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+        }
+    }
+    let detail = if parts.is_empty() { "no se encontró ninguna".to_string() } else { parts.join(", ") };
+    let factor = if master {
+        "La contraseña maestra ya se verificó."
+    } else {
+        "La bóveda usa el llavero del sistema: no hay contraseña maestra que pedir. Confirma solo si tú iniciaste esta exportación."
+    };
+    format!(
+        "Se van a escribir {total} {} ({detail}) en:\n\n{}\n\nQuien tenga el archivo y su contraseña podrá usarlas. {factor}",
+        if total == 1 { "contraseña guardada" } else { "contraseñas guardadas" },
+        path.display()
+    )
+}
+
+/// Exporta un `.ntx`. Sin contraseñas, el destino lo elige la interfaz (`dest`). Con contraseñas,
+/// `dest` se ignora: Rust abre el diálogo de guardado y luego una confirmación nativa (Cancelar
+/// primero, el que toma Enter) con cuántas contraseñas de cada tipo y la ruta. Una llamada directa
+/// por IPC no puede escribirlas en otra parte ni sin que el usuario lo vea. `password`: la del
+/// archivo; `master`: la maestra, solo si se incluyen contraseñas con una bóveda de contraseña maestra.
+#[tauri::command(async)]
+pub fn bundle_export(
+    dest: Option<String>,
+    password: String,
+    master: Option<String>,
+    opts: ExportOpts,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Summary, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+    let password = Zeroizing::new(password);
+    let master = master.map(Zeroizing::new);
+    check_password(&password)?;
+    let with_pw = opts.passwords.as_ref().is_some_and(|p| p.sessions || p.snmp || !p.hops.is_empty());
+    let chosen = if with_pw {
+        let picked = app
+            .dialog()
+            .file()
+            .set_title("Guardar archivo cifrado con contraseñas")
+            .add_filter("Archivo cifrado de NetTerminal", &["ntx"])
+            .set_file_name("netterminal.ntx")
+            .blocking_save_file();
+        let Some(file) = picked else { return Err(EXPORT_CANCELLED.into()) };
+        with_ntx(file.into_path().map_err(|e| e.to_string())?)
+    } else {
+        PathBuf::from(dest.unwrap_or_default().trim())
+    };
+    let path = check_dest(&chosen, &state.data_dir)?;
     let notes_dir = state.data_dir.join("notes");
     let notes = if opts.notes {
         crate::notes::list(&notes_dir)
@@ -1009,15 +1184,29 @@ pub fn bundle_export(
         creds: &state.creds,
     };
     let (plain, mut sum) = build_payload(src, &opts, master.as_ref().map(|m| m.as_str()))?;
+    if with_pw {
+        let answer = app
+            .dialog()
+            .message(confirm_text(&sum.passwords, &path, state.creds.is_master()))
+            .title("¿Exportar contraseñas?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(BTN_CANCEL.into(), BTN_EXPORT.into()))
+            .blocking_show_with_result();
+        if answer != MessageDialogResult::Custom(BTN_EXPORT.into()) {
+            return Err(EXPORT_CANCELLED.into());
+        }
+    }
     let out = seal_bundle(&password, &plain, BUNDLE_KDF)?;
     sum.bytes = out.len();
     seal::write_atomic(&path, &out)?;
+    sum.path = path.display().to_string();
     Ok(sum)
 }
 
 /// Abre un `.ntx` y devuelve la vista previa (sin contraseñas). No escribe nada.
 #[tauri::command(async)]
-pub fn bundle_inspect(path: String, password: String, state: tauri::State<'_, crate::AppState>) -> Result<Preview, String> {
+pub fn bundle_inspect(path: String, password: String, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<Preview, String> {
+    use tauri::Manager;
     let password = Zeroizing::new(password);
     state.bundle.clear();
     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
@@ -1030,6 +1219,15 @@ pub fn bundle_inspect(path: String, password: String, state: tauri::State<'_, cr
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let (pending, preview) = inspect(&bytes, &password)?;
     state.bundle.put(pending);
+    // Temporizador: la vista previa (con las contraseñas descifradas) se borra al vencer aunque nadie
+    // la consulte; el hilo termina en cuanto deja de estar pendiente.
+    let token = preview.token.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(PENDING_SWEEP);
+        if !app.state::<crate::AppState>().bundle.sweep(&token) {
+            break;
+        }
+    });
     Ok(preview)
 }
 
@@ -1070,7 +1268,7 @@ pub fn bundle_import_cancel(state: tauri::State<'_, crate::AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credentials::KeyStore;
+    use crate::credentials::{KeyStore, LOCKED};
     use serde_json::json;
     use std::path::{Path, PathBuf};
 
@@ -1452,7 +1650,7 @@ mod tests {
         assert!(buf.is_empty());
 
         let slot = PendingSlot::default();
-        let pending = || Pending { token: "t1".into(), created: Instant::now(), sessions: vec![], secrets: Secrets::default() };
+        let pending = || Pending { token: "t1".into(), created: Instant::now(), created_wall: SystemTime::now(), sessions: vec![], secrets: Secrets::default() };
         slot.put(pending());
         assert!(slot.take("otro").is_none(), "token distinto");
         assert!(slot.take("t1").is_some());
@@ -1477,5 +1675,90 @@ mod tests {
         let (s, _) = filter_settings(json!({"logMask": true, "confirmClose": "no"}).as_object().unwrap());
         assert_eq!(s.get("logMask"), Some(&json!(true)));
         assert!(!s.contains_key("confirmClose"));
+        // Servidores abiertos a todas las interfaces sin filtro: nunca desde un archivo.
+        let (s, dropped) = filter_settings(
+            json!({"serverGuard": {"tftp": {"bind": "0.0.0.0", "allow": "", "idle": 0}}, "disabledPacks": ["builtin-cisco"], "rightClickPaste": true, "copyOnSelect": false, "autoLog": true})
+                .as_object()
+                .unwrap(),
+        );
+        for k in ["serverGuard", "disabledPacks", "rightClickPaste", "autoLog"] {
+            assert!(!s.contains_key(k) && dropped.iter().any(|d| d == k), "{k}");
+        }
+        assert_eq!(s.get("copyOnSelect"), Some(&json!(false)), "apagar copiar al seleccionar sí se acepta");
+    }
+
+    #[test]
+    fn kdf_limits_on_read() {
+        let file = seal_bundle(PW, br#"{"format":"netterminal-bundle","version":1}"#, FAST).unwrap();
+        let with = |m: u32, t: u32| {
+            let mut b = file.clone();
+            b[10..14].copy_from_slice(&m.to_le_bytes());
+            b[14..18].copy_from_slice(&t.to_le_bytes());
+            b
+        };
+        assert_eq!(open_bundle(PW, &with(256 * 1024 + 1, 3)).unwrap_err(), BAD_FILE, "más de 256 MiB");
+        assert_eq!(open_bundle(PW, &with(64, 5)).unwrap_err(), BAD_FILE, "más de 4 pasadas");
+        // Dentro del tope: se deriva (y como la cabecera va autenticada, falla como alterado).
+        assert_eq!(open_bundle(PW, &with(64, 2)).unwrap_err(), WRONG);
+    }
+
+    #[test]
+    fn export_destination_and_confirmation_text() {
+        let d = dir();
+        let data = d.join("data");
+        std::fs::create_dir_all(data.join("tftp")).unwrap();
+        assert!(check_dest(&d.join("respaldo.ntx"), &data).is_ok());
+        for bad in [data.join("tftp").join("x.ntx"), data.join("x.ntx"), d.join("data").join("..").join("data").join("y.ntx")] {
+            assert!(check_dest(&bad, &data).unwrap_err().contains("carpeta de datos"), "{}", bad.display());
+        }
+        assert!(check_dest(&d.join("x.txt"), &data).is_err());
+        assert!(check_dest(Path::new("relativo.ntx"), &data).is_err());
+        assert!(check_dest(&d.join("no-existe").join("x.ntx"), &data).is_err());
+        // Enlace simbólico hacia la carpeta servida: también se rechaza.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(data.join("tftp"), d.join("atajo")).unwrap();
+            assert!(check_dest(&d.join("atajo").join("z.ntx"), &data).is_err());
+        }
+        assert_eq!(with_ntx(PathBuf::from("/tmp/a")), PathBuf::from("/tmp/a.ntx"));
+        assert_eq!(with_ntx(PathBuf::from("/tmp/a.NTX")), PathBuf::from("/tmp/a.NTX"));
+        let t = confirm_text(&PasswordCounts { sessions: 3, hops: 1, snmp: 0 }, Path::new("/x/y.ntx"), false);
+        assert!(t.contains("4 contraseñas") && t.contains("3 de sesiones") && t.contains("1 de vecino") && t.contains("/x/y.ntx") && t.contains("llavero"), "{t}");
+        assert!(!t.contains("SNMP"));
+        assert!(confirm_text(&PasswordCounts { sessions: 1, hops: 0, snmp: 0 }, Path::new("/x.ntx"), true).contains("maestra"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn preview_shows_extras_and_pending_sweeps() {
+        let d = dir();
+        let store = SessionStore::new(&d);
+        let creds = master_creds(&d);
+        let mut s = sess("", "core", "192.0.2.1", "Core");
+        s.ssh_args = Some("-A".into());
+        s.on_connect = Some("terminal length 0\nreload".into());
+        s.tunnels = Some(vec![serde_json::from_value(json!({"kind": "local", "listen_port": 8443, "dest_host": "192.0.2.10", "dest_port": 443})).unwrap()]);
+        store.save(s).unwrap();
+        let opts = ExportOpts { all_sessions: true, ..Default::default() };
+        let (plain, _) = build_payload(Sources { sessions: store.list(), settings: None, packs: vec![], notes: vec![], creds: &creds }, &opts, None).unwrap();
+        let (pending, prev) = inspect(&seal_bundle(PW, &plain, FAST).unwrap(), PW).unwrap();
+        let idx = prev.sessions.iter().position(|x| x.name == "core").unwrap();
+        let e = prev.extras.iter().find(|e| e.index == idx).expect("extras en la vista previa");
+        assert_eq!(e.on_connect.as_deref(), Some("terminal length 0\nreload"));
+        assert_eq!(e.ssh_args.as_deref(), Some("-A"));
+        assert_eq!(e.tunnels.as_ref().map(Vec::len), Some(1));
+        assert!(prev.sessions[idx].on_connect.is_none(), "la sesión de la vista previa sigue sin los extras");
+        // El temporizador: sigue mientras está vigente y la borra al vencer.
+        let slot = PendingSlot::default();
+        let token = pending.token.clone();
+        slot.put(pending);
+        assert!(slot.sweep(&token));
+        assert!(!slot.sweep("otro"));
+        let mut old = slot.take(&token).unwrap();
+        old.created_wall = SystemTime::now() - PENDING_TTL - Duration::from_secs(1);
+        slot.put(old);
+        assert!(!slot.sweep(&token), "vencida por hora del sistema (suspensión)");
+        assert!(slot.is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

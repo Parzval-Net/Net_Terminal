@@ -14,6 +14,10 @@ pub struct SessionStore {
     /// Qué pasó al abrir sessions.json (restaurado desde el respaldo, entradas descartadas); se
     /// entrega una sola vez a la interfaz con `take_notice`.
     notice: Mutex<Option<crate::datafiles::FileNotice>>,
+    /// sessions.json se leyó completo y sano en este arranque (sin error, sin restaurar desde un
+    /// respaldo, sin entradas descartadas y sin partir de las sesiones de ejemplo). Si no, la lista de
+    /// sesiones no sirve para decidir qué contraseñas de la bóveda quedaron huérfanas.
+    trusted: bool,
 }
 
 /// Carpeta "visible" donde vive la app, para el modo portable:
@@ -91,9 +95,11 @@ impl SessionStore {
         // archivo sano queda tal cual, también los campos que agregue una versión más nueva.
         let mut rewrite = false;
         let mut notice = crate::datafiles::FileNotice::default();
+        let mut fresh = false;
         let sessions = match fs::read(&file_path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 rewrite = true;
+                fresh = true;
                 Self::default_sessions()
             }
             Err(e) => {
@@ -158,11 +164,13 @@ impl SessionStore {
             }
         };
 
+        let degraded = notice.corrupt || notice.restored_from.is_some() || !notice.dropped.is_empty();
         let store = Self {
             file_path,
             sessions: Mutex::new(sessions),
+            trusted: load_error.is_none() && !degraded && !fresh,
             load_error,
-            notice: Mutex::new((notice.corrupt || notice.restored_from.is_some() || !notice.dropped.is_empty()).then_some(notice)),
+            notice: Mutex::new(degraded.then_some(notice)),
         };
         if rewrite {
             let _ = store.persist(&store.sessions.lock().unwrap());
@@ -202,6 +210,12 @@ impl SessionStore {
             save_password: None,
             created_at: Utc::now().to_rfc3339(),
         }]
+    }
+
+    /// La lista de sesiones vino de un sessions.json sano (ver `trusted`): solo entonces se pueden
+    /// limpiar de la bóveda las contraseñas de sesiones que ya no existen.
+    pub fn trusted(&self) -> bool {
+        self.trusted
     }
 
     /// Aviso de la apertura de sessions.json (una sola vez); None si no hubo nada que informar.
@@ -372,6 +386,9 @@ mod tests {
         let store = super::SessionStore::new(&dir);
         let names: Vec<String> = store.list().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["core"]);
+        assert!(!store.trusted(), "con entradas descartadas no sirve para limpiar huérfanas de la bóveda");
+        assert!(super::SessionStore::new(&dir).trusted(), "ya reescrito y sano");
+        assert!(!super::SessionStore::new(&dir.join("vacia")).trusted(), "sin sessions.json (sesiones de ejemplo)");
         let backups = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()

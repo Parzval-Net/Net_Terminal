@@ -238,6 +238,8 @@ fn arm_autolock(app: &tauri::AppHandle) {
         match tick {
             credentials::Tick::Wait(d) => std::thread::sleep(d),
             credentials::Tick::Locked => {
+                // Una importación pendiente (con contraseñas descifradas en memoria) no sobrevive al bloqueo.
+                app.state::<AppState>().bundle.clear();
                 let _ = app.emit("creds-changed", ());
                 break;
             }
@@ -274,6 +276,7 @@ fn vault_unlock(master: String, app: tauri::AppHandle, state: State<'_, AppState
 #[tauri::command]
 fn vault_lock(app: tauri::AppHandle, state: State<'_, AppState>) {
     state.creds.lock();
+    state.bundle.clear();
     let _ = creds_changed(&app, Ok(()));
 }
 
@@ -287,6 +290,7 @@ fn vault_change(old: String, new: String, app: tauri::AppHandle, state: State<'_
 
 #[tauri::command(async)]
 fn vault_reset(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.bundle.clear();
     creds_changed(&app, state.creds.reset())
 }
 
@@ -1307,6 +1311,13 @@ pub fn run() {
                 logs_root: std::sync::Mutex::new(None),
                 bundle: bundle::PendingSlot::default(),
             });
+            // Bloqueo automático de la bóveda según los ajustes guardados, sin esperar a la interfaz
+            // (que lo vuelve a enviar al cargar; si no llega, igual queda aplicado).
+            {
+                let st = app.state::<AppState>();
+                let (minutes, on_sleep) = credentials::autolock_from_settings(st.files.peek_settings().as_ref());
+                let _ = st.creds.set_autolock(minutes, on_sleep);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

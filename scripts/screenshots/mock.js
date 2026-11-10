@@ -827,21 +827,28 @@ const handlers = {
     options?.filters?.some((f) => f.extensions?.includes("ntx")) || location.search.includes("ntx") ? "/Users/demo/Documentos/respaldo.ntx" : null,
   // Archivo cifrado (.ntx), como el backend: la contraseña del archivo y la maestra solo entran; nunca vuelven
   // contraseñas. window.__bundleExport guarda las opciones recibidas (sin contraseñas) para revisarlas.
-  bundle_export: ({ password, master, opts }) => {
+  // Con contraseñas, como Rust: `dest` se ignora (diálogo propio) y hay una confirmación nativa (aquí,
+  // window.confirm; ?ntxcancel simula Cancelar). window.__bundleExport guarda opciones y destino.
+  bundle_export: ({ dest, password, master, opts }) => {
     if ([...(password ?? "")].length < 12) throw "La contraseña del archivo debe tener al menos 12 caracteres";
     const pw = opts.passwords;
-    if (pw && (pw.sessions || pw.snmp || pw.hops.length)) {
+    const withPw = !!(pw && (pw.sessions || pw.snmp || pw.hops.length));
+    if (withPw) {
       if (pw.confirm !== "EXPORTAR") throw "Para incluir contraseñas escribe EXPORTAR en la confirmación";
       if (vault.backend === "vault" && !vault.unlocked) throw "La bóveda está bloqueada. Desbloquéala en Ajustes › Credenciales";
       if (vault.backend === "vault" && (master ?? "").length < 8) throw "Contraseña maestra incorrecta";
     }
-    window.__bundleExport = { ...opts, master: master ? "(recibida)" : null };
+    const path = withPw ? "/Users/demo/Documentos/netterminal.ntx" : dest;
+    if (!path || /\/NetTerminal\/data\//.test(path)) throw "No se puede guardar dentro de la carpeta de datos de NetTerminal";
+    if (withPw && (location.search.includes("ntxcancel") || (typeof window.__ntxConfirm === "function" && !window.__ntxConfirm(path))))
+      throw "Exportación cancelada: no se escribió ningún archivo";
+    window.__bundleExport = { ...opts, master: master ? "(recibida)" : null, dest: dest ?? null, path };
     const chosen = sessions.filter((s) => s.type !== "local" && (opts.all_sessions || opts.session_ids.includes(s.id)));
-    const withPw = pw?.sessions ? chosen.filter((s) => vaultIds.has(s.id)).length : 0;
+    const nPw = pw?.sessions ? chosen.filter((s) => vaultIds.has(s.id)).length : 0;
     return {
       sessions: chosen.length, folders: opts.all_sessions ? 1 : 0, settings: opts.settings ? 42 : 0, macros: opts.macros ? 2 : 0,
       packs: 0, notes: opts.notes ? Object.keys(notes).length : 0, rules: 0,
-      passwords: { sessions: withPw, hops: pw?.hops.length ?? 0, snmp: 0 }, bytes: 18234,
+      passwords: { sessions: nPw, hops: pw?.hops.length ?? 0, snmp: 0 }, bytes: 18234, path,
     };
   },
   bundle_inspect: ({ password }) => {
@@ -853,12 +860,24 @@ const handlers = {
         { id: "b2", name: "sw-acceso-norte", type: "telnet", host: "203.0.113.99", folder: "Sucursales/Norte", created_at: "" },
         { id: "b3", name: "consola-lab", type: "serial", serial_port: "COM3", baud_rate: 9600, folder: "Laboratorio", created_at: "" },
       ],
-      advanced: [0], with_password: [0, 1], folders: ["Sucursales/Centro"],
+      advanced: [0, 1], with_password: [0, 1], folders: ["Sucursales/Centro"],
+      extras: [
+        { index: 0, ssh_args: "-A", tunnels: [{ kind: "local", listen_port: 8443, dest_host: "192.0.2.10", dest_port: 443 }], on_connect: "terminal length 0\nconf t\ninterface Gi1/0/1\nshutdown", legacy_ssh: null },
+        { index: 1, ssh_args: null, tunnels: null, on_connect: "show clock", legacy_ssh: null },
+      ],
       settings: { fontSize: 15, appTheme: "dark", logMask: true, snmpProfiles: [{ id: "p1", name: "core", host: "192.0.2.1", port: 161, version: "3", saved: true }] },
       ignored_settings: ["mcpToken", "mcpEnabled", "autoLegacySsh", "logsDir"],
-      macros: [{ id: "m9", label: "Versión", kind: "send", text: "show version" }], packs: null,
+      macros: [
+        { id: "m1", label: "Interfaces", kind: "send", text: "show ip interface brief" },
+        { id: "m2", label: "Reinicio", kind: "send", text: "reload\n<b>y</b>" },
+        { id: "m9", label: "Versión", kind: "send", text: "show version" },
+      ],
+      packs: [{ format: "netterminal-commands", formatVersion: 1, id: "user-cisco", name: "Mis comandos", vendor: "cisco", vendorName: "Cisco", commands: [{ cmd: "show run", desc: "Config", cat: "Sistema", risk: "read" }, { cmd: "write erase", desc: "Borra", cat: "Sistema", risk: "read" }] }],
       notes: [{ name: "Checklist", content: "1. Respaldar\n2. Cambiar" }],
-      highlight: [{ id: "r1", name: "Errores", pattern: "error", style: { fg: "red" } }],
+      highlight: [
+        { id: "r1", name: "Errores", pattern: "error", style: { color: "red" } },
+        { id: "b1", name: "Lenta", pattern: "a*a*a*b", style: { color: "red" } },
+      ],
       passwords: { sessions: 2, hops: 1, snmp: 1 }, hops: [["192.0.2.21", "admin"]], snmp_profiles: ["p1"],
       warnings: ["router-x: argumentos extra de SSH omitidos (Opción no permitida en argumentos extra: proxycommand.)"],
     };

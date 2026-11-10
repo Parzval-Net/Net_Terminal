@@ -11,6 +11,8 @@ export const MAX_HL = 8;
 export const MAX_LITERAL = 200;
 /** Líneas más largas que esto no se examinan (mismo criterio que el resaltado por fabricante, evita backtracking en líneas enormes). */
 export const MAX_SCAN_LINE = 1000;
+/** Tope del texto de una línea lógica (varias filas envueltas) que se examina: también vale para el prefiltro. */
+export const MAX_SCAN_TEXT = MAX_SCAN_LINE * 4;
 
 /** Fondo y texto por color: pares de alto contraste (texto casi negro sobre fondos claros) que valen en tema claro y oscuro. */
 export const HL_COLORS = [
@@ -82,8 +84,8 @@ export function repeatedGroupRisk(pattern: string): string | null {
 
 /**
  * Valida lo que escribió el usuario; devuelve el mensaje de error o null. Reutiliza las validaciones de
- * las reglas de resaltado (regexError, riskyRegex: cuantificadores anidados que congelarían la app) y agrega
- * `repeatedGroupRisk` para los casos que esas no ven.
+ * las reglas de resaltado (regexError, riskyRegex: validador estructural de regexSafety.ts) y agrega
+ * `repeatedGroupRisk`, más estricta, porque estos resaltados se examinan sobre líneas de hasta 4.000 caracteres.
  */
 export function validateHl(
   input: Pick<TermHl, "pattern" | "regex" | "matchCase">,
@@ -94,7 +96,7 @@ export function validateHl(
   if (existing.length >= MAX_HL) return `Máximo ${MAX_HL} resaltados por pestaña: quita alguno primero`;
   if (existing.some((h) => h.pattern === pattern && h.regex === regex && h.matchCase === input.matchCase)) return "Ese resaltado ya está en la lista";
   if (!regex) return pattern.length > MAX_LITERAL ? `Texto demasiado largo (máx. ${MAX_LITERAL} caracteres)` : null;
-  const bad = regexError(pattern) ?? riskyRegex(pattern) ?? repeatedGroupRisk(pattern);
+  const bad = regexError(pattern) ?? riskyRegex(pattern, !input.matchCase) ?? repeatedGroupRisk(pattern);
   if (bad) return bad;
   // Una expresión que coincide con texto vacío (a*, x?) marcaría todo: no resalta nada útil.
   if (buildRegex(input).test("")) return "La expresión coincide con texto vacío: haz que exija al menos un carácter";
@@ -104,7 +106,7 @@ export function validateHl(
 /** Tramos [inicio, fin) de las coincidencias en un texto (sin vacíos); `max` acota la cantidad por línea. */
 export function findSpans(text: string, re: RegExp, max = 100): [number, number][] {
   const out: [number, number][] = [];
-  if (!text || text.length > MAX_SCAN_LINE * 4) return out;
+  if (!text || text.length > MAX_SCAN_TEXT) return out;
   re.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) && out.length < max) {
