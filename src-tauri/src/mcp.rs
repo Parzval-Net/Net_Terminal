@@ -1377,7 +1377,7 @@ mod tests {
         assert_eq!(decide_round(&srv, &known, "run_commands", ok, true, true, Some("read")).kind, VerdictKind::AutoWindow);
         assert_eq!(decide_round(&srv, &anon, "run_commands", ok, true, true, Some("read")).kind, VerdictKind::Rejected);
         let long = format!("show clock\nshow {}", "x".repeat(AUTO_MAX_CHARS));
-        let many = vec!["show clock"; mcp_tools::MAX_BATCH + 1].join("\n");
+        let many = ["show clock"; mcp_tools::MAX_BATCH + 1].join("\n");
         for bad in ["show clock\nshow\tversion", long.as_str(), many.as_str(), "show clock\n", "show clock\n\nshow version"] {
             assert_eq!(decide_round(&srv, &known, "run_commands", bad, true, true, Some("read")).kind, VerdictKind::Rejected, "{bad:?}");
         }

@@ -22,7 +22,7 @@ registerHooks({
 });
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const { computeRisk, textRisk, editedLine } = await import("../../src/lib/packs.ts");
+const { computeRisk, textRisk, editedLine, contactsNetwork, opensInteractive } = await import("../../src/lib/packs.ts");
 const { vendors } = await import("../../src/lib/commands.ts");
 
 const RANK = { read: 0, change: 1, disruptive: 2 };
@@ -530,6 +530,63 @@ const STAYS_READ = [
 ];
 for (const c of STAYS_READ) is(c, "read");
 
+// ---------- Auditoría de la ventana de consultas: palabras de Linux que son prefijos de CLI de red ----------
+// Junos "top <comando>" y "up [n] <comando>" ejecutan ese comando desde otro nivel: vale ese comando, al menos cambio.
+for (const c of ["top set system host-name x", "top rollback 1", "top load override terminal", "top commit and-quit", "top edit protocols ospf", "top show configuration", "up 2 set interfaces ge-0/0/0 description x", "'top' set system host-name x"]) is(c, "change");
+for (const c of ["top delete", "top delete interfaces ge-0/0/0", "top run request system reboot", "up delete", "up 1 run request system reboot", "top run restart routing"]) is(c, "disruptive");
+for (const c of ["top", "top -b -n1", "top -n 1", "top -bn1 -o %MEM", "top -l 1 -s 0", "top -p 1234", "free", "free -m", "free -h -s 2", "uptime"]) is(c, "read");
+// VRP y Comware: "free user-interface|line" desconecta a un usuario (como "clear line"); "free" con argumentos no es el de Linux.
+for (const c of ["free user-interface vty 0", "free line vty 1"]) is(c, "disruptive");
+is("free unused porttag", "change");
+// Los demás prefijos ya evalúan el comando envuelto: hereda su riesgo real.
+for (const [c, r] of [["do show running-config", "read"], ["do reload", "disruptive"], ["run show route", "read"], ["run request system reboot", "disruptive"], ["watch -n 1 reboot", "disruptive"],
+  ["time reboot", "disruptive"], ["xargs reboot", "disruptive"], ["env A=1 reboot", "disruptive"], ["nice -n 5 reboot", "disruptive"], ["time ping 192.0.2.1", "read"], ["edit", "change"], ["exit", "change"]]) is(c, r);
+
+// ---------- Auditoría: "diagnose test application" de FortiOS es cambio salvo niveles documentados de solo lectura ----------
+for (const c of ["diagnose test application ipsmonitor 5", "diagnose test application ipsmonitor 2", "diagnose test application ipsmonitor 4", "diagnose test application dnsproxy 1",
+  "diagnose test application dnsproxy 9", "diagnose test application wad 1000", "diagnose test application ipsmonitor", "diagnose test application ipsmonitor 1 extra", "diag test app ipsmonitor 1"]) is(c, "change");
+for (const c of ["diagnose test application ipsmonitor 98", "diagnose test application ipsmonitor 97", "diagnose test application ipsmonitor 99", "diagnose test application dnsproxy 99",
+  "diagnose test application wad 99", "diag test app ipsmonitor 98", "diag test application ipsm 97", "diag test app wad 99"]) is(c, "disruptive");
+for (const c of ["diagnose test application ipsmonitor 1", "diagnose test application ipsmonitor 3", "diagnose test application dnsproxy 2", "diagnose test application dnsproxy 7",
+  "diagnose test application fcnacd 2", "diagnose test application fcnacd 7", "diagnose test application nr5gd 15", "diagnose sys top", "diagnose sys top 2 20"]) is(c, "read");
+
+// ---------- Auditoría: credenciales hacia otro equipo (WMI, CIM, RPC, LDAP, UNC) no son consulta ----------
+for (const c of ["Get-WmiObject Win32_OperatingSystem -ComputerName equipo", "Get-WmiObject Win32_Bios -Comp equipo", "Get-CimInstance Win32_Service -CimSession equipo",
+  "Get-Service -ComputerName:equipo", "Get-Service -cn equipo", "Get-ADUser usuario -Server dc.example.test", "Get-HotFix -ComputerName equipo", "Test-WSMan equipo",
+  "Test-Connection 192.0.2.1 -Source equipo", "systeminfo /s equipo", "systeminfo /S equipo /U usuario", "tasklist /s equipo", "getmac /s equipo", "typeperf -s equipo -sc 1 x",
+  "w32tm /query /computer:equipo /status", "nltest /server:equipo /sc_query:example.test", "netsh -r equipo interface show interface", "netsh -u usuario -p x interface show interface",
+  "Get-ChildItem //equipo/recurso", "dir //equipo/recurso", "ls //equipo/recurso/", "Get-Content FileSystem::\\\\equipo\\recurso\\x.txt", "Get-Content \\\\?\\UNC\\equipo\\recurso\\x.txt",
+  "Get-ChildItem '//equipo/recurso'"]) is(c, "change");
+for (const c of ["Get-Service", "Get-Service -Name ssh", "systeminfo", "tasklist", "tasklist /svc", "getmac /v", "typeperf -sc 1 x", "w32tm /query /status", "netsh -c interface show interface",
+  "netsh interface show interface", "Test-Connection 192.0.2.1", "Test-NetConnection 192.0.2.1 -Port 443", "Resolve-DnsName x.example.test -Server 192.0.2.53", "nbtstat -a equipo",
+  "nltest /dsgetdc:example.test", "w32tm /stripchart /computer:192.0.2.1 /samples:3", "ConvertTo-Json -Compress", "curl http://192.0.2.1/x/", "Get-Content C:\\x\\y.txt", "ls /etc/", "show host x.example.test"]) is(c, "read");
+
+// ---------- contactsNetwork: misma normalización que computeRisk ----------
+for (const c of ["ping 192.0.2.1", "time ping x.example.test", "nohup ping x.example.test", "busybox ping x.example.test", "env ping x.example.test", "timeout 5 ping x.example.test",
+  "sudo -n ping x.example.test", "'ping' x.example.test", '"ping" x.example.test', "p''ing x.example.test", "/usr/bin/ping x.example.test", "PING.EXE x.example.test",
+  "Write-Output (Resolve-DnsName x.example.test)", "Get-Date; Resolve-DnsName x.example.test", "show clock | ping x.example.test", "do ping 192.0.2.1", "run traceroute 192.0.2.1",
+  "execute ping x.example.test", "exe traceroute 192.0.2.1", "execute telnet 192.0.2.1", "admin ping 192.0.2.1", "ssh 192.0.2.1", "telnet 192.0.2.1 23", "stelnet 192.0.2.1", "ncat 192.0.2.1 80",
+  "dnslookup x.example.test", "packet-tracer input inside tcp 192.0.2.1 1 198.51.100.1 80", "Test-NetConnection x.example.test", "curl http://x.example.test/", "dig x.example.test",
+  "nslookup x.example.test", "getent hosts x.example.test", "show host x.example.test", "sh host x.example.test", "nbtstat -A 192.0.2.1", "nltest /dsgetdc:example.test",
+  "w32tm /stripchart /computer:192.0.2.1", "w32tm /monitor /computers:192.0.2.1", "dns-sd -Q x.example.test", "dscacheutil -q host -a name x.example.test",
+  "resolvectl query x.example.test", "scutil -r x.example.test", "cmd /c ping x.example.test", "powershell -Command \"Resolve-DnsName x.example.test\"", "watch -n 5 ping -c 1 192.0.2.1",
+  "Get-Service -ComputerName equipo"]) assert.equal(contactsNetwork(c), true, c);
+for (const c of ["show hosts", "show ip ssh", "show ping-stats", "show running-config | include ping", "echo ping", "grep ping /var/log/x", "execute ping-options view-settings",
+  "ssh server enable", "telnet 10.0.0.0 255.0.0.0", "diagnose sys top", "Get-Service", "systeminfo", "nbtstat -n", "top", "cat /etc/hosts", "show ssh", "display ssh server status"])
+  assert.equal(contactsNetwork(c), false, c);
+
+// ---------- opensInteractive: lecturas que toman la terminal ----------
+for (const c of ["less /etc/hosts", "more /etc/hosts", "cat /etc/hosts | less", "cat /etc/hosts | more", "top", "top -d 2", "sudo top", "htop", "cpview", "vi /etc/hosts", "view /etc/hosts", "man ip",
+  "watch -n 1 date", "ssh 192.0.2.1", "telnet 192.0.2.1", "execute ssh admin@192.0.2.1", "execute ha manage 1 admin", "journalctl -u ssh", "systemctl status ssh", "systemctl",
+  "networkctl status", "diagnose sys top", "diagnose sys top 2 20", "get system performance top", "monitor interface ge-0/0/0", "mtr 192.0.2.1", "nettop", "iftop", "nslookup"])
+  assert.equal(opensInteractive(c), true, c);
+for (const c of ["top -b -n1", "top -n 1", "top -l 1", "more flash:config.text", "more system:running-config", "show running-config | more", "journalctl --no-pager -u ssh", "journalctl -f",
+  "journalctl -xef", "systemctl --no-pager status ssh", "systemctl is-active ssh", "mtr -r -c 5 192.0.2.1", "nettop -l 1", "iftop -t", "nslookup x.example.test", "ssh 192.0.2.1 uptime",
+  "show version", "cat /etc/hosts", "tail -f /var/log/messages", "diagnose sys top-mem", "ping 192.0.2.1", "monitor traffic interface ge-0/0/0", "show interfaces"])
+  assert.equal(opensInteractive(c), false, c);
+// Siguen siendo consulta para quien escribe a mano.
+for (const c of ["less /etc/hosts", "top", "cpview", "journalctl -u ssh", "ssh 192.0.2.1", "monitor interface ge-0/0/0", "diagnose sys top"]) is(c, "read");
+
 // ---------- Rendimiento: 100 KB adversos por familia de regex (líneas de casi 8 KB, que sí pasan por las regex) ----------
 {
   let n = 0;
@@ -555,6 +612,12 @@ for (const c of STAYS_READ) is(c, "read");
     ["wget", "wget --spider ", "-q "], ["dig", "dig ", "-4 "], ["nc -z", "nc ", "-vvvvu "], ["curl -H @", "curl ", "-H "], ["openssl", "openssl s_client ", "-x "],
     ["UNC", "dir ", "\\\\a"], ["cliente con expansión", "ping ", "%a"], ["cliente con entrada", "nslookup ", "<<"], ["URL remota", "more ", "tftp:"],
     ["mgmt_cli", "mgmt_cli show ", "-m"], ["ssh -o", "ssh ", "-o SendEnv=x "],
+    ["top de Junos", "top ", "top "], ["up de Junos", "up 1 ", "up 1 "], ["top de Linux", "top ", "-d 1 "], ["free", "free ", "-s 1 ", "x"],
+    ["PowerShell remoto", "Get-X ", "-Comp ", "x"], ["PowerShell remoto (-cims)", "Get-X ", "-cimse ", "-ComputerNam"], ["Windows remoto", "systeminfo ", "/a ", "/sx"],
+    ["w32tm", "w32tm ", "/query ", "/computer"], ["typeperf", "typeperf ", "-s", "x"], ["UNC //", "dir ", "//a", "/"], ["UNC ::", "gc ", "::\\\\a"],
+    ["nbtstat", "nbtstat ", "-x ", "-ab"], ["show host", "show host ", "x "], ["diagnose test application", "diagnose test application ", "ipsmonitor "],
+    ["more", "more ", "a "], ["mtr", "mtr ", "-n "], ["journalctl", "journalctl ", "-u x "], ["execute", "execute ", "ha "], ["monitor", "monitor ", "interface "],
+    ["UNC larga", "ls ", "//aaaaaaaaaaaaaaaa"], ["top con opciones", "top ", "-bbbbbbbbbbbbbbbbbbbbb"], ["sh host", "sh hos ", "x "],
   ];
   for (const [label, prefix, filler, suffix] of families) fastEnough(`computeRisk 100 KB adversos: ${label}`, 50, fresh(block(prefix, filler, suffix)));
   // Una sola línea de 100 KB: "puede cortar servicio" sin pasar por las regex.

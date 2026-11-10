@@ -2,10 +2,11 @@
  * Ventana de consultas de un agente de IA (MCP): durante unos minutos, los comandos de UN agente en
  * UNA conexión que el motor de riesgo clasifica como consulta (`read`) se envían sin diálogo.
  *
- * La decisión se toma solo aquí, en la interfaz, que es quien calcula el riesgo (computeRisk); Rust
- * nunca aprueba por su cuenta y vuelve a exigir una línea, sin control y dentro del tope. Todo lo demás
- * (cambios, cortes, varias líneas, caracteres de control, comandos largos, abrir sesiones) pide
- * aprobación siempre. La ventana se revoca sola al vencer, al desconectar la sesión, al poner la
+ * La decisión se toma solo aquí, en la interfaz, con el motor de riesgo de la app (computeRisk,
+ * contactsNetwork y opensInteractive de packs.ts, recibidos como parámetro); Rust nunca aprueba por su
+ * cuenta y vuelve a exigir una línea, sin control, dentro del tope y con riesgo `read`. Todo lo demás
+ * (cambios, cortes, varias líneas, caracteres de control, comandos largos, abrir sesiones, clientes de
+ * red y programas interactivos) pide aprobación siempre. La ventana se revoca sola al vencer, al desconectar la sesión, al poner la
  * pestaña en solo lectura y al apagar el servidor.
  *
  * Lógica pura, sin React: la prueban scripts/tests/mcpWindow.test.mjs.
@@ -75,39 +76,30 @@ export const revokeOne = (list: readonly ConsultWindow[], conn: string, clientKe
   revokeWhere(list, (w) => w.conn === conn && w.clientKey === clientKey);
 
 /**
- * Comandos que contactan al destino que se les escribe (ping, traceroute, nslookup, curl, ssh…). Son
- * consulta para el motor de riesgo, pero un agente podría sacar un dato ya visto poniéndolo en el nombre
- * de destino o en la URL, así que nunca pasan por la ventana: siempre piden aprobación.
+ * Funciones del motor de riesgo (src/lib/packs.ts) con que decide la ventana: las recibe como parámetro para que
+ * la decisión use exactamente el motor de la app y no una copia.
+ * - `contacts` (contactsNetwork): algún tramo contacta un destino que elige quien escribe (ping, nslookup, curl,
+ *   ssh…, también tras sudo, env, time, timeout, comillas o subexpresiones). Es consulta, pero un agente podría
+ *   sacar un dato ya visto poniéndolo en el nombre de destino o en la URL.
+ * - `interactive` (opensInteractive): abre un programa interactivo (less, top, vi, watch, ssh sin comando…); las
+ *   líneas siguientes del agente las leería ese programa y no el equipo.
  */
-const HOST_CLIENTS = new Set(
-  (
-    "ping ping6 traceroute traceroute6 tracert tracepath tracepath6 pathping mtr arping nping hping3 nslookup dnslookup dig host " +
-    "getent nc ncat curl wget openssl ssh telnet stelnet resolve-dnsname test-netconnection tnc test-connection packet-tracer"
-  ).split(" "),
-);
-const CMD_PREFIX = new Set(["do", "run", "execute", "exec", "exe", "sudo", "admin", "diagnose", "diag"]);
-export function contactsHost(cmd: string): boolean {
-  for (const seg of cmd.toLowerCase().split(/[|;&]+/)) {
-    const words = seg.trim().split(/\s+/);
-    let i = 0;
-    while (i < words.length - 1 && CMD_PREFIX.has(words[i])) i++;
-    // "execute ping-options", "ping6", "ping.exe" y rutas ("/usr/bin/curl") cuentan como el cliente base.
-    const w = (words[i] ?? "").replace(/^.*[\\/]/, "").replace(/\.exe$/, "").replace(/-options$/, "");
-    if (HOST_CLIENTS.has(w)) return true;
-  }
-  return false;
+export interface WindowEngine {
+  risk: (cmd: string) => Risk;
+  contacts: (cmd: string) => boolean;
+  interactive: (cmd: string) => boolean;
 }
 
 /**
  * ¿Se aprueba sin diálogo? Solo si hay una ventana vigente para ese agente y esa conexión, la
- * herramienta envía comandos, el comando es UNA línea sin caracteres de control, cabe en el tope y
- * `risk` (computeRisk) lo clasifica como `read` y no contacta a otro equipo (ver contactsHost).
+ * herramienta envía comandos, el comando es UNA línea sin caracteres de control, cabe en el tope,
+ * el motor lo clasifica como `read`, no contacta a otro equipo y no abre un programa interactivo.
  */
 export function autoApprove(
   list: readonly ConsultWindow[],
   req: WindowRequest,
   now: number,
-  risk: (cmd: string) => Risk,
+  engine: WindowEngine,
 ): { auto: true; risk: Risk } | { auto: false; reason: string } {
   const conn = req.connection ?? "";
   const key = req.client_key ?? "";
@@ -118,9 +110,10 @@ export function autoApprove(
   if (cmd.includes("\n") || cmd.includes("\r")) return { auto: false, reason: "varias líneas" };
   if (CONTROL.test(cmd)) return { auto: false, reason: "caracteres de control" };
   if ([...cmd].length > AUTO_MAX_CHARS) return { auto: false, reason: "largo" };
-  const r = risk(cmd);
+  const r = engine.risk(cmd);
   if (r !== "read") return { auto: false, reason: r };
-  if (contactsHost(cmd)) return { auto: false, reason: "contacta a otro equipo" };
+  if (engine.contacts(cmd)) return { auto: false, reason: "contacta a otro equipo" };
+  if (engine.interactive(cmd)) return { auto: false, reason: "programa interactivo" };
   return { auto: true, risk: r };
 }
 

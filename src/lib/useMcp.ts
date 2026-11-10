@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { mcpConfigure, mcpDecide, mcpQueryReply } from "./api";
-import { computeRisk, textRisk, type CatalogVendor } from "./packs";
+import { computeRisk, contactsNetwork, opensInteractive, textRisk, type CatalogVendor } from "./packs";
 import { answerQuery, setBridgeActive } from "./mcpBridge";
 import { activeWindows, autoApprove, autoApproveBatch, BATCH_TOOL, grantWindow, revokeOne, revokeWhere, type ConsultWindow } from "./mcpWindow";
 import type { Settings } from "./settings";
@@ -105,7 +105,7 @@ export function useMcp({ settings, tabs, states, controllers, catalog, monitors,
     const subs = [
       listen<ApprovalRequest>("mcp-approval", (e) => {
         const req = e.payload;
-        const d = autoApproveBatch(req, (r) => autoApprove(windowsRef.current, r, Date.now(), computeRisk));
+        const d = autoApproveBatch(req, (r) => autoApprove(windowsRef.current, r, Date.now(), { risk: computeRisk, contacts: contactsNetwork, interactive: opensInteractive }));
         if (d.auto) {
           mcpDecide(req.id, true, true, d.risk).catch((err) => toastFail("aprobar la consulta del agente", err));
           return;
