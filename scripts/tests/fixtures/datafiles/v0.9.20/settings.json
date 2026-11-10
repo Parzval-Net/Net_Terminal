@@ -1,0 +1,21 @@
+{
+  "appTheme": "light",
+  "tabLayout": "vertical",
+  "terminalTheme": "auto",
+  "fontSize": 13,
+  "commandSuggest": true,
+  "commandSuggestSet": true,
+  "suggestListKey": "alt+slash",
+  "floatingSidebar": true,
+  "sidebarOrder": { "": ["f:Lab", "s:a1b2c3d4-0000-4000-8000-000000000002"] },
+  "lifecycleInfo": true,
+  "deviceInfo": { "192.0.2.1": { "model": "C9300-48P", "version": "17.9.4" } },
+  "extraFolders": ["Lab"],
+  "macros": [],
+  "mcpEnabled": false,
+  "mcpToken": "00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff",
+  "topoSources": { "routing": true, "descriptions": true },
+  "snmpProfiles": [{ "id": "p1", "name": "lab", "version": "2c", "port": 161 }],
+  "snmpTrapPort": 162,
+  "ftpPort": 21
+}

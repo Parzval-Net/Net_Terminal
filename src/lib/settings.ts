@@ -264,25 +264,210 @@ function cleanTopology(v: unknown): Settings["topology"] | null {
   return { nodes, links };
 }
 
+// ---------- Versión de esquema, migraciones y avisos de datos ----------
+
+/**
+ * Versión de esquema de settings.json y topology.json que escribe esta versión (la misma que
+ * `SCHEMA_VERSION` en src-tauri/src/datafiles.rs). Un archivo sin el campo es v0 (todo lo escrito
+ * hasta la 0.9.20). El backend agrega y conserva el campo; la interfaz solo ejecuta sus pasos.
+ */
+export const SETTINGS_SCHEMA_VERSION = 1;
+
+/** Lo que pasó al leer un archivo de datos (campo `__datafiles` de `get_settings`, ver datafiles.rs). */
+export interface DataFileNotice {
+  /** Versión del archivo en disco (0: sin el campo); null: no existía. */
+  fileVersion: number | null;
+  schemaVersion: number;
+  /** El archivo es de una versión posterior a la que conoce esta app. */
+  newer: boolean;
+  migratedFrom: number | null;
+  /** Respaldo desde el que se restauró un archivo ilegible. */
+  restoredFrom: string | null;
+  /** Claves o entradas inválidas que se descartaron al leer. */
+  dropped: string[];
+  tooLarge: boolean;
+  corrupt: boolean;
+}
+
+export interface DataFilesInfo {
+  schemaVersion: number;
+  settings: DataFileNotice;
+  topology: DataFileNotice;
+  /** sessions.json: solo si hubo algo que informar al abrirlo (una sola vez). */
+  sessions: DataFileNotice | null;
+}
+
+/** Paso numerado de migración de los ajustes: pasa un settings.json crudo de `from` a `from + 1`. Idempotente. */
+export interface SettingsMigration {
+  from: number;
+  name: string;
+  run: (raw: Record<string, unknown>) => Record<string, unknown>;
+}
+
+/**
+ * Tabla de migraciones de la interfaz. El paso 0 -> 1 reúne lo que antes se hacía en cada arranque
+ * sin versión: `migrateSuggest` (commandSuggestSet). La separación de la topología (`__topoStore`) la
+ * decide el backend según exista topology.json y no depende de este número; la versión de los
+ * estilos de tráfico (`UI_VERSION` de `topoUi`) vive aparte, en localStorage.
+ */
+export const SETTINGS_MIGRATIONS: SettingsMigration[] = [
+  { from: 0, name: "sugerencias de comandos (commandSuggestSet)", run: (raw) => ({ ...raw, ...migrateSuggest(raw) }) },
+];
+
+/** Corre los pasos desde `fromVersion` hasta `target`. Un archivo ya en la versión actual (o posterior) no se toca. */
+export function migrateRaw(raw: Record<string, unknown>, fromVersion: number, steps: readonly SettingsMigration[] = SETTINGS_MIGRATIONS, target = SETTINGS_SCHEMA_VERSION): Record<string, unknown> {
+  let out = raw;
+  for (let v = Math.max(0, Math.floor(fromVersion) || 0); v < target; v++) {
+    const step = steps.find((m) => m.from === v);
+    if (step) out = step.run(out);
+  }
+  return out;
+}
+
+const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const strList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+
+function parseNotice(v: unknown): DataFileNotice | null {
+  if (!isObj(v)) return null;
+  return {
+    fileVersion: num(v.fileVersion),
+    schemaVersion: num(v.schemaVersion) ?? 0,
+    newer: v.newer === true,
+    migratedFrom: num(v.migratedFrom),
+    restoredFrom: typeof v.restoredFrom === "string" ? v.restoredFrom : null,
+    dropped: strList(v.dropped),
+    tooLarge: v.tooLarge === true,
+    corrupt: v.corrupt === true,
+  };
+}
+
+/** `__datafiles` del backend a un valor tipado (null si falta o no tiene la forma esperada). */
+export function parseDataFilesInfo(v: unknown): DataFilesInfo | null {
+  if (!isObj(v)) return null;
+  const settings = parseNotice(v.settings);
+  const topology = parseNotice(v.topology);
+  if (!settings || !topology) return null;
+  return { schemaVersion: num(v.schemaVersion) ?? 0, settings, topology, sessions: parseNotice(v.sessions) };
+}
+
+export interface LoadedSettings {
+  settings: Settings;
+  /** Topología tal como quedó guardada (null: falta migrarla desde settings.json). */
+  heavy: Pick<Settings, "topology" | "topoSnapshots"> | null;
+  info: DataFilesInfo | null;
+}
+
+/**
+ * Respuesta cruda de `get_settings` a ajustes listos: migra según la versión del archivo, completa con
+ * los valores por defecto y separa las marcas del backend (`__topoStore`, `__datafiles`, `schemaVersion`).
+ */
+export function loadSettings(res: unknown): LoadedSettings {
+  const raw = isObj(res) ? res : null;
+  const info = parseDataFilesInfo(raw?.__datafiles);
+  const from = info?.settings.fileVersion ?? 0;
+  const settings = mergeSettings(raw ? migrateRaw(raw, from) : raw);
+  const heavy = raw?.__topoStore === true ? { topology: settings.topology, topoSnapshots: settings.topoSnapshots } : null;
+  const rec = settings as unknown as Record<string, unknown>;
+  for (const k of ["__topoStore", "__datafiles", "schemaVersion"]) delete rec[k];
+  return { settings, heavy, info };
+}
+
+/** Aviso para el usuario derivado de `__datafiles`. La clave evita repetirlo. */
+export interface DataNotice {
+  key: string;
+  text: string;
+}
+
+const FILE_LABEL = { settings: "settings.json", topology: "topology.json", sessions: "sessions.json" } as const;
+
+/**
+ * Qué decirle al usuario tras leer los datos (cada aviso una sola vez, según `seen`). Nada si todo
+ * está normal: las migraciones silenciosas no molestan.
+ */
+export function describeDataNotices(info: DataFilesInfo | null, seen: ReadonlySet<string> = new Set()): DataNotice[] {
+  if (!info) return [];
+  const out: DataNotice[] = [];
+  for (const kind of ["settings", "topology", "sessions"] as const) {
+    const n = info[kind];
+    if (!n) continue;
+    const file = FILE_LABEL[kind];
+    const stem = file.replace(".json", "");
+    if (n.restoredFrom) {
+      out.push({ key: `restored:${file}:${n.restoredFrom}`, text: `${file} estaba dañado y se restauró desde el respaldo ${n.restoredFrom}. El archivo dañado quedó junto a tus datos como ${stem}.corrupt-<fecha>.json.` });
+    } else if (n.tooLarge) {
+      out.push({ key: `large:${file}`, text: `${file} superaba el tamaño máximo (64 MB) y se apartó como ${stem}.corrupt-<fecha>.json. La app partió con valores por defecto.` });
+    } else if (n.corrupt) {
+      out.push({ key: `corrupt:${file}`, text: `${file} estaba dañado y no había un respaldo válido. El archivo se conservó como ${stem}.corrupt-<fecha>.json.` });
+    }
+    if (n.newer) {
+      out.push({
+        key: `newer:${file}:${n.fileVersion}`,
+        text: `${file} lo guardó una versión más nueva de NetTerminal (esquema ${n.fileVersion}; esta versión conoce hasta ${n.schemaVersion}). Se conserva lo que esta versión no reconoce, pero conviene actualizar. Copia del original: ${stem}.v${n.fileVersion}.bak.json.`,
+      });
+    }
+    if (n.dropped.length > 0 && !n.newer) {
+      out.push({ key: `dropped:${file}:${n.dropped.join("|")}`, text: `Se descartaron datos inválidos de ${file} (${n.dropped.slice(0, 3).join(", ")}${n.dropped.length > 3 ? " y más" : ""}). El original quedó respaldado como ${stem}.corrupt-<fecha>.json.` });
+    }
+  }
+  return out.filter((n) => !seen.has(n.key));
+}
+
+/** Texto de un guardado fallido (por ejemplo, la topología sobre 64 MB) para mostrar al usuario. */
+export function saveErrorText(what: "topología" | "ajustes", err: unknown): string {
+  const msg = typeof err === "string" ? err : err instanceof Error ? err.message : String(err);
+  return /64 MB/.test(msg) ? msg : `No se pudo guardar ${what === "topología" ? "la topología" : "la configuración"}. Motivo: ${msg}`;
+}
+
+/** Avisos de datos para la interfaz: `messages` (una vez cada uno) y el último error de guardado, si lo hay. */
+export interface DataNotices {
+  messages: string[];
+  saveError: string | null;
+  /** Cierra los avisos (los de datos no se repiten en este equipo; el error se borra solo al guardar bien). */
+  dismiss: () => void;
+}
+
+const SEEN_KEY = "dataNoticeSeen";
+
+function loadSeen(): Set<string> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(SEEN_KEY) ?? "[]");
+    return new Set(strList(v));
+  } catch {
+    return new Set();
+  }
+}
+
+function rememberSeen(keys: string[]) {
+  try {
+    localStorage.setItem(SEEN_KEY, JSON.stringify([...loadSeen(), ...keys].slice(-40)));
+  } catch {
+    /* sin almacenamiento: el aviso puede repetirse */
+  }
+}
+
 /** Carga los ajustes desde el backend y los guarda (con debounce) en cada cambio. */
 /** Claves que viven en topology.json: se guardan solo cuando cambian (pueden pesar varios MB). */
 type Heavy = Pick<Settings, "topology" | "topoSnapshots">;
 
 export function useSettings() {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [messages, setMessages] = useState<string[]>([]);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const timer = useRef<number | undefined>(undefined);
   /** Topología tal como quedó guardada (null: falta migrarla desde settings.json). */
   const savedHeavy = useRef<Heavy | null>(null);
 
   useEffect(() => {
     invoke<unknown>("get_settings")
-      .then((s) => {
-        const raw = s && typeof s === "object" && !Array.isArray(s) ? (s as Record<string, unknown>) : null;
-        const merged = { ...mergeSettings(s), ...migrateSuggest(raw) };
-        savedHeavy.current = raw?.__topoStore === true ? { topology: merged.topology, topoSnapshots: merged.topoSnapshots } : null;
-        // Marca del backend, no es un ajuste: no vuelve a settings.json.
-        delete (merged as Record<string, unknown>).__topoStore;
-        setSettings(merged);
+      .then((res) => {
+        const { settings: loaded, heavy, info } = loadSettings(res);
+        savedHeavy.current = heavy;
+        const fresh = describeDataNotices(info, loadSeen());
+        if (fresh.length > 0) {
+          setMessages(fresh.map((n) => n.text));
+          rememberSeen(fresh.map((n) => n.key));
+        }
+        setSettings(loaded);
       })
       .catch(() => setSettings(defaultSettings));
   }, []);
@@ -290,19 +475,28 @@ export function useSettings() {
   const save = useCallback(async (next: Settings) => {
     const { topology, topoSnapshots, ...light } = next;
     const prev = savedHeavy.current;
+    let error: string | null = null;
+    const saveRest = (body: unknown) =>
+      invoke("save_settings", { settings: body }).catch((e) => {
+        console.error(e);
+        error ??= saveErrorText("ajustes", e);
+      });
     if (!prev || prev.topology !== topology || prev.topoSnapshots !== topoSnapshots) {
       try {
         await invoke("save_topology", { data: { topology, topoSnapshots } });
         savedHeavy.current = { topology, topoSnapshots };
       } catch (e) {
         console.error(e);
+        error = saveErrorText("topología", e);
         // Sobre el tope no se copia a settings.json (lo haría igual de grande): se guarda el resto.
-        if (String(e).includes("64 MB")) return invoke("save_settings", { settings: light }).catch(console.error);
         // Sin topology.json la topología sigue en settings.json, como antes: no se pierde.
-        return invoke("save_settings", { settings: next }).catch(console.error);
+        await saveRest(String(e).includes("64 MB") ? light : next);
+        setSaveError(error);
+        return;
       }
     }
-    return invoke("save_settings", { settings: light }).catch(console.error);
+    await saveRest(light);
+    setSaveError(error);
   }, []);
 
   const update = useCallback((patch: Partial<Settings> | ((s: Settings) => Partial<Settings>)) => {
@@ -315,5 +509,12 @@ export function useSettings() {
     });
   }, [save]);
 
-  return [settings, update] as const;
+  const dismiss = useCallback(() => {
+    setMessages([]);
+    setSaveError(null);
+  }, []);
+
+  // Tercer elemento: avisos de datos (archivo más nuevo, restauración, tope de 64 MB). Quien solo
+  // desestructure `[settings, update]` no cambia.
+  return [settings, update, { messages, saveError, dismiss } satisfies DataNotices] as const;
 }

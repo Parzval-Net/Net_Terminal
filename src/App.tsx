@@ -58,7 +58,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ConnStatus, Session, Tab, TabState, historyKey, tabTitle } from "./types";
 import { closeAllLabel, focusLabel, historyLabel, isMac, localOsVendor, modLabel } from "./lib/platform";
 import { presets, resolvePreset, useSystemDark } from "./lib/theme";
-import { Settings, logOptions, useSettings } from "./lib/settings";
+import { DataNotices, Settings, logOptions, useSettings } from "./lib/settings";
 import { useAlerts } from "./lib/alerts";
 import { useUpdater } from "./lib/useUpdater";
 import { useShortcuts } from "./lib/useShortcuts";
@@ -143,18 +143,21 @@ function useHandlers<T extends Record<string, (...args: never[]) => unknown>>(ha
 let tabSeq = 0;
 
 export default function App() {
-  const [settings, update] = useSettings();
+  const [settings, update, dataNotices] = useSettings();
   // Espera los ajustes para no mostrar un tema y luego cambiarlo.
   if (!settings) return null;
-  return <Workspace settings={settings} update={update} />;
+  return <Workspace settings={settings} update={update} dataNotices={dataNotices} />;
 }
 
 function Workspace({
   settings,
   update,
+  dataNotices,
 }: {
   settings: Settings;
   update: (p: Partial<Settings> | ((s: Settings) => Partial<Settings>)) => void;
+  /** Avisos de los archivos de datos: restaurado desde respaldo, versión posterior, error al guardar. */
+  dataNotices: DataNotices;
 }) {
   const systemDark = useSystemDark();
   const dark = settings.appTheme === "system" ? systemDark : settings.appTheme === "dark";
@@ -177,6 +180,15 @@ function Workspace({
     setToasts((t) => [...t.filter((x) => !(x.text === text && x.kind === kind)).slice(-3), { id, text, kind }]);
   }, []);
   const closeToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
+  // Avisos de una sola vez sobre los datos (ya vienen deduplicados) y error del último guardado.
+  useEffect(() => {
+    if (!dataNotices.messages.length) return;
+    for (const m of dataNotices.messages) toast(m, m.includes("dañado") ? "error" : "info");
+    dataNotices.dismiss();
+  }, [dataNotices, toast]);
+  useEffect(() => {
+    if (dataNotices.saveError) toast(dataNotices.saveError, "error");
+  }, [dataNotices.saveError, toast]);
   /** Error del backend con su contexto: "No se pudo <acción>. Motivo: …". */
   const toastFail = useCallback((action: string, e: unknown) => toast(failText(action, e), "error"), [toast]);
   const [confirm, setConfirm] = useState<{

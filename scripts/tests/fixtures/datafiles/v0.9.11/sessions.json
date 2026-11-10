@@ -1,0 +1,19 @@
+[
+  {
+    "id": "a1b2c3d4-0000-4000-8000-000000000001",
+    "name": "Terminal local",
+    "type": "local",
+    "folder": "Local",
+    "created_at": "2026-01-10T12:00:00+00:00"
+  },
+  {
+    "id": "a1b2c3d4-0000-4000-8000-000000000002",
+    "name": "core-sw",
+    "type": "ssh",
+    "folder": "Lab",
+    "host": "192.0.2.1",
+    "port": 22,
+    "username": "noc",
+    "created_at": "2026-01-10T12:05:00+00:00"
+  }
+]

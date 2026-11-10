@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 7,
+  "appTheme": "dark",
+  "fontSize": 15,
+  "temaNuevo": { "paleta": ["#112233", "#445566"], "contraste": 1.4 },
+  "panelLateral": "izquierda",
+  "mcpPort": { "http": 47821, "ws": 47822 }
+}

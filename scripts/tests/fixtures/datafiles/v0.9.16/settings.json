@@ -1,0 +1,28 @@
+{
+  "appTheme": "system",
+  "tabLayout": "horizontal",
+  "terminalTheme": "auto",
+  "fontSize": 13,
+  "commandSuggest": true,
+  "commandSuggestSet": false,
+  "suggestListKey": "ctrl+period",
+  "suggestColor": "auto",
+  "suggestStyle": "underline",
+  "suggestTabAccept": true,
+  "suggestTip": true,
+  "extraFolders": [],
+  "sidebarOrder": { "": ["s:a1b2c3d4-0000-4000-8000-000000000002", "f:Lab"] },
+  "lifecycleInfo": true,
+  "deviceInfo": { "192.0.2.1": { "model": "C9300-48P", "version": "17.9.4" } },
+  "macros": [
+    { "id": "m1", "label": "Interfaces", "kind": "send", "text": "show ip interface brief" }
+  ],
+  "mcpEnabled": false,
+  "mcpPort": 47821,
+  "mcpToken": "fedcba9876543210fedcba9876543210fedcba9876543210",
+  "monitors": [],
+  "topoSources": { "routing": true },
+  "logPattern": "{session}_{date}-{time}",
+  "snmpProfiles": [],
+  "ftpPort": 21
+}

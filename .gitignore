@@ -29,6 +29,9 @@ portable
 *.tmp
 settings.json
 sessions.json
+# Excepción: ejemplos ficticios para las pruebas de migración (sin datos reales).
+!scripts/tests/fixtures/datafiles/**/settings.json
+!scripts/tests/fixtures/datafiles/**/sessions.json
 
 # Herramientas locales del asistente (worktrees)
 .claude/

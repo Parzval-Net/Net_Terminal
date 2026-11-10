@@ -2,6 +2,7 @@ mod autofill;
 mod backups;
 mod cmdpacks;
 mod connection;
+mod datafiles;
 mod credentials;
 mod expect;
 mod filexfer;
@@ -45,6 +46,8 @@ struct AppState {
     creds: credentials::Credentials,
     secure_notes: notes::SecureNotes,
     data_dir: PathBuf,
+    /// settings.json y topology.json: versión de esquema, migraciones y respaldos.
+    files: datafiles::DataFiles,
     /// Carpeta de logs elegida por el usuario (validada); None: `data/logs`.
     logs_root: std::sync::Mutex<Option<PathBuf>>,
 }
@@ -1019,82 +1022,25 @@ fn data_dir(state: State<'_, AppState>) -> String {
     state.data_dir.to_string_lossy().into_owned()
 }
 
-/// Los ajustes son de la UI: el backend solo los persiste como JSON opaco.
+/// Los ajustes son de la UI: el backend solo los persiste como JSON opaco, con su versión de
+/// esquema, respaldos y validación (ver `datafiles`). La respuesta trae `__datafiles` con lo que pasó
+/// al leer (migración, archivo más nuevo, restauración desde respaldo, datos descartados).
 #[tauri::command(async)]
 fn get_settings(state: State<'_, AppState>) -> serde_json::Value {
-    let settings = load_settings(&state.data_dir.join("settings.json"));
-    merge_topology(settings, load_settings(&state.data_dir.join(TOPOLOGY_FILE)))
+    state.files.load_merged(state.store.take_notice())
 }
 
-/// La topología y sus snapshots viven en su propio archivo: pueden pesar varios MB y antes se
-/// reescribían con cada ajuste (un interruptor, el orden de la barra lateral).
-const TOPOLOGY_FILE: &str = "topology.json";
-const TOPOLOGY_KEYS: [&str; 2] = ["topology", "topoSnapshots"];
-const MAX_TOPOLOGY_BYTES: usize = 64 * 1024 * 1024;
-
-/// Agrega a los ajustes lo guardado en topology.json (que manda) y marca `__topoStore` para que
-/// la app sepa que ya no tiene que migrarlo desde settings.json.
-fn merge_topology(settings: serde_json::Value, topo: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(t) = topo else { return settings };
-    let mut out = match settings {
-        serde_json::Value::Object(o) => o,
-        _ => serde_json::Map::new(),
-    };
-    for (k, v) in t {
-        if TOPOLOGY_KEYS.contains(&k.as_str()) {
-            out.insert(k, v);
-        }
-    }
-    out.insert("__topoStore".into(), serde_json::Value::Bool(true));
-    serde_json::Value::Object(out)
-}
-
-/// Escribe JSON de forma atómica (`seal::write_atomic`: temporal único, fsync y rename) y con permisos restringidos. Legible con
-/// sangría si es chico; compacto si pasa de 512 KB (la mitad de bytes y de tiempo).
-fn write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
-    let compact = serde_json::to_string(value).map_err(|e| e.to_string())?;
-    let json = if compact.len() < 512 * 1024 { serde_json::to_string_pretty(value).map_err(|e| e.to_string())? } else { compact };
-    seal::write_atomic(path, json.as_bytes())
-}
-
-#[tauri::command]
+/// La topología y sus snapshots viven en su propio archivo (topology.json): pueden pesar varios MB
+/// y antes se reescribían con cada ajuste (un interruptor, el orden de la barra lateral). El error
+/// (por ejemplo, el tope de 64 MB) llega a la interfaz como texto del rechazo del comando.
+#[tauri::command(async)]
 fn save_topology(data: serde_json::Value, state: State<'_, AppState>) -> Result<(), String> {
-    let serde_json::Value::Object(o) = data else { return Err("topología inválida".into()) };
-    // Tope de tamaño: un diagrama de miles de equipos con 20 snapshots no llena el disco.
-    if serde_json::to_string(&o).map(|s| s.len()).unwrap_or(0) > MAX_TOPOLOGY_BYTES {
-        return Err("La topología supera 64 MB: elimina snapshots antiguos o equipos que no uses.".into());
-    }
-    let kept: serde_json::Map<String, serde_json::Value> = o.into_iter().filter(|(k, _)| TOPOLOGY_KEYS.contains(&k.as_str())).collect();
-    write_json(&state.data_dir.join(TOPOLOGY_FILE), &serde_json::Value::Object(kept))
+    state.files.save(datafiles::Kind::Topology, data)
 }
 
-/// Lee settings.json. Null si no existe o no sirve; en ese caso la app usa los valores por
-/// defecto y los guarda en el próximo cambio.
-fn load_settings(path: &std::path::Path) -> serde_json::Value {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return serde_json::Value::Null,
-        Err(_) => {
-            // Existe pero no se lee (permisos, disco): se intenta respaldar igual que uno dañado.
-            session_store::backup_corrupt(path);
-            return serde_json::Value::Null;
-        }
-    };
-    match serde_json::from_slice::<serde_json::Value>(&bytes) {
-        Ok(v) if v.is_object() => v,
-        // Ajustes ilegibles (JSON inválido, bytes que no son UTF-8 o algo que no es un objeto):
-        // se respaldan antes de que la app los reemplace por los valores por defecto, para no
-        // perder macros, monitores ni el token MCP.
-        _ => {
-            session_store::backup_corrupt(path);
-            serde_json::Value::Null
-        }
-    }
-}
-
-#[tauri::command]
+#[tauri::command(async)]
 fn save_settings(settings: serde_json::Value, state: State<'_, AppState>) -> Result<(), String> {
-    write_json(&state.data_dir.join("settings.json"), &settings)
+    state.files.save(datafiles::Kind::Settings, settings)
 }
 
 /// Menú nativo de macOS sin "Cerrar ventana" (⌘W), que la app usa para cerrar pestañas.
@@ -1276,7 +1222,7 @@ pub fn run() {
             }
             let data_dir = session_store::resolve_data_dir(os_dir);
             // Corrige permisos de archivos creados por versiones anteriores.
-            for f in ["settings.json", "sessions.json", TOPOLOGY_FILE] {
+            for f in [datafiles::SETTINGS_FILE, datafiles::SESSIONS_FILE, datafiles::TOPOLOGY_FILE] {
                 session_store::restrict(&data_dir.join(f));
             }
             // Temporales huérfanos de `write_atomic` (corte entre crear y renombrar): se limpian en
@@ -1287,6 +1233,8 @@ pub fn run() {
                     seal::cleanup_orphan_temps(&[&data, &notes, &packs], std::time::Duration::from_secs(3600));
                 });
             }
+            // Respaldo del último estado válido (a lo más uno por día), en un hilo aparte.
+            datafiles::spawn_rotation(data_dir.clone());
             app.manage(updates::Pending::default());
             app.manage(AppState {
                 store: SessionStore::new(&data_dir),
@@ -1298,6 +1246,7 @@ pub fn run() {
                 servers: servers::Servers::default(),
                 creds: credentials::Credentials::new(&data_dir, session_store::is_portable()),
                 secure_notes: notes::SecureNotes::default(),
+                files: datafiles::DataFiles::new(&data_dir),
                 data_dir,
                 logs_root: std::sync::Mutex::new(None),
             });
@@ -1498,89 +1447,6 @@ mod tests {
             "name": "t", "type": "ssh", "host": "noc@[2001:DB8::1]", "jump_host": jump, "ssh_args": args
         }))
         .unwrap()
-    }
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nt-{tag}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    fn backups(dir: &std::path::Path, prefix: &str) -> usize {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
-            .count()
-    }
-
-    /// topology.json manda sobre settings.json y solo aporta sus dos claves; sin archivo (o dañado)
-    /// los ajustes quedan como estaban, sin la marca de migración.
-    #[test]
-    fn topology_store_merges_over_settings() {
-        use serde_json::json;
-        let s = json!({"fontSize": 14, "topology": {"nodes": [1]}});
-        let merged = merge_topology(s.clone(), json!({"topology": {"nodes": [2]}, "topoSnapshots": [], "otro": 1}));
-        assert_eq!(merged["topology"]["nodes"][0], 2);
-        assert_eq!(merged["fontSize"], 14);
-        assert!(merged.get("otro").is_none());
-        assert_eq!(merged["__topoStore"], true);
-        assert_eq!(merge_topology(s.clone(), serde_json::Value::Null), s);
-        assert_eq!(merge_topology(serde_json::Value::Null, json!({"topoSnapshots": []}))["__topoStore"], true);
-        let d = temp_dir("topojson");
-        let small = d.join("a.json");
-        write_json(&small, &json!({"a": 1})).unwrap();
-        assert!(std::fs::read_to_string(&small).unwrap().contains('\n'), "chico: con sangría");
-        let big = d.join("b.json");
-        write_json(&big, &json!({"x": "y".repeat(600 * 1024)})).unwrap();
-        assert!(!std::fs::read_to_string(&big).unwrap().contains('\n'), "grande: compacto");
-        // Guardados simultáneos del mismo archivo: queda un JSON íntegro y sin temporales.
-        let same = d.join("c.json");
-        let hs: Vec<_> = (0..8)
-            .map(|i| {
-                let p = same.clone();
-                std::thread::spawn(move || {
-                    for _ in 0..20 {
-                        write_json(&p, &json!({"n": i, "pad": "z".repeat(100_000)})).unwrap();
-                    }
-                })
-            })
-            .collect();
-        for h in hs {
-            h.join().unwrap();
-        }
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&same).unwrap()).unwrap();
-        assert_eq!(v["pad"].as_str().unwrap().len(), 100_000);
-        let tmps = std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
-        assert_eq!(tmps, 0);
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    /// Arranque con settings.json ausente, dañado, con bytes que no son UTF-8 o que no es un
-    /// objeto: nunca falla, devuelve Null (valores por defecto) y respalda lo que había.
-    #[test]
-    fn settings_load_tolerates_missing_and_corrupt_files() {
-        let d = temp_dir("settings");
-        let path = d.join("settings.json");
-        assert!(load_settings(&path).is_null());
-        assert_eq!(backups(&d, "settings.corrupt-"), 0, "sin archivo no hay nada que respaldar");
-
-        std::fs::write(&path, r#"{"fontSize": 15, "futuro": true}"#).unwrap();
-        assert_eq!(load_settings(&path)["fontSize"], 15);
-        assert_eq!(backups(&d, "settings.corrupt-"), 0);
-
-        let cases: [&[u8]; 4] = [br#"{"fontSize": 1"#, b"[1, 2]", b"null", &[0xff, 0xfe, b'{']];
-        for (i, bad) in cases.into_iter().enumerate() {
-            let sub = d.join(format!("c{i}"));
-            std::fs::create_dir_all(&sub).unwrap();
-            let p = sub.join("settings.json");
-            std::fs::write(&p, bad).unwrap();
-            assert!(load_settings(&p).is_null(), "caso {i}");
-            assert_eq!(backups(&sub, "settings.corrupt-"), 1, "caso {i}");
-            // El original sigue intacto hasta que la app guarde.
-            assert_eq!(std::fs::read(&p).unwrap(), bad);
-        }
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

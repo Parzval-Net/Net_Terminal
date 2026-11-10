@@ -263,7 +263,7 @@ Auditoría del binario con REA (Ghidra y utilidades nativas de macOS) y revisió
 | TFTP y FTP: la escritura del gestor de archivos se habilita en caliente solo durante una extracción y se quita al terminar (sin reiniciar el servidor); "Permitir subidas" vale solo para la sesión de la app. TFTP: máx. 16 sesiones simultáneas, retransmisiones descartadas, tope de 8 GB por archivo y temporales únicos | Con tests |
 | Plugins: la revisión muestra todo el código Python; un plugin alterado no se reaprueba sin revisar su código; Python corre con `-B` y se borra `__pycache__` antes de ejecutar | Código |
 | Actualizaciones: firma Ed25519 verificada antes de instalar, índice y paquetes solo desde los releases del repositorio oficial, instalación siempre con confirmación | Diseño |
-| Datos: si `sessions.json` o `settings.json` no se pueden leer completos, se respalda el original (`*.corrupt-<fecha>.json`) y se conservan las sesiones válidas | Con tests |
+| Datos: si `sessions.json`, `settings.json` o `topology.json` no se pueden leer completos, se respalda el original (`*.corrupt-<fecha>.json`, los últimos 5) y se conservan las sesiones válidas; se restaura el último respaldo válido (`.bak`, `.bak2`), con copias previas a migrar (`.v<N>.bak.json`), permisos 600 y topes de tamaño y cantidad ([detalle](#versión-de-esquema-y-respaldos-de-datos)) | Con tests |
 | MCP: apagado por defecto, solo 127.0.0.1, token comparado en tiempo constante, validación de Origin y Host (DNS rebinding), cuerpo máx. 1 MB, aprobación por comando (siempre en terminal local) con el riesgo calculado por la app y una confirmación extra si puede cortar servicio, máx. 3 aprobaciones pendientes, modo solo lectura | Con tests |
 | Prompt injection: la salida de equipos se declara como dato no confiable para el agente y cada comando se muestra completo antes de aprobar | Diseño |
 | Resaltado: regex propias o importadas con riesgo de ReDoS se rechazan; los scripts usan el motor `regex` de Rust (tiempo lineal) | Con tests |
@@ -587,6 +587,44 @@ Las pruebas de Node importan los `.ts` de `src/lib` directamente y requieren Nod
 - **Topología** (`components/tools/topology/`): `useTopoSnapshots`, `useTopoSelection` (equipo y ruta), `useTopoZoom` (con `useTopoSize`, sobre `lib/mapZoom.ts`), `useTopoHops` (saltos, rutas y credenciales, sobre `lib/hopTab.ts`) y `useTopoDiscovery` (consola y SNMP). Vistas: `TopoToolbar`, `TopoCanvas` (`TopoLayers`, `LinkTip`, `MapSummary`, `MapLegend`, `ZoomControls`) y `TopoPanel` con sus secciones (`PanelConfig`, `PanelStatus`, `PanelItem`). Constantes, tipos, estilos y persistencia de la interfaz: `topoConst`, `topoTypes`, `topoStyle`, `topoUi`.
 - Una prueba de rendimiento manual al tocar Topología: con `?scene=topology-big` (400 equipos) del backend simulado, arrastrar un equipo debe volver a dibujar solo sus enlaces y él (≈2 `LinkView` y 1 `NodeView` por movimiento) y el zoom y el arrastre del fondo no deben dibujar ninguna capa del mapa.
 
+### Versión de esquema y respaldos de datos
+
+Los datos del usuario son JSON sin cambios de formato: una versión anterior de la app abre los mismos archivos. Todo lo nuevo es aditivo (un campo y archivos de respaldo junto a los datos). Código: `src-tauri/src/datafiles.rs` (versión, migraciones, respaldos, validación) y `src/lib/settings.ts` (pasos de la interfaz y avisos).
+
+**Versión de esquema (`schemaVersion`).** `settings.json` y `topology.json` llevan el entero `schemaVersion`, que escribe el backend en cada guardado (la interfaz no lo ve). `sessions.json` es un arreglo: un campo nuevo lo rompería para versiones anteriores, así que no lleva versión y solo tiene respaldo. Un archivo sin el campo es v0 (todo lo escrito hasta la 0.9.20). La versión actual es 1.
+
+| Paso | Dónde | Qué hace |
+| --- | --- | --- |
+| 0 → 1 `settings.json` y `topology.json` | `datafiles.rs` (`SETTINGS_MIGRATIONS`, `TOPOLOGY_MIGRATIONS`) | Formaliza el formato de la 0.9.20: solo agrega `schemaVersion`. Valida al leer (ver abajo). |
+| 0 → 1 ajustes de la interfaz | `settings.ts` (`SETTINGS_MIGRATIONS`) | `migrateSuggest`: `commandSuggestSet` según el `commandSuggest` guardado (la beta que quedó en `false` sin tocarla pasa al nuevo valor por defecto). Solo corre si el archivo es v0; el resultado es el mismo que antes. |
+| Independiente del número | `get_settings` / `useSettings` | Separación de la topología (0.9.14): si existe `topology.json` el backend la mezcla y marca `__topoStore`; si no, la interfaz la guarda en su archivo en el próximo cambio. |
+| Independiente del número | `TopologyTool.tsx` | `UI_VERSION` de `topoUi` (estilos del tráfico) vive en localStorage, no en estos archivos. |
+
+Cómo se aplican: al leer, la migración corre **en memoria**; el archivo no se reescribe hasta el siguiente guardado normal (leer no escribe, así el arranque no cambia). Los pasos son idempotentes y los prueba `cargo test` (cadena completa, orden, idempotencia, una cadena de dos versiones simulada) y `npm test` (`settingsSchema.test.mjs`), con archivos de ejemplo de la 0.9.11, 0.9.16 y 0.9.20 en `scripts/tests/fixtures/datafiles/`. Para agregar la versión 2: subir `SCHEMA_VERSION` (Rust) y `SETTINGS_SCHEMA_VERSION` (TS; una prueba exige que coincidan), agregar el paso `from: 1` en la tabla que corresponda y un archivo de ejemplo de la versión 1.
+
+**Validación al leer.** Lo inválido se descarta sin fallar todo: `topology` sin `nodes`/`links` como arreglos, `topoSnapshots` que no es arreglo o con entradas que no son objetos, `schemaVersion` que no es un entero, claves que empiezan con `__` (marcas internas como `__topoStore`). El original se respalda antes de reescribirlo (`*.corrupt-<fecha>.json`) y `get_settings` informa qué se descartó. La forma fina de cada ajuste sigue en `mergeSettings` y `cleanTopology`. Archivos de más de 64 MB no se leen: se apartan (renombrados, sin copiarlos) como `*.corrupt-<fecha>.json`.
+
+**Respaldos** (todos con permisos 600 y escritura atómica; son copias de los datos, con el mismo contenido sensible que el original, p. ej. el token MCP):
+
+| Archivo | Cuándo se crea | Tope |
+| --- | --- | --- |
+| `settings.v<N>.bak.json`, `topology.v<N>.bak.json` | Antes del primer guardado tras migrar un archivo v`N` (o tras abrir uno de una versión posterior). Es el archivo tal como estaba. No se pisa. | Uno por versión de esquema |
+| `<archivo>.bak` y `<archivo>.bak2` (`settings.json`, `topology.json`, `sessions.json`) | Hilo aparte 15 s después de iniciar, como mucho una vez cada 20 h: el archivo actual, si es válido, pasa a `.bak` y el `.bak` anterior a `.bak2`. No se renueva si el contenido es igual, ni si el archivo se encogió a menos de la cuarta parte del respaldo (datos perdidos con JSON válido) hasta pasados 7 días; `sessions.json` vacío no se respalda. | 2 generaciones por archivo, sin respaldar sobre 64 MB |
+| `<archivo>.corrupt-<fecha>.json` | Al encontrar un archivo ilegible o descartar datos al leerlo (ya existía). | Los últimos 5 por archivo |
+
+Qué se restaura solo: si `settings.json`, `topology.json` o `sessions.json` existe pero es ilegible (JSON inválido, bytes que no son UTF-8, no es objeto/arreglo, pasa de 64 MB), la app lo respalda como `*.corrupt-<fecha>.json`, toma el primer `.bak` o `.bak2` válido, lo escribe en su lugar y lo informa. Si no hay respaldo válido, parte con los valores por defecto como antes. No se restaura un archivo borrado (borrarlo es la forma de reiniciar los ajustes) ni uno legible con datos de menos: eso es manual.
+
+Restaurar a mano: cerrar la app, copiar `<archivo>.bak` (o `.bak2`, o `settings.v0.bak.json` para volver al estado previo a la migración) sobre `<archivo>`, por ejemplo `cp settings.json.bak settings.json`, y abrir la app. La carpeta de datos se abre desde Ajustes › Logs › Carpeta de datos (en modo portable es `data/` junto a la app).
+
+**Compatibilidad.**
+
+- *Volver a una versión anterior (≤ 0.9.20)*: abre los mismos archivos. `settings.json` conserva `schemaVersion` como una clave desconocida (la versión anterior la preserva al guardar) y vuelve a leerse sin pérdidas. `topology.json` pierde `schemaVersion` cuando la versión anterior lo guarda (solo escribe `topology` y `topoSnapshots`): la versión nueva lo lee como v0 y repite la migración, sin pérdida. Los archivos `.bak`, `.bak2` y `.v<N>.bak.json` no los usa ni los toca. `sessions.json` no cambia de formato.
+- *Abrir datos de una versión posterior (esquema mayor al conocido)*: se abre igual. `get_settings` devuelve `newer: true` y la interfaz avisa una sola vez. Antes de reescribir se copia el original a `<archivo>.v<N>.bak.json`; al guardar se conservan las claves desconocidas (también las de `topology.json`) y las claves cuyo tipo JSON esta versión no entiende, y no se baja el número de versión. Lo que sí se pierde: un valor que esta versión entiende pero cuya forma cambió sin cambiar de tipo (por ejemplo, un objeto `topology` con otra estructura): gana lo que guarda esta versión; el original sigue en el `.v<N>.bak.json`.
+
+**Avisos hacia la interfaz.** `get_settings` agrega `__datafiles` (`{schemaVersion, settings, topology, sessions}`; cada archivo con `fileVersion`, `newer`, `migratedFrom`, `restoredFrom`, `dropped`, `tooLarge`, `corrupt`; `sessions` solo si hubo algo y una sola vez). `loadSettings` y `describeDataNotices` (`settings.ts`) lo convierten en textos, y `useSettings()` devuelve como tercer elemento `{ messages, saveError, dismiss }`: los mensajes de datos se muestran una vez por equipo (`dataNoticeSeen` en localStorage) y `saveError` trae el error del último guardado fallido, p. ej. «La topología supera 64 MB…», que antes solo iba a la consola.
+
+**Rendimiento.** Leer no agrega pasos medibles: la prueba `load_time_stays_close_to_plain_parse` carga una topología grande con el flujo anterior (leer, parsear, mezclar) y con el nuevo, e imprime ambos tiempos (`cargo test -- load_time --nocapture`); la copia de respaldo y la limpieza van en un hilo aparte. `save_settings`, `save_topology` y `get_settings` son comandos `async` (no ocupan el hilo de la interfaz).
+
 ### Regenerar las capturas
 
 Con `npx vite --port 1430` en marcha, ejecuta `node scripts/screenshots/shoot.mjs` (requiere Google Chrome; acepta nombres de captura como argumentos y las variables `PORT`, `OUT`, `BASE` y `CDP_PORT`). Usa un backend simulado (`scripts/screenshots/mock.js`) con datos ficticios, nunca tus sesiones reales.
@@ -614,6 +652,7 @@ src-tauri/src/
   connection.rs           Conexiones: PTY (local/SSH), Telnet, Serial y logs
   telnet.rs               Protocolo Telnet (con tests)
   session_store.rs        Persistencia de sesiones y modo portable
+  datafiles.rs            Versión de esquema, migraciones, respaldos y validación de settings, topología y sesiones (con tests)
   notes.rs                Notas en texto plano (con tests)
   monitor.rs, nettools.rs Sondas, traceroute, iperf3, puertos, speedtest
   servers.rs, filexfer.rs TFTP/HTTP/Syslog y comandos de archivos en equipos
