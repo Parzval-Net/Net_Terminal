@@ -107,9 +107,11 @@ const maxRisk = (a: Risk, b: Risk): Risk => (RANK[a] >= RANK[b] ? a : b);
  * filter <criterio>" (fija un filtro); "diagnose test authserver" prueba credenciales.
  * ssh, telnet y stelnet se reconocen aparte (remoteCommand): con argumentos de más son
  * configuración ("ssh server enable", "telnet 10.0.0.0 255.0.0.0 inside") o un comando remoto.
+ * Tampoco son consulta las transferencias ("copy … tftp:", "tftp <ip> put", "execute backup"): sacan
+ * datos del equipo hacia un servidor externo aunque no cambien su configuración (ver leavesDevice).
  */
 const READ_START =
-  /^(show|display|get|dir|more|ping|traceroute|tracert|tracepath|verify|monitor (traffic(?!.*\swr)|interface|start|stop)|test policy|compare configuration|who|policy-check|tcpdump|dnslookup|nslookup|vpn-tunnel diag-report|(undo )?terminal (logging|monitor|debugging|trapping)|request system storage cleanup dry-run|request system software validate|admin show|packet-tracer|ethanalyzer local(?!.*\swr)|terminal (length|width|(no )?monitor|pager)|no page\s*$|checkpoint diff\b|diag cable-diagnostic show\b|cd \/md\S*\s*$|mdconnect\s*$|screen-length\s+\d+\s+temporary|screen-width|set cli |file (list|show|checksum)|commit check|request support information|diagnose (sys (top|status|session (stat|list)|session filter(?=\s*$)|ha (status|checksum (?!rec)))|vpn (ike gateway|tunnel) list|sniffer packet|ip (route|arp) list|firewall iprope lookup|test application(?!\s+\S+\s+99\b))|execute (ping6?|traceroute6?|telnet|ssh)(?!-)|execute (ping|traceroute)-options view-settings|tftp \S+ put|copy (running-config|startup-config|run|start) (tftp|scp|ftp|http)|execute backup)\b/i;
+  /^(show|display|get|dir|more|ping|traceroute|tracert|tracepath|verify|monitor (traffic(?!.*\swr)|interface|start|stop)|test policy|compare configuration|who|policy-check|tcpdump|dnslookup|nslookup|vpn-tunnel diag-report|(undo )?terminal (logging|monitor|debugging|trapping)|request system storage cleanup dry-run|request system software validate|admin show|packet-tracer|ethanalyzer local(?!.*\swr)|terminal (length|width|(no )?monitor|pager)|no page\s*$|checkpoint diff\b|diag cable-diagnostic show\b|cd \/md\S*\s*$|mdconnect\s*$|screen-length\s+\d+\s+temporary|screen-width|set cli |file (list|show|checksum)|commit check|request support information|diagnose (sys (top|status|session (stat|list)|session filter(?=\s*$)|ha (status|checksum (?!rec)))|vpn (ike gateway|tunnel) list|sniffer packet|ip (route|arp) list|firewall iprope lookup|test application(?!\s+\S+\s+99\b))|execute (ping6?|traceroute6?|telnet|ssh)(?!-)|execute (ping|traceroute)-options view-settings)\b/i;
 
 /**
  * Cortan servicio o sesiones, o dejan el equipo en otro estado (conmutación, rollback,
@@ -159,11 +161,12 @@ const STP_MODE = /^spanning-tree mode (stp|rstp|mstp|pvst|rpvst|\{\{\w+\}\})\s*$
 /**
  * FortiOS: "diagnose ..." consulta salvo que lleve un verbo que cambia estado ("up" y "down"
  * levantan o bajan túneles, "wtp_filter" o "sniff" fijan filtros o capturas en el AP). El verbo
- * se busca también unido con "_" o "-". "diagnose debug" va aparte (FORTI_DEBUG_READ): casi
+ * se busca también unido con "_" o "-" ("upload", "backup", "export" y "send" sacan datos del equipo).
+ * "diagnose debug" va aparte (FORTI_DEBUG_READ): casi
  * todo lo que lleva activa o ajusta la depuración, que es un cambio de estado.
  */
 const FORTI_DIAG_READ =
-  /^diagnose(?!\s+debug\b)(?!.*(?:^|[\s_-])(clear|delete|del|reset|kill|killall|restart|flush|enable|disable|set|unset|start|stop|filter|update|purge|failover|clean|reload|test(?!-connectivity)|run|reboot|shutdown|up|down|recalculate|refresh|kick\w*|sniff|plain-ctl|atcmd|cmd|trigger|push|upgrade|add|remove|renew|release|erase|format|toggle|block|unblock)(?=$|[\s_-]))/i;
+  /^diagnose(?!\s+debug\b)(?!.*(?:^|[\s_-])(clear|delete|del|reset|kill|killall|restart|flush|enable|disable|set|unset|start|stop|filter|update|purge|failover|clean|reload|test(?!-connectivity)|run|reboot|shutdown|up|down|recalculate|refresh|kick\w*|sniff|plain-ctl|atcmd|cmd|trigger|push|upgrade|add|remove|renew|release|erase|format|toggle|block|unblock|upload|backup|export|send)(?=$|[\s_-]))/i;
 /** "diagnose debug" de solo lectura: estado, reportes y registros ya guardados. */
 const FORTI_DEBUG_READ = /^diagnose debug (info|report|rating|crashlog read|config-error-log read|authd fsso (list|server-status|summary))\s*$/i;
 const FORTI_EXEC_READ =
@@ -178,11 +181,11 @@ const FORTIAP_READ =
 /**
  * Check Point (Gaia clish/expert): comandos de consulta propios. Excluye explícitamente
  * las opciones que modifican (fw tab -x, fw ctl conntab -x, cphaprob -d ... register o
- * unregister), las capturas que escriben a disco (-o) y el menú interactivo "vpn tu", que
- * permite borrar SA.
+ * unregister), las capturas que escriben a disco (-o), el menú interactivo "vpn tu", que
+ * permite borrar SA, y "mgmt_cli show" contra otro servidor (-m), que le entrega las credenciales.
  */
 const CHECKPOINT_READ =
-  /^(fw (ver|stat|tab\b(?!.*\s-x\b)|ctl (iflist|arp|conntab(?!.*\s-x\b)|multik (stat|print_heavy_conn)|affinity -l|fast_accel show_table|pstat|chain|get)\b|up_execute|samp get|log|lslogs|getifs)|fwaccel (stat|stats|conns|ver)\b|cphaprob\b(?!.*\s-d\b)(?!.*\b(un)?register\b)|cpstat|cpinfo(?!.*\s-o\b)|cplic print|cpview|cpwd_admin list|api status|mdsstat|mdsenv|\$MDSVERUTIL|vpn (tu (tlist|list)\b|overlap_encdom)|vsenv|vsx stat|ips stat|mgmt_cli show|asg (monitor|stat)|connection_pipelining (status|heaviest_conn)|dynamic_balancing -p|cppcap(?!.*\s-o\b)|fw monitor(?!.*\s-o\b)|fgate stat|cp_log_export show|set virtual-system \S+$)/i;
+  /^(fw (ver|stat|tab\b(?!.*\s-x\b)|ctl (iflist|arp|conntab(?!.*\s-x\b)|multik (stat|print_heavy_conn)|affinity -l|fast_accel show_table|pstat|chain|get)\b|up_execute|samp get|log|lslogs|getifs)|fwaccel (stat|stats|conns|ver)\b|cphaprob\b(?!.*\s-d\b)(?!.*\b(un)?register\b)|cpstat|cpinfo(?!.*\s-o\b)|cplic print|cpview|cpwd_admin list|api status|mdsstat|mdsenv|\$MDSVERUTIL|vpn (tu (tlist|list)\b|overlap_encdom)|vsenv|vsx stat|ips stat|mgmt_cli show(?!.*\s(-m|--management)\s)|asg (monitor|stat)|connection_pipelining (status|heaviest_conn)|dynamic_balancing -p|cppcap(?!.*\s-o\b)|fw monitor(?!.*\s-o\b)|fgate stat|cp_log_export show|set virtual-system \S+$)/i;
 
 /**
  * arp de consulta (Windows, macOS, Linux): solo opciones de lectura y a lo más una dirección.
@@ -224,10 +227,43 @@ const [TCPDUMP_WRITE, TSHARK_WRITE, DMESG_WRITE, SS_WRITE, CURL_WRITE] = [
   /^ss\b.*\s(-[A-Za-z]*D|--d)/,
   // curl: otro método, datos o subida (-X, -d, -F, -T, --json…), escribir archivos (-o salvo a /dev/null, -O, -D, -c,
   // --etag-save, --hsts, --alt-svc, "-w %output{…}" desde curl 8.3) o leer opciones de un archivo (-K) ya no es una
-  // consulta; tampoco un esquema que habla con otro servicio (gopher://, telnet://, dict://… envían comandos).
-  /^curl\b.*(\s(-[A-Za-z]*[XdDFTOKcQ]|-[A-Za-z]*o\s*(?!\/dev\/null\b|nul\b|\$null\b)\S|--(request|data|form|upload-file|output|remote-name|config|json|cookie-jar|post30[123]|dump-header|trace|trace-ascii|stderr|libcurl|create-dirs|ftp-create-dirs|quote|mail-rcpt|etag-save|hsts|alt-svc|output-dir))|%output\{|\b(gopher|telnet|dict|ldaps?|smtps?|imaps?|pop3s?|mqtts?|rtsp|tftp|file|scp|sftp|smbs?|wss?):\/\/)/,
+  // consulta; tampoco un esquema que habla con otro servicio (gopher://, telnet://, dict://… envían comandos). Envían
+  // el contenido de un archivo local al servidor: cookies (-b, --cookie), cabeceras "-H @archivo", --url-query,
+  // --netrc-file y las variables de curl 8.3 (--variable nombre@archivo con --expand-*).
+  /^curl\b.*(\s(-[A-Za-z]*[XdDFTOKcQb]|-[A-Za-z]*o\s*(?!\/dev\/null\b|nul\b|\$null\b)\S|--(request|data|form|upload-file|output|remote-name|config|json|cookie|post30[123]|dump-header|trace|trace-ascii|stderr|libcurl|create-dirs|ftp-create-dirs|quote|mail-rcpt|etag-save|hsts|alt-svc|output-dir|variable|expand-|url-query|netrc-file)|(-H|--header|--proxy-header)\s*['"]?@)|%output\{|\b(gopher|telnet|dict|ldaps?|smtps?|imaps?|pop3s?|mqtts?|rtsp|tftp|file|scp|sftp|smbs?|wss?):\/\/)/,
 ];
-const WRITE_FLAGS: Record<string, RegExp> = { tcpdump: TCPDUMP_WRITE, tshark: TSHARK_WRITE, dmesg: DMESG_WRITE, ss: SS_WRITE, curl: CURL_WRITE };
+const WRITE_FLAGS: Record<string, RegExp> = {
+  tcpdump: TCPDUMP_WRITE,
+  tshark: TSHARK_WRITE,
+  dmesg: DMESG_WRITE,
+  ss: SS_WRITE,
+  curl: CURL_WRITE,
+  // nc sin -z abre una conexión de datos: lo que llegue por la entrada sale al otro equipo.
+  nc: /^nc\b(?!.*\s-[A-Za-z46]*z)/,
+  // dig -f lee las consultas de un archivo: cada línea sale como un nombre DNS hacia el servidor.
+  dig: /^dig\b.*\s-[46mru]*f/,
+  // openssl s_client: -sess_out, -keylogfile, -msgfile y -out escriben un archivo.
+  openssl: /^openssl\b.*\s-(sess_out|keylogfile|msgfile|out)\b/,
+};
+
+/**
+ * wget solo es consulta como "wget --spider <url>" con opciones de salida y de conexión. Cualquier otra opción
+ * puede enviar un archivo (--post-file, --body-file), leer las URL de un archivo (-i, que con --base las arma con
+ * cada línea) o escribir en disco.
+ */
+const WGET_READ_OPT = /^(--spider|-q|--quiet|-S|--server-response|-nv|--no-verbose|-v|--verbose|-4|-6|--inet[46]-only|--no-check-certificate|-T\d*|--timeout=\d+|-t\d*|--tries=\d+|--max-redirect=\d+)$/;
+function wgetRead(line: string): boolean {
+  const toks = line.split(/\s+/);
+  for (let i = 1; i < toks.length; i++) {
+    const t = toks[i];
+    if (!t) continue;
+    if (t[0] !== "-") continue;
+    if (!WGET_READ_OPT.test(t)) return false;
+    // -T 5, -t 3: el número va aparte.
+    if ((t === "-T" || t === "-t") && /^\d+$/.test(toks[i + 1] ?? "")) i++;
+  }
+  return true;
+}
 
 /**
  * ethtool distingue mayúsculas: -k/-g/-a/-l/-c muestran y -K/-G/-A/-L/-C cambian (y -E
@@ -254,7 +290,8 @@ const OS_READ = new RegExp(
       // netsh [contexto...] show: "show" debe ser el verbo (antes de él solo contextos).
       "netsh(\\s+-[rcup]\\s+\\S+)*(\\s+(?!(set|add|delete|del|reset|start|stop|dump|connect|disconnect|import|export|install|uninstall|exec|flush|renew|release|refresh|reconnect|update|init|commit|abort|alias|unalias|offline|online|pushd|popd)\\b)[a-z0-9][\\w-]*){0,5}\\s+show\\b",
       "route print|getmac|nbtstat -[acnsS]\\b|pathping|systeminfo|whoami|typeperf(?!.*\\s-o\\b)|w32tm /(query|stripchart|monitor|tz)\\b",
-      "pktmon (status|list|filter list|counters|etl2txt|etl2pcap|format|pcapng)\\b",
+      // pktmon etl2txt|etl2pcap|format|pcapng escriben un archivo convertido: no son consulta.
+      "pktmon (status|list|filter list|counters)\\b",
       "(Get-Content|gc|type) .*hosts$",
       "\\(Get-\\w+|\\$PSVersionTable\\b|tasklist\\b|rasdial$|net (use|view|share|config \\w+|statistics \\w+)$",
       "nltest /(dsgetdc|sc_query|sc_verify|dclist|domain_trusts|dsgetsite|query|parentdomain|dnsgetdc)\\b",
@@ -467,9 +504,10 @@ const LOGIN_CONFIG = /^(server|server-source|client|client-source|user|version|t
 
 /**
  * Cliente ssh/telnet/stelnet: null si no lo es (configuración o una forma desconocida), ""
- * si solo abre la sesión y, con ssh, el comando que se ejecutará en el otro equipo (su
- * riesgo es el de ese comando: "ssh host reboot" corta servicio). Una opción que ejecuta
- * algo localmente (ProxyCommand, LocalCommand) o que lee comandos de un archivo no es consulta.
+ * si solo abre la sesión y, con ssh, el comando que se ejecutará en el otro equipo (vale al
+ * menos cambio: corre en otro equipo y su salida o la entrada local cruzan hacia él; "ssh host
+ * reboot" corta servicio). Una opción que ejecuta algo localmente (ProxyCommand, LocalCommand),
+ * que lee comandos de un archivo o que abre un túnel o reenvía puertos no es consulta.
  */
 function remoteCommand(line: string): string | null {
   const m = /^(ssh|telnet|stelnet)\s+(\S.*)$/i.exec(line);
@@ -493,12 +531,13 @@ function remoteCommand(line: string): string | null {
           if (c === "v" && k === t.length - 1 && /^[12]$/.test(toks[i + 1] ?? "")) i++;
           continue;
         }
-        // -O (control), -F (archivo de configuración) e -I (biblioteca PKCS#11) cargan o ejecutan algo local.
-        if (c === "O" || c === "F" || c === "I") return null;
+        // -O (control), -F (archivo de configuración) e -I (biblioteca PKCS#11) cargan o ejecutan algo local. -L, -R,
+        // -D, -W y -w abren un túnel o reenvían puertos (un canal de datos hacia o desde otro equipo); -E escribe un archivo.
+        if ("OFILRDWwE".includes(c)) return null;
         const arg = k < t.length - 1 ? t.slice(k + 1) : toks[++i] ?? "";
         if (c === "o") {
           const opt = arg.replace(/['"]/g, "");
-          if (/(proxy|local|knownhosts)command|permitlocalcommand|pkcs11provider|securitykeyprovider/i.test(opt)) return null;
+          if (/(proxy|local|knownhosts)command|permitlocalcommand|pkcs11provider|securitykeyprovider|forward|tunnel|sendenv|setenv|stdinnull|sessiontype|logfile/i.test(opt)) return null;
           // RemoteCommand: el comando que corre en el otro equipo (con lo que sigue, por si venía entre comillas).
           if (/^remotecommand\b/i.test(opt)) return [opt.replace(/^remotecommand\s*=?\s*/i, ""), ...toks.slice(i + 1)].join(" ").replace(/['"]/g, "");
         }
@@ -713,7 +752,7 @@ const NET_ABBR: readonly Abbr[] = [
     ["arp-cache", 4], ["local-host", 2], ["configuration", 4, [["interface", 2]]], ["mac", 3, [["address-table", 2]]], ["mac-address-table", 5],
   ]],
   ["execute", 3, [
-    ["reboot", 3], ["shutdown", 3], ["factoryreset", 4], ["formatlogdisk", 4], ["restore", 4],
+    ["reboot", 3], ["shutdown", 3], ["factoryreset", 4], ["formatlogdisk", 4], ["restore", 3],
     ["ha", 2, [["failover", 1]]], ["router", 3, [["restart", 4], ["clear", 3]]],
   ]],
   ["diagnose", 4, [
@@ -727,7 +766,7 @@ const NET_ABBR: readonly Abbr[] = [
   ["redundancy", 4, [["force-switchover", 2], ["switchover", 2]]],
 ];
 /** Verbos de "diagnose" de FortiOS que cambian estado (FORTI_DIAG_READ): también abreviados ("cle", "dow", "recalc"). */
-const FORTI_DIAG_VERBS = ["clear", "delete", "reset", "kill", "killall", "restart", "flush", "enable", "disable", "unset", "start", "stop", "filter", "update", "purge", "failover", "clean", "reload", "test", "reboot", "shutdown", "down", "recalculate", "refresh", "kick", "sniff", "plain-ctl", "atcmd", "trigger", "push", "upgrade", "remove", "renew", "release", "erase", "format", "toggle", "block", "unblock"];
+const FORTI_DIAG_VERBS = ["clear", "delete", "reset", "kill", "killall", "restart", "flush", "enable", "disable", "unset", "start", "stop", "filter", "update", "purge", "failover", "clean", "reload", "test", "reboot", "shutdown", "down", "recalculate", "refresh", "kick", "sniff", "plain-ctl", "atcmd", "trigger", "push", "upgrade", "remove", "renew", "release", "erase", "format", "toggle", "block", "unblock", "upload", "backup", "export", "send"];
 
 /**
  * Prompt pegado delante del comando (copiado de la terminal o de un manual): "Router# ", "Router(config-if)# ",
@@ -1612,6 +1651,44 @@ function memberRisk(cmd: string): Risk {
   return READ_METHOD.test(m[1]) ? "read" : "change";
 }
 
+/**
+ * Datos que salen del equipo (o entran desde otro) en un comando que por su forma es consulta. Solo se revisan
+ * las consultas: el resto ya es al menos cambio. Las transferencias explícitas (copy, tftp, ftp, scp, sftp, rsync,
+ * socat, ncat, execute backup, file copy, Copy-Item, Invoke-WebRequest, certutil, bitsadmin…) no están en ninguna
+ * lista de consulta y quedan como cambio sin pasar por aquí.
+ *
+ * - Clientes de red que contactan el destino de su argumento (ping, nslookup, Resolve-DnsName, curl, nc -z…): no
+ *   son consulta si el destino o los datos se arman con el contenido del equipo, ya sea por la entrada ("| ping",
+ *   "< archivo", "<<<") o por una expansión ($x, $(…), (…), `…`, %VAR%), que permite sacarlo en nombres DNS o
+ *   en la URL (exfiltración por DNS o ICMP).
+ * - Lectores de archivos de los equipos de red (more, dir, verify, file show, show, display, type) con una URL
+ *   remota: abren una conexión hacia otro servidor.
+ * - Rutas UNC ("\\servidor\recurso"): Windows se autentica ante ese servidor y le entrega el hash NTLM.
+ */
+const NET_CLIENTS = new Set(
+  (
+    "ping ping6 traceroute traceroute6 tracert tracepath tracepath6 pathping mtr arping nping hping3 nslookup dig host getent " +
+    "nc curl wget openssl resolve-dnsname test-netconnection tnc test-connection"
+  ).split(" "),
+);
+const URL_READERS = new Set(["more", "dir", "type", "verify", "file", "show", "display", "request"]);
+/** "<", "<<" y "<<<" alimentan la entrada estándar ("<(…)" ya se evalúa como grupo; "<>" es REDIRECT_WRITE). */
+const STDIN_REDIRECT = /(?:^|[^<])<(?![(>])/;
+const DYNAMIC_ARG = /[$`(]|%\w+%/;
+const SINGLE_QUOTED = /'[^']*'/g;
+const REMOTE_URL = /(?:^|[\s"'=])(?:tftp|ftps?|sftp|scp|rcp|https?|smb|cifs|nfs):/i;
+const UNC_PATH = /(?:^|[\s"'=,(])\\\\[A-Za-z0-9{][^\s\\"']*\\/;
+
+function leavesDevice(line: string, word: string, afterPipe: boolean): boolean {
+  if (NET_CLIENTS.has(word)) {
+    if (afterPipe) return true;
+    const bare = line.replace(SINGLE_QUOTED, "''");
+    if (DYNAMIC_ARG.test(bare) || (bare.includes("<") && STDIN_REDIRECT.test(bare.replace(QUOTED, "''")))) return true;
+  }
+  if (URL_READERS.has(word) && REMOTE_URL.test(line)) return true;
+  return line.includes("\\\\") && UNC_PATH.test(line);
+}
+
 /** Un comando ya normalizado: corta servicio, es una consulta conocida o, si no, cambio. */
 function simpleRisk(cmd: string, word: string, c: Ctx, afterPipe: boolean): Risk {
   if (cuts(cmd) || (c.multi && DISRUPTIVE_IN_CONFIG.test(cmd))) return "disruptive";
@@ -1628,9 +1705,9 @@ function simpleRisk(cmd: string, word: string, c: Ctx, afterPipe: boolean): Risk
     case "telnet":
     case "stelnet": {
       const remote = remoteCommand(cmd);
-      // Tras un "|" el cliente lee comandos de la entrada: los ejecuta el otro equipo.
-      if (remote === "") return afterPipe ? "change" : "read";
-      if (remote !== null) return evalRisk(remote, c.depth + 1);
+      // Tras un "|" o con "<" el cliente lee de la entrada y la envía al otro equipo (comandos o un archivo).
+      if (remote === "") return afterPipe || STDIN_REDIRECT.test(cmd.replace(QUOTED, "''")) ? "change" : "read";
+      if (remote !== null) return maxRisk("change", evalRisk(remote, c.depth + 1));
       break;
     }
     case "find":
@@ -1648,10 +1725,15 @@ function simpleRisk(cmd: string, word: string, c: Ctx, afterPipe: boolean): Risk
       return memberRisk(cmd);
   }
   const line = cmd.includes(">") ? cmd.replace(SAFE_REDIRECT, "") : cmd;
-  if (isRead(line, word) && !WRITE_FLAGS[word]?.test(line) && !EXTRA_CHANGE.test(line) && !(word === "date" && DATE_SET.test(line))) return "read";
   const check = PIPE_READ_CHECK.get(word);
-  if (check ? check(line) : PIPE_READ_WORDS.has(word)) return "read";
-  return "change";
+  const read =
+    (isRead(line, word) &&
+      !WRITE_FLAGS[word]?.test(line) &&
+      !EXTRA_CHANGE.test(line) &&
+      !(word === "date" && DATE_SET.test(line)) &&
+      !(word === "wget" && !wgetRead(line))) ||
+    (check ? check(line) : PIPE_READ_WORDS.has(word));
+  return read && !leavesDevice(line, word, afterPipe) ? "read" : "change";
 }
 
 // ---------- Validación ----------
