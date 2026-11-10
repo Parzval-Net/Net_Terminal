@@ -15,7 +15,7 @@ interface Props {
   title?: string;
 }
 
-const PAD = { l: 44, r: 12, t: 10, b: 20 };
+const PAD = { l: 48, r: 12, t: 10, b: 22 };
 
 function niceMax(v: number): number {
   if (v <= 0) return 1;
@@ -130,7 +130,7 @@ export function LineChart({ points, unit, height = 180, xLabel, title }: Props) 
         {ticks.map((t) => (
           <g key={t.v}>
             <line x1={PAD.l} x2={W - PAD.r} y1={t.y} y2={t.y} stroke="var(--border)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-            <text x={PAD.l - 6} y={t.y + 3.5} textAnchor="end" fontSize={10} fill="var(--muted)">
+            <text x={PAD.l - 6} y={t.y + 3.5} textAnchor="end" fontSize={11} fill="var(--muted)">
               {fmt(t.v)}
             </text>
           </g>
@@ -154,7 +154,7 @@ export function LineChart({ points, unit, height = 180, xLabel, title }: Props) 
             vectorEffect="non-scaling-stroke"
           />
         )}
-        <text x={W - PAD.r} y={H - 5} textAnchor="end" fontSize={10} fill="var(--muted)">
+        <text x={W - PAD.r} y={H - 5} textAnchor="end" fontSize={11} fill="var(--muted)">
           {unit}
         </text>
       </svg>

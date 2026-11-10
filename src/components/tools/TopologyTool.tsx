@@ -5,12 +5,15 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   Activity,
+  ArrowLeft,
   Camera,
   Check,
   ChevronDown,
   ChevronUp,
   Copy,
   Download,
+  Ellipsis,
+  Expand,
   FileCode2,
   GitCompare,
   Lightbulb,
@@ -25,6 +28,7 @@ import {
   Radar,
   Route,
   Search,
+  SlidersHorizontal,
   Trash2,
   TriangleAlert,
   X,
@@ -118,7 +122,21 @@ import {
   utilLevel,
   flowTiming,
 } from "../../lib/topology";
-import { pinchMetrics, pinchZoom, wheelFactor, wheelIntent } from "../../lib/mapZoom";
+import {
+  ZOOM_MAX,
+  ZOOM_MIN,
+  centerScroll,
+  floorZoom,
+  labelsVisible,
+  pinchMetrics,
+  pinchZoom,
+  revealScroll,
+  scaleAt,
+  smallScale,
+  textScale,
+  wheelFactor,
+  wheelIntent,
+} from "../../lib/mapZoom";
 import {
   HopAction,
   HopJob,
@@ -239,8 +257,6 @@ const L2H = 38;
 /** Sobre esta cantidad de equipos con puertos sin vecino, el nodo L2 se dibuja solo para el seleccionado. */
 const MAX_L2_NODES = 120;
 /** Límites del zoom del mapa (botones, pellizco y Ctrl/⌘ + rueda). */
-const ZOOM_MIN = 0.4;
-const ZOOM_MAX = 4;
 /** Separación entre enlaces paralelos del mismo par de equipos. */
 const PARALLEL_GAP = 26;
 /** Máximo de interfaces que se consultan en detalle (Junos) para no saturar la sesión. */
@@ -602,7 +618,7 @@ function DirBar({ d, approx }: { d: LinkDetail["dirs"][number]; approx?: boolean
           <span className={d.level === "normal" ? "" : "font-semibold"} style={d.level === "normal" ? undefined : { color: `color-mix(in srgb, ${LEVEL_COLOR[d.level]} 55%, var(--text))` }}>
             {pct === undefined ? "?" : `${approx ? "≈" : ""}${pct} %`}
           </span>
-          <span className="text-[10.5px] text-muted"> {bpsEs(d.bps)}</span>
+          <span className="text-[11px] text-muted"> {bpsEs(d.bps)}</span>
         </span>
       </div>
       <div className="mt-0.5 h-1.5 rounded-full bg-line overflow-hidden" aria-hidden>
@@ -622,13 +638,13 @@ function LinkTipBody({ d, now }: { d: LinkDetail; now: number }) {
         <span className="min-w-0 truncate text-[12px] font-semibold">
           {d.aName} → {d.bName}
         </span>
-        <span className="shrink-0 text-[10.5px] text-muted">{d.proto}</span>
+        <span className="shrink-0 text-[11px] text-muted">{d.proto}</span>
         {chip && (
-          <span className="ml-auto shrink-0 rounded-full px-1.5 text-[10.5px] font-semibold" style={{ background: `color-mix(in srgb, ${chipColor} 18%, var(--panel))`, color: `color-mix(in srgb, ${chipColor} 40%, var(--text))` }}>
+          <span className="ml-auto shrink-0 rounded-full px-1.5 text-[11px] font-semibold" style={{ background: `color-mix(in srgb, ${chipColor} 18%, var(--panel))`, color: `color-mix(in srgb, ${chipColor} 40%, var(--text))` }}>
             {chip}
           </span>
         )}
-        {d.state && <span className="ml-auto shrink-0 text-[10.5px] text-muted">{d.state === "removed" ? "ya no aparece" : "nuevo"}</span>}
+        {d.state && <span className="ml-auto shrink-0 text-[11px] text-muted">{d.state === "removed" ? "ya no aparece" : "nuevo"}</span>}
       </div>
       {d.ends.map((e, i) => (
         <p key={i} className="mt-0.5 text-muted [overflow-wrap:anywhere]">
@@ -649,8 +665,8 @@ function LinkTipBody({ d, now }: { d: LinkDetail; now: number }) {
           {d.dirs.map((x) => (
             <DirBar key={x.label} d={x} approx={d.approx} />
           ))}
-          {d.approx && <p className="mt-0.5 text-[10.5px] text-muted">≈ velocidad del BW configurado (aproximada)</p>}
-          {!d.speed && <p className="mt-0.5 text-[10.5px] text-muted">Velocidad del enlace desconocida: sin % de uso.</p>}
+          {d.approx && <p className="mt-0.5 text-[11px] text-muted">≈ velocidad del BW configurado (aproximada)</p>}
+          {!d.speed && <p className="mt-0.5 text-[11px] text-muted">Velocidad del enlace desconocida: sin % de uso.</p>}
         </>
       ) : (
         <p className="mt-1.5 text-muted">Sin lectura de tráfico</p>
@@ -659,7 +675,7 @@ function LinkTipBody({ d, now }: { d: LinkDetail; now: number }) {
         {d.findings.length ? (
           d.findings.map((f, i) => (
             <p key={i} className="flex items-start gap-1.5">
-              <span className="mt-[1px] grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full text-[9.5px] font-bold" style={{ background: "var(--warn)", color: "var(--panel)" }} aria-hidden>
+              <span className="mt-[1px] grid h-4 w-4 shrink-0 place-items-center rounded-full text-[11px] font-bold" style={{ background: "var(--warn)", color: "var(--panel)" }} aria-hidden>
                 !
               </span>
               <span className="[overflow-wrap:anywhere]">{f.text}</span>
@@ -670,7 +686,7 @@ function LinkTipBody({ d, now }: { d: LinkDetail; now: number }) {
         )}
       </div>
       {d.ts && d.source && (
-        <p className="mt-1 text-[10.5px] text-muted">
+        <p className="mt-1 text-[11px] text-muted">
           {d.source} · {ageText(d.ts, now)}
         </p>
       )}
@@ -738,6 +754,15 @@ const LinkTip = memo(function LinkTip({ store, box, detailsFor }: { store: TipSt
     </div>
   );
 });
+
+/**
+ * Textos del dibujo con contraescala: el tamaño sale de la variable --ts que el SVG fija según el
+ * zoom (mapZoom.textScale y smallScale), así el nombre del equipo se mantiene legible al achicar sin rehacer cada
+ * equipo. Los textos chicos (puertos, IP) además se ocultan con --sm bajo el umbral de zoom. La
+ * exportación SVG y draw.io no pasa por aquí.
+ */
+const scaledText = (px: number): React.CSSProperties => ({ fontSize: `calc(${px}px * var(--ts, 1))` });
+const smallText = (px: number): React.CSSProperties => ({ fontSize: `calc(${px}px * var(--ss, 1))`, display: "var(--sm, inline)" as React.CSSProperties["display"] });
 
 /**
  * Un enlace del diagrama. Memorizado: al arrastrar un equipo solo se redibujan sus enlaces (los
@@ -869,17 +894,17 @@ const LinkView = memo(function LinkView({
       )
         .filter(([, label]) => label)
         .map(([pt, label], j) => (
-          <text key={j} x={pt.x} y={pt.y} fontSize={11} textAnchor="middle" fill="var(--text)" stroke="var(--panel)" strokeWidth={4} paintOrder="stroke">
+          <text key={j} x={pt.x} y={pt.y} style={smallText(11)} textAnchor="middle" fill="var(--text)" stroke="var(--panel)" strokeWidth={4} paintOrder="stroke">
             {label}
           </text>
         ))}
       {showGroup ? (
-        <text x={g.mid.x} y={g.mid.y + 4} fontSize={11} fontWeight={600} textAnchor="middle" fill="var(--accent)" stroke="var(--panel)" strokeWidth={4} paintOrder="stroke">
+        <text x={g.mid.x} y={g.mid.y + 4} style={smallText(11)} fontWeight={600} textAnchor="middle" fill="var(--accent)" stroke="var(--panel)" strokeWidth={4} paintOrder="stroke">
           {grp} ×{g.pair.length}
         </text>
       ) : (
         (isRoutingProto(g.l.proto) || g.l.proto === "MAC/OUI") && (
-          <text x={g.mid.x} y={g.mid.y + 4} fontSize={10} fontWeight={600} textAnchor="middle" fill="var(--muted)" stroke="var(--panel)" strokeWidth={4} paintOrder="stroke">
+          <text x={g.mid.x} y={g.mid.y + 4} style={smallText(11)} fontWeight={600} textAnchor="middle" fill="var(--muted)" stroke="var(--panel)" strokeWidth={4} paintOrder="stroke">
             {protoLabel(g.l)}
           </text>
         )
@@ -907,10 +932,10 @@ const L2View = memo(function L2View({ v, faded, onPick }: { v: L2Geo; faded: boo
       </title>
       <line x1={v.from.x} y1={v.from.y} x2={v.x} y2={v.y} stroke="var(--muted)" strokeWidth={1.25} strokeDasharray="2 4" />
       <rect x={v.x - L2W / 2} y={v.y - L2H / 2} width={L2W} height={L2H} rx={8} fill="var(--panel)" stroke="var(--field-border)" strokeDasharray="3 3" />
-      <text x={v.x} y={v.y - 2} fontSize={11.5} fontWeight={600} textAnchor="middle" fill="var(--text)">
+      <text x={v.x} y={v.y - 2} style={scaledText(11.5)} fontWeight={600} textAnchor="middle" fill="var(--text)">
         L2 desconocido
       </text>
-      <text x={v.x} y={v.y + 12} fontSize={10.5} textAnchor="middle" fill="var(--muted)">
+      <text x={v.x} y={v.y + 12} style={smallText(11)} textAnchor="middle" fill="var(--muted)">
         {plural(ports.length, "puerto", "puertos")}
         {macs ? ` · ${macs} MAC` : ""}
       </text>
@@ -951,6 +976,8 @@ const NodeView = memo(function NodeView({
       }}
     >
       {/* Fondo opaco: el relleno de los explorados es translúcido y dejaba ver los enlaces. */}
+      {/* Ficha al pasar el mouse: con poco zoom la IP y la plataforma se ocultan del dibujo. */}
+      <title>{[n.name, sub].filter(Boolean).join("\n")}</title>
       <rect x={n.x - W / 2} y={n.y - H / 2} width={W} height={H} rx={10} fill="var(--panel)" />
       <rect
         x={n.x - W / 2}
@@ -963,10 +990,10 @@ const NodeView = memo(function NodeView({
         strokeDasharray={ghost ? "5 4" : tentative ? "4 3" : undefined}
         strokeWidth={selected || onRoute || ghost || isNew ? 2.5 : 1.5}
       />
-      <text x={n.x} y={n.y - 4} fontSize={13} fontWeight={600} textAnchor="middle" fill="var(--text)">
+      <text x={n.x} y={n.y - 4} style={scaledText(13)} fontWeight={600} textAnchor="middle" fill="var(--text)">
         {n.name.length > 22 ? `${n.name.slice(0, 21)}…` : n.name}
       </text>
-      <text x={n.x} y={n.y + 14} fontSize={11} textAnchor="middle" fill="var(--muted)">
+      <text x={n.x} y={n.y + 14} style={smallText(11)} textAnchor="middle" fill="var(--muted)">
         {sub}
       </text>
     </g>
@@ -1201,6 +1228,7 @@ const MapSummary = memo(function MapSummary({
   cli,
   count,
   hasData,
+  inset,
   onOpen,
 }: {
   trafficOn: boolean;
@@ -1210,18 +1238,21 @@ const MapSummary = memo(function MapSummary({
   cli: boolean;
   count: number;
   hasData: boolean;
+  /** Franja de la derecha que tapa el panel superpuesto (px). */
+  inset: number;
   onOpen: () => void;
 }) {
   const now = useNow(5000, trafficOn && visible && !!last);
   if (!trafficOn && !count) return null;
   const src = snmp && cli ? "SNMP y consola" : snmp ? "SNMP" : cli ? "Consola" : "";
-  const head = trafficOn && !hasData ? (last ? "Sin tasas aún" : "Leyendo tráfico…") : count ? (trafficOn ? `Todo normal salvo ${plural(count, "enlace", "enlaces")}` : `${plural(count, "enlace requiere", "enlaces requieren")} atención`) : "Todo normal";
+  const head = trafficOn && !hasData ? (last ? "Sin tasas aún" : "Leyendo tráfico…") : count ? `${plural(count, "enlace requiere", "enlaces requieren")} atención` : "Todo normal";
   return (
     <button
       type="button"
       onClick={onOpen}
       title="Ver los enlaces que requieren atención"
-      className="absolute top-2 right-2 z-10 max-w-[calc(100%-1rem)] inline-flex items-center gap-2 rounded-lg border border-line bg-panel shadow-pop px-2.5 h-7 text-[11.5px] hover:bg-hover"
+      style={{ right: 8 + inset }}
+      className="absolute top-2 z-10 max-w-[calc(100%-1rem)] inline-flex items-center gap-2 rounded-lg border border-line bg-panel shadow-pop px-2.5 h-7 text-[11.5px] hover:bg-hover"
     >
       <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: count ? "var(--warn)" : "var(--ok)" }} aria-hidden />
       <span className="font-medium truncate">{head}</span>
@@ -1284,7 +1315,17 @@ export function TopologyTool({
   const [msg, setMsg] = useState("");
   const [exportMenu, setExportMenu] = useState<Menu | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // Zoom manual; mientras `fit` no sea "manual" el zoom sale del tamaño de la vista y del diagrama
+  // ("floor": ajustado con piso de legibilidad; "all": el diagrama completo).
   const [zoom, setZoom] = useState(1);
+  const [fit, setFit] = useState<"floor" | "all" | "manual">("floor");
+  const [fitNonce, setFitNonce] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  /** Ancho de la herramienta y tamaño de la vista del mapa: de ellos salen la barra, el panel y el zoom. */
+  const [size, setSize] = useState({ rw: 0, mw: 0, mh: 0 });
+  const [optsOpen, setOptsOpen] = useState(false);
+  const [moreMenu, setMoreMenu] = useState<Menu | null>(null);
+  const [searchBtn, setSearchBtn] = useState(false);
   const [proto, setProto] = useState<"ssh" | "telnet">("ssh");
   const [path, setPath] = useState<{ from?: string; to?: string }>({});
   const [compareId, setCompareId] = useState("");
@@ -1375,6 +1416,7 @@ export function TopologyTool({
   const manualRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
   const legendId = useId();
+  const whyId = useId();
   const isOpen = (s: PanelSection) => !!ui.sec[s];
   const setOpen = (s: PanelSection, open: boolean) => setUi((u) => ({ ...u, sec: { ...u.sec, [s]: open } }));
   const setPanel = (panel: boolean) => setUi((u) => ({ ...u, panel }));
@@ -1951,7 +1993,7 @@ export function TopologyTool({
     setFocusLink(key);
     const mid = geometryRef.current.find((g) => g.k === key)?.mid;
     if (!mid) return;
-    setZoom((z) => Math.max(z, 1.4));
+    changeZoom((z) => Math.max(z, 1.4));
     setFocusReq(mid);
   }, []);
   // El enlace elegido dejó de estar a la vista: se suelta el resaltado.
@@ -1985,6 +2027,18 @@ export function TopologyTool({
     const y = Math.min(...ys) - H / 2 - pad;
     return { x, y, w: Math.max(...xs) - x + W / 2 + pad, h: Math.max(...ys) - y + H / 2 + pad };
   }, [shown.nodes, l2Nodes, l2]);
+
+  // Diseño según el ancho de la herramienta: "wide" barra en dos filas con todos los campos; "mid" una
+  // fila con lo secundario en Opciones; "tiny" solo lo esencial. El panel se acopla si hay ancho, se
+  // superpone en anchos medianos y ocupa el mapa completo ("Volver al mapa") en ventanas chicas.
+  const bp: "wide" | "mid" | "tiny" = size.rw >= 1040 ? "wide" : size.rw >= 520 || !size.rw ? "mid" : "tiny";
+  const panelMode: "none" | "dock" | "overlay" | "sheet" = !ui.panel ? "none" : size.rw >= 860 || !size.rw ? "dock" : size.rw >= 560 && size.mh >= 280 ? "overlay" : "sheet";
+  const panelW = Math.max(0, Math.min(320, size.rw - 32));
+  /** Franja de la derecha del mapa que tapa el panel superpuesto. */
+  const insetRight = panelMode === "overlay" ? panelW + 8 : 0;
+  const vsize = { w: size.mw, h: size.mh };
+  const zoomUsed = fit === "all" ? 1 : fit === "floor" ? floorZoom(vsize, box) : zoom;
+  const mapK = scaleAt(vsize, box, zoomUsed);
 
   /** Suelta el equipo: la posición final se guarda en el diagrama una sola vez. */
   const endDrag = () => {
@@ -2578,16 +2632,29 @@ export function TopologyTool({
     requestAnimationFrame(() => suggestionsRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
   };
 
-  const fit = () => {
-    setZoom(1);
+  /** Ajustar a la vista: zoom con piso de legibilidad, centrado en el equipo elegido o en el primero. */
+  const fitView = () => {
+    setFit("floor");
+    setFitNonce((n) => n + 1);
+  };
+  /** Ver todo: el diagrama completo dentro de la vista, aunque los textos queden chicos. */
+  const fitAll = () => {
+    setFit("all");
     scroller.current?.scrollTo({ left: 0, top: 0 });
   };
+  const zoomUsedRef = useRef(zoomUsed);
+  zoomUsedRef.current = zoomUsed;
+  /** Cambio de zoom pedido por el usuario: deja el ajuste automático y parte del zoom que se ve. */
+  const changeZoom = useCallback((f: (z: number) => number) => {
+    setFit("manual");
+    setZoom(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, f(zoomUsedRef.current))));
+  }, []);
 
   /** Selecciona un equipo, acerca y lo centra en la vista (si un filtro lo oculta, se quitan los filtros). */
   const focusOn = (id: string) => {
     if (!shown.nodes.some((n) => n.id === id)) setFilter(NO_FILTER);
     setSelected(id);
-    setZoom((z) => Math.max(z, 1.6));
+    changeZoom((z) => Math.max(z, 1.6));
     setFocusReq(id);
   };
   // Se centra después del render con el zoom nuevo (el SVG ya tiene su tamaño final).
@@ -2597,13 +2664,63 @@ export function TopologyTool({
     const el = scroller.current;
     const n = typeof focusReq === "string" ? shown.nodes.find((x) => x.id === focusReq) : focusReq;
     if (!el || !n) return;
-    const w = el.clientWidth * zoom;
-    const h = el.clientHeight * zoom;
-    const k = Math.min(w / box.w, h / box.h);
-    const left = (w - box.w * k) / 2 + (n.x - box.x) * k - el.clientWidth / 2;
-    const top = (h - box.h * k) / 2 + (n.y - box.y) * k - el.clientHeight / 2;
-    el.scrollTo({ left, top, behavior: reducedMotion ? "auto" : "smooth" });
-  }, [focusReq, shown, zoom, box, reducedMotion]);
+    const to = centerScroll({ w: el.clientWidth, h: el.clientHeight }, box, zoomUsed, n, insetRight);
+    el.scrollTo({ ...to, behavior: reducedMotion ? "auto" : "smooth" });
+  }, [focusReq, shown, zoomUsed, box, reducedMotion, insetRight]);
+
+  // Mientras el ajuste es automático ("floor"), se centra en el equipo elegido o en el primero cuando
+  // cambia el tamaño de la vista, la cantidad de equipos o se pulsa "Ajustar". Mover un equipo no
+  // recentra (cambiaría el encuadre mientras se arrastra).
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const sc = scroller.current;
+    if (!root || !sc) return;
+    const measure = () => {
+      const next = { rw: Math.round(root.clientWidth), mw: Math.round(sc.clientWidth), mh: Math.round(sc.clientHeight) };
+      setSize((p) => (p.rw === next.rw && p.mw === next.mw && p.mh === next.mh ? p : next));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(root);
+    ro.observe(sc);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!optsOpen) return;
+    const onDown = (e: MouseEvent) => !(e.target as Element).closest("[data-opts]") && setOptsOpen(false);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOptsOpen(false);
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [optsOpen]);
+  const fitRef = useRef({ shown, selected, box, zoomUsed, insetRight });
+  fitRef.current = { shown, selected, box, zoomUsed, insetRight };
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (fit !== "floor" || !el || !size.mw) return;
+    const f = fitRef.current;
+    const n = (f.selected && f.shown.nodes.find((x) => x.id === f.selected)) || f.shown.nodes[0];
+    if (!n) return;
+    const to = centerScroll({ w: el.clientWidth, h: el.clientHeight }, f.box, f.zoomUsed, n, f.insetRight);
+    el.scrollLeft = to.left;
+    el.scrollTop = to.top;
+  }, [fit, size.mw, size.mh, shown.nodes.length, fitNonce, insetRight]);
+
+  // Al elegir un equipo el mapa se desplaza lo justo para que no quede fuera de la vista ni debajo
+  // del panel superpuesto (si ya se ve, no se mueve).
+  useEffect(() => {
+    const el = scroller.current;
+    const f = fitRef.current;
+    if (!selected || !el) return;
+    const n = f.shown.nodes.find((x) => x.id === selected);
+    if (!n) return;
+    const to = revealScroll({ w: el.clientWidth, h: el.clientHeight }, f.box, f.zoomUsed, n, { left: el.scrollLeft, top: el.scrollTop }, { w: W / 2, h: H / 2 }, f.insetRight);
+    if (to) el.scrollTo({ ...to, behavior: reducedMotion ? "auto" : "smooth" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
 
   // Zoom con pellizco (touchpad) o Ctrl/⌘ + rueda, hacia el punto bajo el puntero.
   // Un pellizco o la rueda entregan varios eventos por cuadro: se junta todo en un redibujo por
@@ -2612,7 +2729,7 @@ export function TopologyTool({
   useEffect(() => () => cancelAnimationFrame(zoomFrame.current), []);
   const zoomRef = useRef(zoom);
   // Con un redibujo pendiente, el valor que manda es el del último evento, no el del estado.
-  if (!zoomFrame.current) zoomRef.current = zoom;
+  if (!zoomFrame.current) zoomRef.current = zoomUsed;
   const zoomAnchor = useRef<{ cx: number; cy: number; sx: number; sy: number; from: number } | null>(null);
   const zoomAt = useCallback((next: number, cx: number, cy: number) => {
     const el = scroller.current;
@@ -2626,6 +2743,7 @@ export function TopologyTool({
     if (!zoomFrame.current) {
       zoomFrame.current = requestAnimationFrame(() => {
         zoomFrame.current = 0;
+        setFit("manual");
         setZoom(zoomRef.current);
       });
     }
@@ -2636,10 +2754,10 @@ export function TopologyTool({
     const el = scroller.current;
     if (!a || !el) return;
     zoomAnchor.current = null;
-    const f = zoom / a.from;
+    const f = zoomUsed / a.from;
     el.scrollLeft = (a.sx + a.cx) * f - a.cx;
     el.scrollTop = (a.sy + a.cy) * f - a.cy;
-  }, [zoom]);
+  }, [zoomUsed]);
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
@@ -2791,6 +2909,7 @@ export function TopologyTool({
   const pickHit = (h: SearchHit) => {
     focusOn(h.id);
     setSearchOpen(false);
+    setSearchBtn(false);
     setMsg(`${node(h.id)?.name ?? h.id}: ${h.what}${h.detail ? ` ${h.detail}` : ""}`);
   };
 
@@ -2857,9 +2976,257 @@ export function TopologyTool({
   const termWhy = term ? blockWhy(term.tabId) : undefined;
   const hint = "Descubre los vecinos del equipo conectado y sigue la ruta salto a salto: clic en un vecino y 'Abrir terminal' (o doble clic). Solo usa comandos de consulta.";
 
+  // ---- Barra de controles según el ancho: "wide" dos filas con todos los campos; "mid" una sola fila
+  // con lo secundario en "Opciones" y en el menú "Más"; "tiny" lo esencial (equipo, descubrir, panel).
+  const wide = bp === "wide";
+  const tiny = bp === "tiny";
+  /** Botones de la barra con texto (si no, solo ícono con tooltip). */
+  const labels = wide || (!tiny && size.rw >= 900);
+  // Por qué "Descubrir vecinos" no se puede pulsar, visible bajo el botón.
+  const discoverWhy =
+    mode === "cli" ? (!terminals.length ? "Conéctate a un equipo para descubrir" : !term ? "Elige un equipo de la lista" : undefined) : !profile ? "Crea un perfil SNMP en Herramientas › SNMP" : undefined;
+  const openSection = (sec: PanelSection) => setUi((u) => ({ ...u, panel: true, sec: { ...u.sec, [sec]: true } }));
+  const askClear = () => {
+    const manual = topo.nodes.filter((n) => n.manual).length + topo.links.filter((l) => isUserProto(l.proto)).length;
+    onConfirm({
+      title: "¿Borrar el diagrama?",
+      message: `Se borran ${topo.nodes.length} ${topo.nodes.length === 1 ? "equipo" : "equipos"} y ${topo.links.length} ${topo.links.length === 1 ? "enlace" : "enlaces"}${manual ? `, incluidos ${manual} ${manual === 1 ? "elemento agregado" : "elementos agregados"} a mano o desde sugerencias` : ""}. Los snapshots no se tocan: guarda uno antes si quieres recuperarlo.`,
+      label: "Borrar diagrama",
+      danger: true,
+      defaultCancel: true,
+      action: () => {
+        onTopo({ nodes: [], links: [] });
+        setSelected(null);
+        setPath({});
+      },
+    });
+  };
+  const reorder = () => onTopo((t) => layout({ ...t, nodes: t.nodes.map((n) => ({ ...n, x: 0, y: 0 })) }));
+  const exportItems: MenuItem[] = [
+    ["Imagen SVG", <Download size={13} />, () => exportFile("svg", toSvg(topo, W, H, linkRates))],
+    ["draw.io con íconos de red", <Download size={13} />, () => void exportDrawioIcons()],
+    ["draw.io simple (cajas)", <Download size={13} />, () => exportFile("drawio", toDrawio(topo, W, H))],
+    ["CSV de enlaces y puertos", <Download size={13} />, () => exportFile("csv", toCsv(topo, linkRates)), !topo.links.length],
+    ["Copiar como Mermaid", <FileCode2 size={13} />, () => writeText(toMermaid(topo)).then(() => setMsg("Diagrama Mermaid copiado al portapapeles"))],
+  ];
+  /** Menú "Más": lo secundario (exportar, snapshots, fuentes) y, en anchos chicos, lo que no cabe en la barra. */
+  const moreItems = (): MenuItem[] => {
+    const items: MenuItem[] = [];
+    if (tiny) {
+      items.push(["Buscar en el diagrama…", <Search size={13} />, () => setSearchBtn(true), !topo.nodes.length]);
+      items.push([trafficOn ? "Dejar de leer el tráfico" : "Mostrar el tráfico", <Activity size={13} />, () => setTrafficOn(!trafficOn)]);
+      if (filtering) items.push([`Filtros activos: ${shown.nodes.length} de ${view.nodes.length}`, <ListFilter size={13} />, () => openSection("filtros")]);
+      if (attention.length) items.push([`Requieren atención (${attention.length})`, <TriangleAlert size={13} />, showAttention]);
+    }
+    if (!wide) {
+      if (suggestions.length && !labels) items.push([`Sugerencias (${suggestions.length})`, <Lightbulb size={13} />, showSuggestions]);
+      exportItems.forEach(([l, i, a, d], n) => items.push([`Exportar: ${l}`, i, a, d || (n < 3 && !topo.nodes.length), undefined, n === 0]));
+    }
+    items.push(["Snapshots y cambios…", <Camera size={13} />, () => openSection("snapshots"), false, undefined, true]);
+    items.push(["Fuentes de descubrimiento…", <Radar size={13} />, () => openSection("fuentes")]);
+    items.push(["Reordenar automáticamente", <Network size={13} />, reorder, !topo.nodes.length]);
+    items.push(["Eliminar diagrama…", <Trash2 size={13} />, askClear, !topo.nodes.length, undefined, true]);
+    return items;
+  };
+  const modeSelect = (
+    <select className="field" value={mode} onChange={(e) => setUi((u) => ({ ...u, mode: e.target.value as DiscoveryMode }))}>
+      <option value="cli">Consola (CLI)</option>
+      <option value="snmp">SNMP (perfil)</option>
+    </select>
+  );
+  const vendorSelect = (
+    <select className="field" value={vendor} onChange={(e) => setVendor(e.target.value as TopoVendor)}>
+      {VENDORS.map((v) => (
+        <option key={v.id} value={v.id}>
+          {v.label}
+        </option>
+      ))}
+    </select>
+  );
+  const portsCheck = (
+    <label
+      className="flex items-center gap-1.5 h-8 text-[12px]"
+      title={mode === "cli" ? "Lee estado, velocidad, descripción y Port-channel de las interfaces (comandos de consulta)" : "Lee ifOperStatus, ifHighSpeed e ifAlias (IF-MIB)"}
+    >
+      <input type="checkbox" className="accent-[var(--accent)]" checked={readPorts} onChange={(e) => setReadPorts(e.target.checked)} />
+      Estado de puertos
+    </label>
+  );
+  const equipoSelect =
+    mode === "cli" ? (
+      <select aria-label="Equipo (sesión conectada)" aria-describedby={discoverWhy ? whyId : undefined} className="field" value={connId} onChange={(e) => setConnId(e.target.value)}>
+        {!terminals.length && <option value="">{tiny ? "Sin sesiones" : "Sin sesiones conectadas"}</option>}
+        {terminals.map((t) => (
+          <option key={t.connId} value={t.connId}>
+            {t.name}
+            {t.host ? ` · ${t.host}` : ""}
+            {t.tabId && hopRunning.includes(t.tabId) ? " (salto en curso)" : ""}
+          </option>
+        ))}
+      </select>
+    ) : (
+      <select aria-label="Perfil SNMP del equipo (v2c o v3)" aria-describedby={discoverWhy ? whyId : undefined} className="field" value={profile?.id ?? ""} onChange={(e) => setUi((u) => ({ ...u, snmpProfile: e.target.value }))}>
+        {!profiles.length && <option value="">{tiny ? "Sin perfiles SNMP" : "Sin perfiles: créalos en Herramientas › SNMP"}</option>}
+        {profiles.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name || p.host} · {p.host} · {p.version === "3" ? `v3 ${p.level}` : "v2c"}
+            {p.saved ? "" : " (sin secretos guardados)"}
+          </option>
+        ))}
+      </select>
+    );
+  // Botón principal con el motivo visible debajo cuando no se puede pulsar (y con contraste legible).
+  const discoverBtn = (iconOnly: boolean) => {
+    const off = "disabled:!opacity-100 disabled:!bg-chrome disabled:!text-muted disabled:border disabled:border-line";
+    return (
+      <div className="relative shrink-0">
+        {mode === "cli" ? (
+          <Btn
+            kind="primary"
+            className={`${off} ${iconOnly ? "!px-2.5" : ""}`}
+            disabled={!term || !!termWhy}
+            aria-label="Descubrir vecinos"
+            aria-describedby={discoverWhy ? whyId : undefined}
+            onClick={() => void discover()}
+            title={termWhy ?? hint}
+          >
+            <Radar size={14} className={busy ? "animate-pulse" : ""} aria-hidden /> {!iconOnly && (busy ? "Leyendo…" : "Descubrir vecinos")}
+          </Btn>
+        ) : (
+          <Btn
+            kind="primary"
+            className={`${off} ${iconOnly ? "!px-2.5" : ""}`}
+            disabled={!profile || busy}
+            aria-label="Descubrir por SNMP"
+            aria-describedby={discoverWhy ? whyId : undefined}
+            onClick={discoverSnmp}
+            title="Lee LLDP-MIB y CISCO-CDP-MIB (y las fuentes activas) con GETBULK, solo lectura"
+          >
+            <Radar size={14} className={busy ? "animate-pulse" : ""} aria-hidden /> {!iconOnly && (busy ? "Leyendo…" : "Descubrir por SNMP")}
+          </Btn>
+        )}
+        {discoverWhy && (
+          <p id={whyId} className="absolute right-0 top-full mt-1 whitespace-nowrap text-[11.5px] text-muted">
+            {discoverWhy}
+          </p>
+        )}
+      </div>
+    );
+  };
+  const searchField = (cls: string, autoFocus = false) => (
+    <div className="relative">
+      <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted pointer-events-none" aria-hidden />
+      <input
+        type="search"
+        className={`field !h-8 !pl-7 !text-[12px] ${cls}`}
+        placeholder="Buscar (nombre, IP, MAC, puerto)"
+        title="Busca por nombre, IP, MAC, interfaz o descripción; Enter va al primero"
+        aria-label="Buscar en el diagrama"
+        disabled={!topo.nodes.length}
+        autoFocus={autoFocus}
+        value={query}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setSearchOpen(true);
+        }}
+        onFocus={() => setSearchOpen(true)}
+        onBlur={() =>
+          setTimeout(() => {
+            setSearchOpen(false);
+            setSearchBtn(false);
+          }, 150)
+        }
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && hits[0]) pickHit(hits[0]);
+          if (e.key === "Escape") {
+            setSearchOpen(false);
+            setSearchBtn(false);
+          }
+        }}
+      />
+      {searchOpen && query.trim().length >= 2 && (
+        <ul className="absolute z-20 left-0 top-full mt-1 w-72 max-w-[calc(100vw-2rem)] max-h-72 overflow-y-auto rounded-lg border border-line bg-panel shadow-pop py-1 text-[12px]" role="listbox">
+          {hits.length ? (
+            hits.map((h, i) => (
+              <li key={`${h.id}${i}`}>
+                <button type="button" role="option" aria-selected={i === 0} onMouseDown={(e) => e.preventDefault()} onClick={() => pickHit(h)} className="w-full text-left px-3 py-1.5 hover:bg-hover">
+                  <span className="font-medium">{node(h.id)?.name ?? h.id}</span>
+                  <span className="block text-[11.5px] text-muted truncate">
+                    {h.what}
+                    {h.detail ? `: ${h.detail}` : ""}
+                  </span>
+                </button>
+              </li>
+            ))
+          ) : (
+            <li className="px-3 py-1.5 text-muted">Sin resultados</li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
+  const trafficBtn = (label: boolean) => (
+    <Btn
+      kind={trafficOn ? "default" : "ghost"}
+      aria-pressed={trafficOn}
+      aria-label="Tráfico en enlaces"
+      title={trafficOn ? "Dejar de leer el tráfico de los enlaces" : "Mostrar el tráfico de los enlaces (opciones en el panel)"}
+      onClick={() => setTrafficOn(!trafficOn)}
+      className={`${trafficOn ? "!text-accent" : ""} ${label ? "" : "!px-2.5"}`}
+    >
+      <Activity size={14} aria-hidden /> {label && "Tráfico"}
+    </Btn>
+  );
+  const filterBtn = (label: boolean) =>
+    filtering && (
+      <Btn title="Hay filtros activos: el diagrama muestra una parte" aria-label={`Filtros activos: ${shown.nodes.length} de ${view.nodes.length} equipos`} className={label ? "" : "!px-2.5"} onClick={() => openSection("filtros")}>
+        <ListFilter size={14} className="text-accent" aria-hidden /> {label ? `${shown.nodes.length} de ${view.nodes.length}` : <CountBadge n={shown.nodes.length} />}
+      </Btn>
+    );
+  const attentionBtn = (label: boolean) =>
+    attention.length > 0 && (
+      <Btn title="Ver los enlaces que requieren atención en el panel" aria-label={`Ver ${attention.length} enlaces que requieren atención`} className={label ? "" : "!px-2.5"} onClick={showAttention}>
+        <TriangleAlert size={14} className={attentionCount.down + attentionCount.load ? "text-danger" : "text-warn"} aria-hidden /> {label && "Atención"} <CountBadge n={attention.length} />
+      </Btn>
+    );
+  const suggestBtn = (label: boolean) =>
+    suggestions.length > 0 && (
+      <Btn title="Ver sugerencias en el panel" aria-label={`Ver ${suggestions.length} sugerencias`} className={label ? "" : "!px-2.5"} onClick={showSuggestions}>
+        <Lightbulb size={14} className="text-warn" aria-hidden /> {label && "Sugerencias"} <CountBadge n={suggestions.length} />
+      </Btn>
+    );
+  const panelBtn = (label: boolean) => (
+    <Btn
+      aria-expanded={ui.panel}
+      aria-controls={panelId}
+      aria-label={ui.panel ? "Ocultar panel lateral" : "Mostrar panel lateral"}
+      title={ui.panel ? "Ocultar panel lateral" : "Mostrar panel lateral"}
+      className={label ? "" : "!px-2.5"}
+      onClick={() => setPanel(!ui.panel)}
+    >
+      {ui.panel ? <PanelRightClose size={14} aria-hidden /> : <PanelRight size={14} aria-hidden />} {label && "Panel"}
+    </Btn>
+  );
+  const moreBtn = (
+    <Btn
+      kind="ghost"
+      className="!px-2.5"
+      aria-haspopup="menu"
+      aria-expanded={!!moreMenu}
+      aria-label="Más opciones: exportar, snapshots, fuentes"
+      title="Más opciones: exportar, snapshots, fuentes de descubrimiento"
+      onClick={(e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        setMoreMenu({ x: r.right - 208, y: r.bottom + 4, items: moreItems() });
+      }}
+    >
+      <Ellipsis size={14} aria-hidden />
+    </Btn>
+  );
+
   return (
-    <div className="@container h-full min-h-[480px] flex flex-col gap-3">
-      <section className="rounded-xl border border-line bg-panel px-4 pt-3 pb-3">
+    <div ref={rootRef} className="@container h-full min-h-[280px] flex flex-col gap-3">
+      <section className={`rounded-xl border border-line bg-panel ${wide ? "px-4 py-3" : "px-3 py-2"}`}>
         {/* En anchos chicos se oculta: el menú lateral ya dice Topología y el texto queda en el botón. */}
         <header className="flex items-baseline gap-2 min-w-0 mb-2 @max-[860px]:hidden">
           <h2 className="text-[13px] font-semibold shrink-0">Topología</h2>
@@ -2867,67 +3234,67 @@ export function TopologyTool({
             {hint}
           </p>
         </header>
-        <div className="flex flex-wrap items-end gap-2">
-          <Label text="Descubrir con" className="w-36">
-            <select className="field" value={mode} onChange={(e) => setUi((u) => ({ ...u, mode: e.target.value as DiscoveryMode }))}>
-              <option value="cli">Consola (CLI)</option>
-              <option value="snmp">SNMP (perfil)</option>
-            </select>
-          </Label>
-          {mode === "cli" ? (
-            <>
-              <Label text="Equipo (sesión conectada)" className="flex-1 min-w-40">
-                <select className="field" value={connId} onChange={(e) => setConnId(e.target.value)}>
-                  {!terminals.length && <option value="">Sin sesiones conectadas</option>}
-                  {terminals.map((t) => (
-                    <option key={t.connId} value={t.connId}>
-                      {t.name}
-                      {t.host ? ` · ${t.host}` : ""}
-                      {t.tabId && hopRunning.includes(t.tabId) ? " (salto en curso)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </Label>
-              <Label text="Fabricante" className="w-40">
-                <select className="field" value={vendor} onChange={(e) => setVendor(e.target.value as TopoVendor)}>
-                  {VENDORS.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.label}
-                    </option>
-                  ))}
-                </select>
-              </Label>
-            </>
-          ) : (
-            <Label text="Perfil SNMP del equipo (v2c o v3)" className="flex-1 min-w-48">
-              <select className="field" value={profile?.id ?? ""} onChange={(e) => setUi((u) => ({ ...u, snmpProfile: e.target.value }))}>
-                {!profiles.length && <option value="">Sin perfiles: créalos en Herramientas › SNMP</option>}
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name || p.host} · {p.host} · {p.version === "3" ? `v3 ${p.level}` : "v2c"}
-                    {p.saved ? "" : " (sin secretos guardados)"}
-                  </option>
-                ))}
-              </select>
+        {wide ? (
+          <div className={`flex flex-wrap items-end gap-2 ${discoverWhy ? "mb-5" : ""}`}>
+            <Label text="Descubrir con" className="w-36">
+              {modeSelect}
             </Label>
-          )}
-          <label
-            className="flex items-center gap-1.5 h-8 text-[12px]"
-            title={mode === "cli" ? "Lee estado, velocidad, descripción y Port-channel de las interfaces (comandos de consulta)" : "Lee ifOperStatus, ifHighSpeed e ifAlias (IF-MIB)"}
-          >
-            <input type="checkbox" className="accent-[var(--accent)]" checked={readPorts} onChange={(e) => setReadPorts(e.target.checked)} />
-            Estado de puertos
-          </label>
-          {mode === "cli" ? (
-            <Btn kind="primary" disabled={!term || !!termWhy} onClick={() => void discover()} title={termWhy ?? hint}>
-              <Radar size={14} className={busy ? "animate-pulse" : ""} /> {busy ? "Leyendo…" : "Descubrir vecinos"}
+            {mode === "cli" ? (
+              <>
+                <Label text="Equipo (sesión conectada)" className="flex-1 min-w-48">
+                  {equipoSelect}
+                </Label>
+                <Label text="Fabricante" className="w-40">
+                  {vendorSelect}
+                </Label>
+              </>
+            ) : (
+              <Label text="Perfil SNMP del equipo (v2c o v3)" className="flex-1 min-w-48">
+                {equipoSelect}
+              </Label>
+            )}
+            {portsCheck}
+            {discoverBtn(false)}
+          </div>
+        ) : (
+          <div className={`relative flex items-center gap-1.5 ${discoverWhy ? "mb-5" : ""}`} role="toolbar" aria-label="Descubrimiento y diagrama">
+            <div className={`flex-1 ${tiny ? "min-w-[8rem]" : "min-w-[12.5rem]"}`}>{equipoSelect}</div>
+            {discoverBtn(tiny)}
+            <Btn
+              kind="ghost"
+              data-opts=""
+              className="!px-2.5"
+              aria-haspopup="dialog"
+              aria-expanded={optsOpen}
+              aria-label="Opciones de descubrimiento"
+              title="Opciones de descubrimiento: modo, fabricante y estado de puertos"
+              onClick={() => setOptsOpen((o) => !o)}
+            >
+              <SlidersHorizontal size={14} aria-hidden />
             </Btn>
-          ) : (
-            <Btn kind="primary" disabled={!profile || busy} onClick={discoverSnmp} title="Lee LLDP-MIB y CISCO-CDP-MIB (y las fuentes activas) con GETBULK, solo lectura">
-              <Radar size={14} className={busy ? "animate-pulse" : ""} /> {busy ? "Leyendo…" : "Descubrir por SNMP"}
-            </Btn>
-          )}
-        </div>
+            {!tiny && (
+              <Btn kind="ghost" className="!px-2.5" aria-label="Buscar en el diagrama" aria-expanded={searchBtn} title="Buscar en el diagrama" disabled={!topo.nodes.length} onClick={() => setSearchBtn((v) => !v)}>
+                <Search size={14} aria-hidden />
+              </Btn>
+            )}
+            {!tiny && trafficBtn(labels)}
+            {!tiny && filterBtn(labels)}
+            {!tiny && attentionBtn(labels)}
+            {labels && suggestBtn(true)}
+            {panelBtn(labels)}
+            {moreBtn}
+            {optsOpen && (
+              <div data-opts="" role="dialog" aria-label="Opciones de descubrimiento" className="absolute right-0 top-full z-30 mt-1 w-72 max-w-full space-y-2.5 rounded-lg border border-line bg-panel p-3 shadow-pop">
+                <Label text="Descubrir con">{modeSelect}</Label>
+                {mode === "cli" && <Label text="Fabricante">{vendorSelect}</Label>}
+                {portsCheck}
+              </div>
+            )}
+            {searchBtn && (
+              <div className="absolute left-0 right-0 top-full z-30 mt-1">{searchField("!w-full", true)}</div>
+            )}
+          </div>
+        )}
         {mode === "cli" && term && termWhy && !busy && <p className="mt-1.5 text-[11.5px] text-warn">{`"${term.name}": ${termWhy}`}</p>}
         {mode === "cli" && term && termRoute && termRoute.steps.length > 0 && (
           <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11.5px]">
@@ -2943,160 +3310,36 @@ export function TopologyTool({
             Solo lectura con el perfil y sus secretos de la bóveda; tope de 10.000 filas y 20 s por tabla. Si LLDP y CDP vuelven vacíos por SNMP, el protocolo está apagado en el equipo.
           </p>
         )}
-        <div className="flex flex-wrap items-center gap-1 mt-2.5 @max-[860px]:[&_button]:px-2" role="toolbar" aria-label="Diagrama">
-          <Btn kind="ghost" title="Acercar (o rueda del mouse o pellizco del touchpad sobre el mapa; arrastra el fondo para moverlo)" onClick={() => setZoom((z) => Math.min(ZOOM_MAX, z + 0.2))}>
-            <ZoomIn size={14} />
-          </Btn>
-          <Btn kind="ghost" title="Alejar (o rueda del mouse o pellizco del touchpad sobre el mapa; arrastra el fondo para moverlo)" onClick={() => setZoom((z) => Math.max(ZOOM_MIN, z - 0.2))}>
-            <ZoomOut size={14} />
-          </Btn>
-          <Btn kind="ghost" title="Ajustar a la vista" aria-label="Ajustar a la vista" onClick={fit}>
-            <Maximize2 size={14} />
-          </Btn>
-          <Btn kind="ghost" title="Reordenar automáticamente" onClick={() => onTopo((t) => layout({ ...t, nodes: t.nodes.map((n) => ({ ...n, x: 0, y: 0 })) }))}>
-            <Network size={14} />
-          </Btn>
-          <div className="relative">
-            <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted pointer-events-none" aria-hidden />
-            <input
-              type="search"
-              className="field !h-8 !pl-7 !w-64 @max-[860px]:!w-48 !text-[12px]"
-              placeholder="Buscar (nombre, IP, MAC, puerto)"
-              title="Busca por nombre, IP, MAC, interfaz o descripción; Enter va al primero"
-              aria-label="Buscar en el diagrama"
+        {wide && (
+          <div className="flex items-center gap-1 mt-2.5" role="toolbar" aria-label="Diagrama">
+            {searchField("!w-64")}
+            <span className="w-px h-5 bg-[var(--border)] mx-1" aria-hidden />
+            <Btn
+              kind="ghost"
+              title="Exportar el diagrama: SVG, draw.io, CSV o Mermaid"
+              aria-haspopup="menu"
+              aria-expanded={!!exportMenu}
               disabled={!topo.nodes.length}
-              value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                setSearchOpen(true);
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setExportMenu({ x: r.left, y: r.bottom + 4, items: exportItems });
               }}
-              onFocus={() => setSearchOpen(true)}
-              onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && hits[0]) pickHit(hits[0]);
-                if (e.key === "Escape") setSearchOpen(false);
-              }}
-            />
-            {searchOpen && query.trim().length >= 2 && (
-              <ul className="absolute z-20 left-0 top-full mt-1 w-72 max-h-72 overflow-y-auto rounded-lg border border-line bg-panel shadow-pop py-1 text-[12px]" role="listbox">
-                {hits.length ? (
-                  hits.map((h, i) => (
-                    <li key={`${h.id}${i}`}>
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={i === 0}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => pickHit(h)}
-                        className="w-full text-left px-3 py-1.5 hover:bg-hover"
-                      >
-                        <span className="font-medium">{node(h.id)?.name ?? h.id}</span>
-                        <span className="block text-[11px] text-muted truncate">
-                          {h.what}
-                          {h.detail ? `: ${h.detail}` : ""}
-                        </span>
-                      </button>
-                    </li>
-                  ))
-                ) : (
-                  <li className="px-3 py-1.5 text-muted">Sin resultados</li>
-                )}
-              </ul>
-            )}
-          </div>
-          <span className="w-px h-5 bg-[var(--border)] mx-1 @max-[860px]:hidden" aria-hidden />
-          <Btn
-            kind="ghost"
-            title="Exportar el diagrama: SVG, draw.io, CSV o Mermaid"
-            aria-haspopup="menu"
-            aria-expanded={!!exportMenu}
-            disabled={!topo.nodes.length}
-            onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              setExportMenu({
-                x: r.left,
-                y: r.bottom + 4,
-                items: [
-                  ["Imagen SVG", <Download size={13} />, () => exportFile("svg", toSvg(topo, W, H, linkRates))],
-                  ["draw.io con íconos de red", <Download size={13} />, () => void exportDrawioIcons()],
-                  ["draw.io simple (cajas)", <Download size={13} />, () => exportFile("drawio", toDrawio(topo, W, H))],
-                  ["CSV de enlaces y puertos", <Download size={13} />, () => exportFile("csv", toCsv(topo, linkRates)), !topo.links.length],
-                  [
-                    "Copiar como Mermaid",
-                    <FileCode2 size={13} />,
-                    () => writeText(toMermaid(topo)).then(() => setMsg("Diagrama Mermaid copiado al portapapeles")),
-                  ],
-                ],
-              });
-            }}
-          >
-            <Download size={14} /> <span className="@max-[860px]:sr-only">Exportar</span> <ChevronDown size={12} aria-hidden />
-          </Btn>
-          {exportMenu && <ContextMenu menu={exportMenu} onClose={() => setExportMenu(null)} />}
-          {nodeMenu && <ContextMenu menu={nodeMenu} onClose={() => setNodeMenu(null)} />}
-          <div className="ml-auto flex items-center gap-1">
-            <Btn
-              kind={trafficOn ? "default" : "ghost"}
-              aria-pressed={trafficOn}
-              title={trafficOn ? "Dejar de leer el tráfico de los enlaces" : "Mostrar el tráfico de los enlaces (opciones en el panel)"}
-              onClick={() => setTrafficOn(!trafficOn)}
-              className={trafficOn ? "!text-accent" : ""}
             >
-              <Activity size={14} aria-hidden /> <span className="@max-[860px]:sr-only">Tráfico</span>
+              <Download size={14} /> Exportar <ChevronDown size={12} aria-hidden />
             </Btn>
-            {filtering && (
-              <Btn title="Hay filtros activos: el diagrama muestra una parte" onClick={() => setUi((u) => ({ ...u, panel: true, sec: { ...u.sec, filtros: true } }))}>
-                <ListFilter size={14} className="text-accent" aria-hidden /> <span className="@max-[860px]:sr-only">{shown.nodes.length} de {view.nodes.length}</span>
-              </Btn>
-            )}
-            {attention.length > 0 && (
-              <Btn title="Ver los enlaces que requieren atención en el panel" aria-label={`Ver ${attention.length} enlaces que requieren atención`} onClick={showAttention}>
-                <TriangleAlert size={14} className={attentionCount.down + attentionCount.load ? "text-danger" : "text-warn"} aria-hidden />{" "}
-                <span className="@max-[860px]:sr-only">Atención</span> <CountBadge n={attention.length} />
-              </Btn>
-            )}
-            {suggestions.length > 0 && (
-              <Btn
-                title="Ver sugerencias en el panel"
-                aria-label={`Ver ${suggestions.length} sugerencias`}
-                onClick={showSuggestions}
-              >
-                <Lightbulb size={14} className="text-warn" aria-hidden /> <span className="@max-[860px]:sr-only">Sugerencias</span> <CountBadge n={suggestions.length} />
-              </Btn>
-            )}
-      <Btn
-        kind="ghost"
-        className="hover:!text-danger"
-        title="Borrar diagrama"
-        disabled={!topo.nodes.length}
-        onClick={() => {
-          const manual = topo.nodes.filter((n) => n.manual).length + topo.links.filter((l) => isUserProto(l.proto)).length;
-          onConfirm({
-            title: "¿Borrar el diagrama?",
-            message: `Se borran ${topo.nodes.length} ${topo.nodes.length === 1 ? "equipo" : "equipos"} y ${topo.links.length} ${topo.links.length === 1 ? "enlace" : "enlaces"}${manual ? `, incluidos ${manual} ${manual === 1 ? "elemento agregado" : "elementos agregados"} a mano o desde sugerencias` : ""}. Los snapshots no se tocan: guarda uno antes si quieres recuperarlo.`,
-            label: "Borrar diagrama",
-            danger: true,
-            defaultCancel: true,
-            action: () => {
-              onTopo({ nodes: [], links: [] });
-              setSelected(null);
-              setPath({});
-            },
-          });
-        }}
-      >
-        <Trash2 size={14} />
-      </Btn>
-            <Btn
-              aria-expanded={ui.panel}
-              aria-controls={panelId}
-              title={ui.panel ? "Ocultar panel lateral" : "Mostrar panel lateral"}
-              onClick={() => setPanel(!ui.panel)}
-            >
-              {ui.panel ? <PanelRightClose size={14} aria-hidden /> : <PanelRight size={14} aria-hidden />} <span className="@max-[860px]:sr-only">Panel</span>
-            </Btn>
+            <div className="ml-auto flex items-center gap-1">
+              {trafficBtn(true)}
+              {filterBtn(true)}
+              {attentionBtn(true)}
+              {suggestBtn(true)}
+              {panelBtn(true)}
+              {moreBtn}
+            </div>
           </div>
-        </div>
+        )}
+        {exportMenu && <ContextMenu menu={exportMenu} onClose={() => setExportMenu(null)} />}
+        {nodeMenu && <ContextMenu menu={nodeMenu} onClose={() => setNodeMenu(null)} />}
+        {moreMenu && <ContextMenu menu={moreMenu} onClose={() => setMoreMenu(null)} />}
         {msg && <p className="mt-2 text-[12px] text-accent">{msg}</p>}
         <HopCards
           views={hopViews}
@@ -3147,7 +3390,7 @@ export function TopologyTool({
         )}
       </section>
 
-      <div className="relative flex-1 min-h-[240px] flex gap-3">
+      <div className="relative flex-1 min-h-[200px] flex gap-3">
         <div ref={mapBox} className="relative flex-1 min-w-0 rounded-xl border border-line bg-panel overflow-hidden">
           <div ref={scroller} className="absolute inset-0 overflow-auto" style={{ touchAction: "none" }}>
       {!view.nodes.length ? (
@@ -3164,7 +3407,8 @@ export function TopologyTool({
       ) : (
         <svg
           viewBox={`${box.x} ${box.y} ${box.w} ${box.h}`}
-          style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%`, cursor: panning ? "grabbing" : "grab" }}
+          // --ts y --sm: contraescala de los textos y ocultar puertos e IP con poco zoom (ver scaledText).
+          style={{ width: `${zoomUsed * 100}%`, height: `${zoomUsed * 100}%`, cursor: panning ? "grabbing" : "grab", "--ts": textScale(mapK), "--ss": smallScale(mapK), "--sm": labelsVisible(mapK) ? "inline" : "none" } as React.CSSProperties}
           onPointerDown={startPan}
           onPointerMove={onPointerMove}
           onPointerUp={endDrag}
@@ -3204,6 +3448,7 @@ export function TopologyTool({
           />
         </svg>
       )}
+            {insetRight > 0 && <div aria-hidden className="pointer-events-none absolute left-0 top-0 h-px" style={{ width: `calc(${zoomUsed * 100}% + ${insetRight}px)` }} />}
           </div>
           {!ui.panel && sel && (
             <div className="absolute top-2 left-2 flex items-center gap-2 max-w-[calc(100%-1rem)] rounded-lg border border-line bg-panel shadow-pop pl-3 pr-1 py-1 text-[12px]">
@@ -3226,15 +3471,48 @@ export function TopologyTool({
             cli={traffic.status.cli.length > 0}
             count={attention.length}
             hasData={linkRates.size > 0}
+            inset={insetRight}
             onOpen={showAttention}
           />
+          {view.nodes.length > 0 && shown.nodes.length > 0 && (
+            <div className="absolute bottom-2 z-10 flex items-center gap-0.5 rounded-lg border border-line bg-panel p-0.5 shadow-pop" style={{ right: 8 + insetRight }} role="group" aria-label="Zoom del mapa">
+              <Btn kind="ghost" className="!h-7 !w-7 !px-0" aria-label="Acercar" title="Acercar (o rueda del mouse o pellizco del touchpad sobre el mapa; arrastra el fondo para moverlo)" onClick={() => changeZoom((z) => z * 1.25)}>
+                <ZoomIn size={14} aria-hidden />
+              </Btn>
+              <Btn kind="ghost" className="!h-7 !w-7 !px-0" aria-label="Alejar" title="Alejar (o rueda del mouse o pellizco del touchpad sobre el mapa; arrastra el fondo para moverlo)" onClick={() => changeZoom((z) => z / 1.25)}>
+                <ZoomOut size={14} aria-hidden />
+              </Btn>
+              <Btn
+                kind="ghost"
+                className={`!h-7 !w-7 !px-0 ${fit === "floor" ? "!text-accent" : ""}`}
+                aria-label="Ajustar a la vista"
+                aria-pressed={fit === "floor"}
+                title="Ajustar a la vista: tamaño legible, centrado en el equipo elegido o en el primero"
+                onClick={fitView}
+              >
+                <Maximize2 size={14} aria-hidden />
+              </Btn>
+              <Btn
+                kind="ghost"
+                className={`!h-7 !w-7 !px-0 ${fit === "all" ? "!text-accent" : ""}`}
+                aria-label="Ver todo"
+                aria-pressed={fit === "all"}
+                title="Ver todo: el diagrama completo, aunque los textos queden chicos"
+                onClick={fitAll}
+              >
+                <Expand size={14} aria-hidden />
+              </Btn>
+            </div>
+          )}
           <LinkTip store={tips} box={mapBox} detailsFor={detailsFor} />
           {showLegend && (
-            <div className="absolute bottom-2 left-2 flex flex-col items-start gap-1.5 max-w-[calc(100%-1rem)]">
+            // Plegada es un botón de una línea; abierta no pasa de ~15 % del mapa (42 % del ancho por 28 % del alto) y se desplaza por dentro.
+            <div className="absolute bottom-2 left-2 flex flex-col items-start gap-1.5">
               {isOpen("leyenda") && (
                 <div
                   id={legendId}
-                  className="flex flex-col gap-1 rounded-lg border border-line bg-panel shadow-pop px-3 py-2 text-[11.5px] text-muted"
+                  style={{ maxWidth: Math.max(130, Math.round(size.mw * 0.42)), maxHeight: Math.max(64, Math.round(size.mh * 0.28)) }}
+                  className="flex min-h-0 flex-col gap-1 overflow-y-auto rounded-lg border border-line bg-panel shadow-pop px-3 py-2 text-[11.5px] text-muted"
                   aria-label="Leyenda de enlaces"
                   role="group"
                 >
@@ -3332,12 +3610,30 @@ export function TopologyTool({
           )}
         </div>
 
-        {ui.panel && (
+        {panelMode !== "none" && (
           <aside
             id={panelId}
             aria-label="Panel de topología"
-            className="w-[320px] shrink-0 min-h-0 overflow-y-auto space-y-3 @max-[860px]:absolute @max-[860px]:top-0 @max-[860px]:right-0 @max-[860px]:bottom-0 @max-[860px]:z-10 @max-[860px]:max-w-[calc(100%-2rem)] @max-[860px]:rounded-xl @max-[860px]:bg-bg @max-[860px]:shadow-pop @max-[860px]:p-2"
+            style={panelMode === "overlay" ? { width: panelW } : undefined}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && panelMode !== "dock" && !(e.target as HTMLElement).closest('[role="listbox"],[role="dialog"]')) setPanel(false);
+            }}
+            className={
+              panelMode === "dock"
+                ? "w-[320px] shrink-0 min-h-0 overflow-y-auto space-y-3"
+                : panelMode === "overlay"
+                  ? "absolute top-0 right-0 bottom-0 z-10 min-h-0 overflow-y-auto space-y-3 rounded-xl bg-bg p-2 shadow-pop"
+                  : "absolute inset-0 z-10 min-h-0 overflow-y-auto space-y-3 rounded-xl bg-bg p-2"
+            }
           >
+            {panelMode !== "dock" && (
+              <div className="sticky top-0 z-10 -mx-2 -mt-2 flex items-center gap-2 border-b border-line bg-bg px-2 py-1.5">
+                <Btn kind="ghost" className="!px-2" onClick={() => setPanel(false)} title={panelMode === "sheet" ? "Volver al mapa" : "Cerrar el panel"}>
+                  {panelMode === "sheet" ? <ArrowLeft size={14} aria-hidden /> : <X size={14} aria-hidden />} {panelMode === "sheet" ? "Volver al mapa" : "Cerrar"}
+                </Btn>
+                <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold">{sel ? sel.name : "Panel"}</span>
+              </div>
+            )}
             <Collapsible
               title="Fuentes de descubrimiento"
               summary={`${activeSources} de ${TOPO_SOURCES.length} activas · CDP/LLDP y lo manual, siempre`}

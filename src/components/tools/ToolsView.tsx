@@ -178,7 +178,7 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     }
   };
 
-  const item = (id: ModuleId) => {
+  const item = (id: ModuleId, group: string) => {
     const n = enabled.find((x) => x.id === id);
     if (!n) return null;
     const { label, Icon } = n;
@@ -186,18 +186,19 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
       <button
         key={id}
         onClick={() => go(id)}
-        title={label}
+        title={`${label} (${group})`}
+        aria-label={label}
         aria-current={current === id ? "page" : undefined}
         className={`relative w-full flex items-center gap-2 px-2 h-8 rounded-md text-left ${
           current === id ? "bg-selected text-fg" : "text-muted hover:text-fg hover:bg-hover"
         }`}
       >
         <Icon size={15} className="shrink-0" />
-        <span className="hidden @[44rem]:inline truncate">{label}</span>
+        <span className="hidden @[56rem]:inline truncate">{label}</span>
         {(id === "transfer" && (running.includes("tftp") || running.includes("http") || running.includes("ftp"))) ||
         (id === "snmp" && running.includes("snmptrap")) ||
         (id === "syslog" && running.includes("syslog")) ? (
-          <span className="absolute right-1 top-1 @[44rem]:static @[44rem]:ml-auto w-1.5 h-1.5 rounded-full bg-ok" title="Servidor activo" />
+          <span className="absolute right-1 top-1 @[56rem]:static @[56rem]:ml-auto w-1.5 h-1.5 rounded-full bg-ok" title="Servidor activo" />
         ) : null}
       </button>
     );
@@ -228,18 +229,18 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         </button>
       </div>
       <div className="flex-1 min-h-0 flex">
-      {/* Ventana angosta: el menú queda solo con íconos para no quitarle espacio a la herramienta. */}
+      {/* Menos de 56 rem de ancho: el menú queda solo con íconos (nombre y grupo en el tooltip, una línea entre grupos) para no quitarle espacio a la herramienta. */}
       <nav
         aria-label="Módulos de Herramientas"
-        className="w-11 @[44rem]:w-44 shrink-0 border-r border-line bg-chrome p-1.5 @[44rem]:p-2 overflow-y-auto overflow-x-hidden [scrollbar-width:thin]"
+        className="w-11 @[56rem]:w-44 shrink-0 border-r border-line bg-chrome p-1.5 @[56rem]:p-2 overflow-y-auto overflow-x-hidden [scrollbar-width:thin]"
       >
         {GROUPS.map((g, i) => {
           const ids = g.ids.filter((id) => enabled.some((n) => n.id === id));
           if (!ids.length) return null;
           return (
-            <div key={g.label} role="group" aria-label={g.label} className={i > 0 ? "mt-1.5 pt-1.5 border-t border-line @[44rem]:border-t-0 @[44rem]:pt-0" : ""}>
-              <div className="hidden @[44rem]:block px-2 pt-1 pb-1 text-[10.5px] font-semibold uppercase tracking-wide text-muted">{g.label}</div>
-              <div className="space-y-0.5">{ids.map(item)}</div>
+            <div key={g.label} role="group" aria-label={g.label} className={i > 0 ? "mt-1.5 pt-1.5 border-t border-line @[56rem]:border-t-0 @[56rem]:pt-0" : ""}>
+              <div className="hidden @[56rem]:block px-2 pt-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">{g.label}</div>
+              <div className="space-y-0.5">{ids.map((id) => item(id, g.label))}</div>
             </div>
           );
         })}
@@ -247,7 +248,7 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
       </nav>
       <div className="@container flex-1 min-w-0 overflow-y-auto">
         {/* Topología ocupa todo el ancho y alto disponibles; el resto mantiene el ancho de lectura. */}
-        <div className={current === "topology" ? "h-full p-4" : "max-w-[1200px] mx-auto p-5"}>
+        <div className={current === "topology" ? "h-full p-2 @[40rem]:p-4" : "max-w-[1200px] mx-auto p-5"}>
           {enabled
             .filter((n) => visited.has(n.id))
             .map((n) => (
