@@ -16,21 +16,37 @@
 
 use crate::connection::ConnInfo;
 use crate::filexfer::RunOutcome;
-use crate::mcp::{Client, McpConfig, Verdict, VerdictKind};
+use crate::mcp::{Client, McpConfig, Verdict, VerdictKind, Visibility};
 use crate::models::{Session, SessionType};
 use serde_json::{json, Map, Value};
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Tope de caracteres de la respuesta de una herramienta (texto serializado).
 pub const MAX_RESPONSE: usize = 300_000;
-/// Página por defecto y máxima de las listas.
-const PAGE: usize = 100;
+/// Página por defecto y máxima de las listas de las herramientas (cada agente puede pedir hasta
+/// `MAX_PAGE` con `limit`; por defecto se entrega menos para no gastar contexto del modelo).
+const PAGE: usize = 50;
 const MAX_PAGE: usize = 500;
 /// Largo máximo de un comando (send_command / run_command).
 pub const MAX_COMMAND: usize = 4096;
 /// Líneas máximas de send_command.
 const MAX_LINES: usize = 50;
+/// Herramienta de varias consultas en una llamada y su tope de comandos.
+pub const BATCH_TOOL: &str = "run_commands";
+pub const MAX_BATCH: usize = 10;
+/// Plazo total de un lote de run_commands (cada comando tiene además el suyo).
+const BATCH_BUDGET: Duration = Duration::from_secs(300);
+/// Caracteres por defecto (y máximos por llamada) de cada salida hacia el agente.
+const READ_DEFAULT: u64 = 4000;
+const READ_MAX: u64 = 50_000;
+const RUN_DEFAULT: u64 = 12_000;
+const RUN_MAX: u64 = 100_000;
+const BATCH_DEFAULT: u64 = 4000;
+/// 10 comandos de 25.000 caracteres caben bajo `MAX_RESPONSE`.
+const BATCH_MAX_CHARS: u64 = 25_000;
+const DIFF_DEFAULT: u64 = 15_000;
+const SEARCH_DEFAULT: u64 = 20;
 /// Tope de lectura de un archivo de datos (notas, respaldos) hacia el agente.
 const MAX_FILE_CHARS: usize = 256 * 1024;
 /// Tope de cada respaldo que se compara.
@@ -104,8 +120,14 @@ pub struct Out {
     pub structured: Option<Value>,
 }
 
+/// JSON compacto: el texto es para un modelo, no para una persona, y la sangría solo gasta contexto.
 fn json_out(v: Value) -> Out {
-    Out { text: serde_json::to_string_pretty(&v).unwrap_or_default(), structured: Some(v) }
+    Out { text: serde_json::to_string(&v).unwrap_or_default(), structured: Some(v) }
+}
+
+/// Aviso de recorte con la forma de pedir más (va en la respuesta, no en un error).
+fn cut_note(shown: usize, total: usize, param: &str, max: u64, extra: &str) -> String {
+    format!("Salida recortada: {shown} de {total} caracteres. Pide más con `{param}` (máximo {max}){extra}.")
 }
 
 fn text_out(t: String) -> Out {
@@ -297,6 +319,145 @@ fn visible_conns(ctx: &Ctx, host: &dyn Host) -> Vec<(ConnInfo, Session)> {
 
 const NOT_FOUND: &str = "Conexión no encontrada o no visible para agentes. Usa list_connections";
 
+// ---------- Logs y respaldos con «Marcadas» ----------
+
+/// Con «Marcadas», qué archivos de logs y respaldos se entregan: solo los que se asocian con
+/// certeza a una sesión marcada. Un log se asocia si su ruta nombra (como palabra completa) el
+/// nombre o el destino de una sesión marcada y de ninguna no marcada; un respaldo, si su equipo es
+/// el nombre de una sesión marcada y de ninguna no marcada (BackupTool guarda con el nombre de la
+/// sesión). Lo ambiguo, de sesiones borradas o de conexiones rápidas no se entrega. Con «Todas» y
+/// «Ninguna» no se filtra (como antes).
+#[derive(Default)]
+pub(crate) struct FileScope {
+    shown: Vec<String>,
+    hidden: Vec<String>,
+    shown_dev: Vec<String>,
+    hidden_dev: Vec<String>,
+}
+
+/// Nombre o destino tal como queda en la ruta de un log (mismo saneado que
+/// `logfile::sanitize_part`, comparado en las pruebas con `logfile::render`), en minúsculas.
+fn log_token(s: &str) -> String {
+    let out: String = s.trim().chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).take(80).collect();
+    out.trim_start_matches('.').to_lowercase()
+}
+
+/// `tok` aparece en `hay` como palabra completa (sin letras ni dígitos pegados a los lados).
+fn mentions(hay: &str, tok: &str) -> bool {
+    if tok.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(i) = hay[from..].find(tok) {
+        let at = from + i;
+        let before = hay[..at].chars().next_back();
+        let after = hay[at + tok.len()..].chars().next();
+        if !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric) {
+            return true;
+        }
+        from = at + hay[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+fn file_scope(ctx: &Ctx, host: &dyn Host) -> Option<FileScope> {
+    if !matches!(ctx.cfg.visibility, Visibility::Marked(_)) {
+        return None;
+    }
+    let mut fs = FileScope::default();
+    for s in host.saved_sessions().iter().filter(|s| !s.id.is_empty()) {
+        let mut toks = vec![log_token(&s.name)];
+        if let Some(h) = s.host.as_deref() {
+            toks.push(log_token(h));
+        }
+        let dev = crate::backups::sanitize_device(&s.name).ok().map(|d| d.to_lowercase());
+        let (t, d) = if ctx.cfg.visibility.allows(&s.id) { (&mut fs.shown, &mut fs.shown_dev) } else { (&mut fs.hidden, &mut fs.hidden_dev) };
+        t.extend(toks.into_iter().filter(|x| !x.is_empty()));
+        d.extend(dev);
+    }
+    Some(fs)
+}
+
+impl FileScope {
+    fn log_ok(&self, rel: &str) -> bool {
+        let r = rel.to_lowercase();
+        self.shown.iter().any(|t| mentions(&r, t)) && !self.hidden.iter().any(|t| mentions(&r, t))
+    }
+
+    fn device_ok(&self, device: &str) -> bool {
+        let d = device.to_lowercase();
+        self.shown_dev.contains(&d) && !self.hidden_dev.contains(&d)
+    }
+}
+
+/// Sin filtro (`None`) o el equipo pasa el de «Marcadas».
+fn device_visible(scope: &Option<FileScope>, device: &str) -> bool {
+    scope.as_ref().is_none_or(|f| f.device_ok(device))
+}
+
+// ---------- Lecturas de archivos sin seguir enlaces ----------
+
+/// Identidad de un archivo para comprobar que no cambió entre la verificación y la lectura.
+#[derive(PartialEq, Debug)]
+struct FileId(u64, u64, u64);
+
+/// Lectura vía MCP de un archivo de datos (nota, respaldo): debe ser un archivo regular y la ruta,
+/// dentro de `root`, sin enlaces simbólicos ni uniones en ningún tramo (mismo criterio que la
+/// búsqueda en logs). La interfaz sigue leyendo como siempre.
+fn regular_file_in(path: &Path, root: &Path) -> Result<FileId, ()> {
+    let meta = std::fs::symlink_metadata(path).map_err(|_| ())?;
+    if !meta.file_type().is_file() {
+        return Err(());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT: enlace simbólico o unión.
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err(());
+        }
+    }
+    let rel = path.strip_prefix(root).map_err(|_| ())?;
+    let real_root = root.canonicalize().map_err(|_| ())?;
+    // Ningún tramo intermedio es un enlace: la ruta canónica es exactamente raíz + ruta relativa.
+    if path.canonicalize().map_err(|_| ())? != real_root.join(rel) {
+        return Err(());
+    }
+    Ok(file_id(&meta))
+}
+
+#[cfg(unix)]
+fn file_id(m: &std::fs::Metadata) -> FileId {
+    use std::os::unix::fs::MetadataExt;
+    FileId(m.dev(), m.ino(), m.len())
+}
+
+#[cfg(not(unix))]
+fn file_id(m: &std::fs::Metadata) -> FileId {
+    let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64);
+    FileId(0, t, m.len())
+}
+
+/// Verifica la ruta, lee con la función de la app (`read`) y comprueba que lo leído sigue siendo
+/// el mismo archivo regular.
+fn read_checked(path: &Path, root: &Path, read: impl FnOnce() -> Result<String, String>) -> Result<String, ()> {
+    let id = regular_file_in(path, root)?;
+    let text = read().map_err(|_| ())?;
+    if regular_file_in(path, root)? != id {
+        return Err(());
+    }
+    Ok(text)
+}
+
+/// Nombre de nota que `notes` guarda tal cual como `<nombre>.txt` (sin caracteres que su saneado
+/// quitaría): así la ruta verificada es la misma que se lee.
+fn plain_note_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.trim() == name
+        && name.trim_matches('.') == name
+        && !name.chars().any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control())
+}
+
 fn conn(ctx: &Ctx, host: &dyn Host, id: &str) -> Result<(ConnInfo, Session), String> {
     visible_conns(ctx, host).into_iter().find(|(c, _)| c.id == id).ok_or_else(|| NOT_FOUND.to_string())
 }
@@ -361,7 +522,7 @@ pub fn tools(cfg: &McpConfig) -> Vec<Value> {
             obj(page_props(json!({ "folder": { "type": "string", "maxLength": 256, "description": "Filtra por carpeta (prefijo)" } })), &[]), ro_annotations("Sesiones guardadas", false)),
         tool("list_connections", "Conexiones abiertas", "Lista las conexiones abiertas visibles para agentes, con su id.".into(), obj(json!({}), &[]), ro_annotations("Conexiones abiertas", false)),
         tool("read_output", "Leer salida", format!("Devuelve la salida reciente (texto limpio, secretos enmascarados) de una conexión abierta.{UNTRUSTED}"),
-            obj(json!({ "connection_id": conn_prop, "max_chars": { "type": "integer", "minimum": 100, "maximum": 50000, "default": 6000 } }), &["connection_id"]), ro_annotations("Leer salida", false)),
+            obj(json!({ "connection_id": conn_prop, "max_chars": { "type": "integer", "minimum": 100, "maximum": READ_MAX, "default": READ_DEFAULT } }), &["connection_id"]), ro_annotations("Leer salida", false)),
         tool("get_session_info", "Datos de la conexión", "Plataforma detectada, protocolo, destino, estado y solo lectura de una conexión abierta. Sin usuario ni credenciales.".into(),
             obj(json!({ "connection_id": conn_prop }), &["connection_id"]), ro_annotations("Datos de la conexión", false)),
         tool("get_topology", "Topología", "Topología guardada (equipos y enlaces) y, si la vista Topología está abierta con tráfico activo, tasas, estado de enlaces y la lista «Requieren atención». section: summary (conteos, datos vivos y atención), nodes o links (paginados).".into(),
@@ -392,21 +553,28 @@ pub fn tools(cfg: &McpConfig) -> Vec<Value> {
                 "scope": { "type": "string", "maxLength": 128, "description": "Texto que debe contener la ruta (sesión o equipo)" },
                 "context": { "type": "integer", "minimum": 0, "maximum": 2, "default": 1 },
             })), &["query"]), ro_annotations("Buscar en logs", false)));
+        // Las búsquedas entregan menos resultados por página que las demás listas.
+        if let Some(t) = list.last_mut() {
+            t["inputSchema"]["properties"]["limit"] = json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": SEARCH_DEFAULT });
+        }
     }
     if cfg.scopes.backups {
         list.push(tool("list_backups", "Respaldos de configuración", "Lista los respaldos de configuración guardados por equipo (más reciente primero).".into(),
             obj(page_props(json!({ "device": { "type": "string", "maxLength": 64 } })), &[]), ro_annotations("Respaldos de configuración", false)));
         list.push(tool("diff_backups", "Comparar respaldos", "Compara dos respaldos de configuración de un equipo con el diff de NetTerminal (unificado), con secretos enmascarados; marca «secreto cambiado» sin revelar el valor. Sin from/to compara los dos más recientes.".into(),
-            obj(json!({ "device": { "type": "string", "maxLength": 64 }, "from": { "type": "string", "maxLength": 40 }, "to": { "type": "string", "maxLength": 40 }, "context": { "type": "integer", "minimum": 0, "maximum": 10, "default": 3 }, "max_chars": { "type": "integer", "minimum": 1000, "maximum": 100000, "default": 30000 } }), &["device"]),
+            obj(json!({ "device": { "type": "string", "maxLength": 64 }, "from": { "type": "string", "maxLength": 40 }, "to": { "type": "string", "maxLength": 40 }, "context": { "type": "integer", "minimum": 0, "maximum": 10, "default": 3 }, "max_chars": { "type": "integer", "minimum": 1000, "maximum": 100000, "default": DIFF_DEFAULT } }), &["device"]),
             ro_annotations("Comparar respaldos", false)));
     }
     if !cfg.read_only {
         let write = |title: &str| json!({ "title": title, "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true });
-        list.push(tool("run_command", "Ejecutar comando", format!("Ejecuta UN comando en una conexión abierta, espera el prompt del equipo y devuelve solo la salida de ese comando (pagina «--More--» y responde «no» a preguntas del equipo). Requiere aprobación del usuario en NetTerminal, que ve el riesgo calculado; las pestañas en solo lectura lo rechazan.{UNTRUSTED}"),
-            obj(json!({ "connection_id": conn_prop, "command": { "type": "string", "maxLength": MAX_COMMAND }, "timeout_seconds": { "type": "integer", "minimum": 5, "maximum": 300, "default": 30 }, "max_chars": { "type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000 } }), &["connection_id", "command"]),
+        list.push(tool("run_command", "Ejecutar comando", format!("Ejecuta UN comando en una conexión abierta, espera el prompt del equipo y devuelve solo la salida de ese comando (pagina «--More--» y responde «no» a preguntas del equipo). Requiere aprobación del usuario en NetTerminal, que ve el riesgo calculado; las pestañas en solo lectura lo rechazan. Para varias consultas en la misma conexión usa run_commands.{UNTRUSTED}"),
+            obj(json!({ "connection_id": conn_prop, "command": { "type": "string", "maxLength": MAX_COMMAND }, "timeout_seconds": { "type": "integer", "minimum": 5, "maximum": 300, "default": 30 }, "max_chars": { "type": "integer", "minimum": 1000, "maximum": RUN_MAX, "default": RUN_DEFAULT } }), &["connection_id", "command"]),
             write("Ejecutar comando")));
-        list.push(tool("send_command", "Enviar comandos", format!("Envía comandos a una conexión abierta (una línea por comando) y devuelve lo que llegue en el tiempo de espera. Requiere aprobación del usuario; las pestañas en solo lectura lo rechazan. Para un solo comando de consulta prefiere run_command.{UNTRUSTED}"),
-            obj(json!({ "connection_id": conn_prop, "command": { "type": "string", "maxLength": MAX_COMMAND }, "wait_seconds": { "type": "number", "minimum": 0.5, "maximum": 120, "default": 5, "description": "Tiempo máximo esperando salida" } }), &["connection_id", "command"]),
+        list.push(tool(BATCH_TOOL, "Ejecutar varios comandos", format!("Ejecuta hasta {MAX_BATCH} comandos de UNA línea cada uno, en orden, en una conexión abierta, con UNA sola aprobación del usuario (ve el riesgo de cada línea). Devuelve la salida de cada comando por separado (como run_command) y se detiene en el primer error, pregunta del equipo o plazo vencido; si el usuario rechaza, no se envía ninguno. Las pestañas en solo lectura lo rechazan.{UNTRUSTED}"),
+            obj(json!({ "connection_id": conn_prop, "commands": { "type": "array", "minItems": 1, "maxItems": MAX_BATCH, "items": { "type": "string", "maxLength": MAX_COMMAND } }, "timeout_seconds": { "type": "integer", "minimum": 5, "maximum": 120, "default": 30, "description": "Plazo de cada comando (el lote completo tiene 300 s)" }, "max_chars": { "type": "integer", "minimum": 500, "maximum": BATCH_MAX_CHARS, "default": BATCH_DEFAULT, "description": "Tope de la salida de cada comando" } }), &["connection_id", "commands"]),
+            write("Ejecutar varios comandos")));
+        list.push(tool("send_command", "Enviar comandos", format!("Envía comandos a una conexión abierta (una línea por comando) y devuelve la salida apenas vuelve el prompt del equipo tras la última línea; si el prompt no se reconoce, cuando el equipo calla 1,5 s o vence wait_seconds. Requiere aprobación del usuario; las pestañas en solo lectura lo rechazan. Para consultas prefiere run_command o run_commands.{UNTRUSTED}"),
+            obj(json!({ "connection_id": conn_prop, "command": { "type": "string", "maxLength": MAX_COMMAND }, "wait_seconds": { "type": "number", "minimum": 0.5, "maximum": 120, "default": 5, "description": "Tiempo máximo esperando salida" }, "max_chars": { "type": "integer", "minimum": 1000, "maximum": RUN_MAX, "default": RUN_DEFAULT } }), &["connection_id", "command"]),
             write("Enviar comandos")));
         list.push(tool("open_session", "Abrir sesión", "Abre una sesión guardada visible para agentes en una pestaña nueva (requiere aprobación).".into(),
             obj(json!({ "name": { "type": "string", "maxLength": 256, "description": "Nombre exacto de la sesión" } }), &["name"]),
@@ -434,9 +602,10 @@ pub fn call(ctx: &Ctx, host: &dyn Host, name: &str, args: Option<&Value>) -> Res
         "get_monitors" => get_monitors(host),
         "list_commands" => list_commands(host, &a),
         "search_logs" => search_logs(ctx, host, &a),
-        "list_backups" => list_backups(host, &a),
-        "diff_backups" => diff_backups(host, &a),
+        "list_backups" => list_backups(ctx, host, &a),
+        "diff_backups" => diff_backups(ctx, host, &a),
         "run_command" => return Ok(run_command(ctx, host, &a)),
+        "run_commands" => return Ok(run_commands(ctx, host, &a)),
         "send_command" => return Ok(send_command(ctx, host, &a)),
         "open_session" => return Ok(open_session(ctx, host, &a)),
         _ => Err("Herramienta desconocida".into()),
@@ -482,11 +651,17 @@ fn list_connections(ctx: &Ctx, host: &dyn Host) -> Out {
 
 fn read_output(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
     let id = a.conn_id()?;
-    let max = a.int("max_chars", 100, 50_000, 6000)? as usize;
+    let max = a.int("max_chars", 100, READ_MAX, READ_DEFAULT)? as usize;
     let (info, _) = conn(ctx, host, id)?;
-    let text = host.history(id, max).ok_or(NOT_FOUND)?;
+    // Un carácter más para saber si hay salida anterior a lo que se entrega.
+    let text = host.history(id, max + 1).ok_or(NOT_FOUND)?;
     host.activity("read_output", &info.name, "read_output", true);
-    Ok(text_out(mask_text(&cap_tail(&text, max))))
+    let body = mask_text(&cap_tail(&text, max));
+    Ok(text_out(if text.chars().count() > max {
+        format!("[… salida anterior omitida: se muestran los últimos {max} caracteres; pide más con `max_chars` (máximo {READ_MAX})]\n{body}")
+    } else {
+        body
+    }))
 }
 
 fn session_info(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
@@ -675,6 +850,7 @@ fn list_commands(host: &dyn Host, a: &Args) -> Result<Out, String> {
 }
 
 fn search_logs(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
+    let scope = file_scope(ctx, host);
     let query = a.str_req("query", 500)?;
     if query.contains(['\n', '\r']) {
         return Err("`query` debe ser de una sola línea".into());
@@ -695,7 +871,7 @@ fn search_logs(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
             return Err(format!("La búsqueda en {k} está deshabilitada para agentes en Ajustes › Agentes IA"));
         }
     }
-    let (offset, limit) = (a.cursor()?, a.int("limit", 1, 200, 50)? as usize);
+    let (offset, limit) = (a.cursor()?, a.int("limit", 1, 200, SEARCH_DEFAULT)? as usize);
     let params = crate::logsearch::SearchParams {
         query: query.to_string(),
         regex: a.bool("regex", false)?,
@@ -705,12 +881,20 @@ fn search_logs(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
         to: a.line_opt("to", 10)?.map(str::to_string),
         scope: a.line_opt("scope", 128)?.map(str::to_string),
         context: Some(a.int("context", 0, 2, 1)? as usize),
-        // La página se arma sobre los primeros resultados: no se busca más allá de lo pedido.
-        max_results: Some((offset + limit + 1).min(5000)),
+        // La página se arma sobre los primeros resultados: no se busca más allá de lo pedido. Con
+        // «Marcadas» se filtra después, así que se busca hasta el tope para no perder resultados.
+        max_results: Some(if scope.is_some() { 5000 } else { (offset + limit + 1).min(5000) }),
         max_file_mb: Some(64),
     };
     let roots = crate::logsearch::Roots { logs: host.logs_dir(), backups: crate::backups::root(&host.data_dir()), notes: host.notes_dir() };
-    let (files, sum) = crate::logsearch::search_now(&roots, &params, SEARCH_TIMEOUT)?;
+    let (mut files, sum) = crate::logsearch::search_now(&roots, &params, SEARCH_TIMEOUT)?;
+    if let Some(f) = &scope {
+        files.retain(|h| match h.kind {
+            crate::logsearch::Kind::Logs => f.log_ok(&h.rel),
+            crate::logsearch::Kind::Backups => h.rel.split('/').next().is_some_and(|d| f.device_ok(d)),
+            crate::logsearch::Kind::Notes => true,
+        });
+    }
     let line = |s: &str| mask_text(&crate::mcp_audit::clean(s, 600));
     let all: Vec<Value> = files
         .iter()
@@ -725,13 +909,21 @@ fn search_logs(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
         })
         .collect();
     let (items, next) = page(&all, offset, limit);
-    Ok(json_out(json!({
+    let mut out = json!({
         "results": items,
         "scannedFiles": sum.scanned,
-        // Recorrido incompleto (demasiados archivos) o cortado por el plazo: puede haber más.
-        "incomplete": sum.walk_truncated || sum.cancelled,
+        // Recorrido incompleto (demasiados archivos), cortado por el plazo o, con «Marcadas», por el
+        // tope de resultados antes de filtrar: puede haber más.
+        "incomplete": sum.walk_truncated || sum.cancelled || (scope.is_some() && sum.truncated),
         "nextCursor": next,
-    })))
+    });
+    if next.is_some() {
+        out["note"] = json!("Hay más resultados: repite con `cursor` = nextCursor o sube `limit` (máximo 200).");
+    }
+    if scope.is_some() {
+        out["visibility"] = json!("Solo logs y respaldos que se asocian con certeza a sesiones marcadas para agentes.");
+    }
+    Ok(json_out(out))
 }
 
 fn device_arg(a: &Args) -> Result<String, String> {
@@ -742,14 +934,15 @@ fn device_arg(a: &Args) -> Result<String, String> {
     }
 }
 
-fn list_backups(host: &dyn Host, a: &Args) -> Result<Out, String> {
+fn list_backups(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
     let dev = match a.line_opt("device", 64)? {
         Some(_) => Some(device_arg(a)?),
         None => None,
     };
+    let scope = file_scope(ctx, host);
     let all: Vec<Value> = crate::backups::list(&host.data_dir())
         .into_iter()
-        .filter(|d| dev.as_ref().is_none_or(|x| *x == d.device))
+        .filter(|d| dev.as_ref().is_none_or(|x| *x == d.device) && device_visible(&scope, &d.device))
         .flat_map(|d| {
             let dev = d.device;
             d.files.into_iter().map(move |f| json!({ "device": dev, "file": f.name, "size": f.size, "modified": f.modified, "uri": backup_uri(&dev, &f.name) }))
@@ -759,16 +952,25 @@ fn list_backups(host: &dyn Host, a: &Args) -> Result<Out, String> {
     Ok(json_out(json!({ "backups": items, "total": all.len(), "nextCursor": next })))
 }
 
-/// Respaldo leído y enmascarado (aunque se haya guardado sin enmascarar).
+/// Respaldo leído y enmascarado (aunque se haya guardado sin enmascarar). Solo nombres con el
+/// formato de la app y archivos regulares, sin enlaces simbólicos (`read_checked`).
 fn read_backup_masked(host: &dyn Host, device: &str, file: &str, max: usize) -> Result<(String, bool), String> {
-    let raw = crate::backups::read(&host.data_dir(), device, file).map_err(|_| "Respaldo no encontrado. Usa list_backups".to_string())?;
+    let nf = || "Respaldo no encontrado. Usa list_backups".to_string();
+    let data = host.data_dir();
+    if crate::backups::sanitize_device(device).ok().as_deref() != Some(device) || !crate::backups::file_re().is_match(file) {
+        return Err(nf());
+    }
+    let root = crate::backups::root(&data);
+    let raw = read_checked(&root.join(device).join(file), &root, || crate::backups::read(&data, device, file)).map_err(|_| nf())?;
     let (text, cut) = cap(&raw, max);
     Ok((crate::backups::mask(&text), cut))
 }
 
-fn diff_backups(host: &dyn Host, a: &Args) -> Result<Out, String> {
+fn diff_backups(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
     let device = device_arg(a)?;
-    let files: Vec<String> = crate::backups::list(&host.data_dir()).into_iter().find(|d| d.device == device).map(|d| d.files.into_iter().map(|f| f.name).collect()).unwrap_or_default();
+    // Un equipo no visible con «Marcadas» se trata igual que uno sin respaldos.
+    let visible = device_visible(&file_scope(ctx, host), &device);
+    let files: Vec<String> = crate::backups::list(&host.data_dir()).into_iter().find(|d| visible && d.device == device).map(|d| d.files.into_iter().map(|f| f.name).collect()).unwrap_or_default();
     let pick = |k: &str, default: Option<&String>| -> Result<String, String> {
         match a.line_opt(k, 40)? {
             Some(f) if files.iter().any(|x| x == f) => Ok(f.to_string()),
@@ -779,7 +981,7 @@ fn diff_backups(host: &dyn Host, a: &Args) -> Result<Out, String> {
     let to = pick("to", files.first())?;
     let from = pick("from", files.get(1))?;
     let context = a.int("context", 0, 10, 3)?;
-    let max = a.int("max_chars", 1000, 100_000, 30_000)? as usize;
+    let max = a.int("max_chars", 1000, 100_000, DIFF_DEFAULT)? as usize;
     let (ta, cut_a) = read_backup_masked(host, &device, &from, MAX_DIFF_INPUT)?;
     let (tb, cut_b) = read_backup_masked(host, &device, &to, MAX_DIFF_INPUT)?;
     let marks = |f: &str| crate::backups::read_secrets(&host.data_dir(), &device, f).ok().and_then(|m| serde_json::to_value(m).ok()).unwrap_or(Value::Null);
@@ -788,13 +990,18 @@ fn diff_backups(host: &dyn Host, a: &Args) -> Result<Out, String> {
         .ok_or(UI_DOWN)?;
     let unified = v.get("unified").and_then(Value::as_str).unwrap_or("");
     // El texto ya iba enmascarado; se vuelve a pasar por el enmascarado por si acaso.
-    let (unified, truncated) = cap(&mask_text(unified), max);
+    let masked = mask_text(unified);
+    let (unified, truncated) = cap(&masked, max);
     let stats = v.get("stats").cloned().unwrap_or(Value::Null);
-    Ok(json_out(json!({
+    let mut out = json!({
         "device": device, "from": from, "to": to,
         "added": num(stats.get("added")), "removed": num(stats.get("removed")), "same": num(stats.get("same")),
         "diff": unified, "truncated": truncated || cut_a || cut_b,
-    })))
+    });
+    if truncated {
+        out["note"] = json!(cut_note(max, masked.chars().count(), "max_chars", 100_000, " o baja `context`"));
+    }
+    Ok(json_out(out))
 }
 
 // ---------- Escritura (con aprobación) ----------
@@ -850,7 +1057,7 @@ fn run_command(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
         return Err("run_command ejecuta un solo comando por llamada (para varias líneas usa send_command)".into());
     }
     let timeout = Duration::from_secs(a.int("timeout_seconds", 5, 300, 30)?);
-    let max = a.int("max_chars", 1000, 100_000, 20_000)? as usize;
+    let max = a.int("max_chars", 1000, RUN_MAX, RUN_DEFAULT)? as usize;
     let (info, session) = conn(ctx, host, id)?;
     let risk = gate(ctx, host, "run_command", &info, &session, &command)?;
     let r = host.run(id, &command, timeout)?;
@@ -858,13 +1065,20 @@ fn run_command(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
     if !r.ran {
         return Err(r.error.unwrap_or_else(|| "No se pudo ejecutar".into()));
     }
-    let body = mask_text(&command_output(&r.output, &command));
+    let mut out = run_json(&command, r, max, RUN_MAX);
+    out["connection"] = json!(info.name);
+    out["risk"] = json!(risk);
+    Ok(json_out(out))
+}
+
+/// Salida de un comando hacia el agente: sin eco ni prompt, enmascarada y acotada, con el estado
+/// del equipo y, si se recortó, cómo pedir más.
+fn run_json(command: &str, r: RunOutcome, max: usize, hard_max: u64) -> Value {
+    let body = mask_text(&command_output(&r.output, command));
     let total = body.chars().count();
     let (output, truncated) = cap(&body, max);
-    Ok(json_out(json!({
-        "connection": info.name,
+    let mut v = json!({
         "command": command,
-        "risk": risk,
         "output": output,
         "truncated": truncated,
         "totalChars": total,
@@ -872,6 +1086,81 @@ fn run_command(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
         "deviceError": !r.ok && r.declined.is_none(),
         "declinedQuestion": r.declined.map(|q| crate::mcp_audit::clean(&q, 200)),
         "error": r.error,
+    });
+    if truncated {
+        v["note"] = json!(cut_note(max, total, "max_chars", hard_max, " (ejecutarlo de nuevo pide otra aprobación), filtra el comando (por ejemplo `| include`) o lee la pantalla con read_output"));
+    }
+    v
+}
+
+/// Varias consultas en una conexión con una sola aprobación: el diálogo muestra el lote completo
+/// (una línea por comando, con su riesgo) y lo aprobado es exactamente lo que se envía, comando por
+/// comando, con la misma cola por conexión, paginación y respuestas de `run_command`. Se detiene en
+/// el primer comando que no termina bien.
+fn run_commands(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
+    let id = a.conn_id()?;
+    let raw = match a.0.get("commands") {
+        Some(Value::Array(v)) if (1..=MAX_BATCH).contains(&v.len()) => v,
+        Some(Value::Array(_)) => return Err(format!("`commands` debe tener entre 1 y {MAX_BATCH} comandos")),
+        None | Some(Value::Null) => return Err("Falta `commands` (lista de comandos)".into()),
+        Some(_) => return Err("`commands` debe ser una lista de textos".into()),
+    };
+    let mut commands = Vec::with_capacity(raw.len());
+    for (i, c) in raw.iter().enumerate() {
+        let c = c.as_str().ok_or_else(|| format!("`commands[{i}]` debe ser texto"))?;
+        if c.chars().count() > MAX_COMMAND {
+            return Err(format!("`commands[{i}]` supera {MAX_COMMAND} caracteres"));
+        }
+        let cmd = crate::mcp::visible_command(c).map_err(|e| format!("`commands[{i}]`: {e}"))?;
+        if cmd.contains('\n') {
+            return Err(format!("`commands[{i}]` debe ser de una sola línea (un comando por elemento)"));
+        }
+        commands.push(cmd);
+    }
+    let timeout = Duration::from_secs(a.int("timeout_seconds", 5, 120, 30)?);
+    let max = a.int("max_chars", 500, BATCH_MAX_CHARS, BATCH_DEFAULT)? as usize;
+    let (info, session) = conn(ctx, host, id)?;
+    // Lo que se aprueba (y se audita) es el lote completo, una línea por comando.
+    let detail = commands.join("\n");
+    let risk = gate(ctx, host, BATCH_TOOL, &info, &session, &detail)?;
+    let start = Instant::now();
+    let mut results = Vec::with_capacity(commands.len());
+    let mut stopped: Option<usize> = None;
+    for (i, cmd) in commands.iter().enumerate() {
+        let left = BATCH_BUDGET.saturating_sub(start.elapsed());
+        if left < Duration::from_secs(1) {
+            results.push(json!({ "command": cmd, "completed": false, "error": "Se agotó el plazo total del lote (300 s): no se envió" }));
+            stopped = Some(i);
+            break;
+        }
+        let r = match host.run(id, cmd, timeout.min(left)) {
+            Ok(r) => r,
+            Err(e) => {
+                results.push(json!({ "command": cmd, "completed": false, "error": e }));
+                stopped = Some(i);
+                break;
+            }
+        };
+        let ok = r.ran && r.ok && r.error.is_none();
+        if !r.ran {
+            results.push(json!({ "command": cmd, "completed": false, "error": r.error.unwrap_or_else(|| "No se pudo ejecutar".into()) }));
+        } else {
+            results.push(run_json(cmd, r, max, BATCH_MAX_CHARS));
+        }
+        if !ok {
+            stopped = Some(i);
+            break;
+        }
+    }
+    host.activity(BATCH_TOOL, &info.name, &detail, stopped.is_none());
+    let skipped: Vec<&String> = stopped.map(|i| commands[i + 1..].iter().collect()).unwrap_or_default();
+    Ok(json_out(json!({
+        "connection": info.name,
+        "risk": risk,
+        "results": results,
+        "completed": stopped.is_none(),
+        "stoppedAt": stopped,
+        "skipped": skipped,
     })))
 }
 
@@ -885,12 +1174,20 @@ fn send_command(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
         None | Some(Value::Null) => 5.0,
         Some(v) => v.as_f64().filter(|f| f.is_finite()).ok_or("`wait_seconds` debe ser un número")?.clamp(0.5, 120.0),
     };
+    let max = a.int("max_chars", 1000, RUN_MAX, RUN_DEFAULT)? as usize;
     let (info, session) = conn(ctx, host, id)?;
     gate(ctx, host, "send_command", &info, &session, &command)?;
     let out = host.send(id, &command, Duration::from_secs_f64(wait))?;
     host.activity("send_command", &info.name, &command, true);
-    let (out, _) = cap(&mask_text(&out), 100_000);
-    Ok(text_out(if out.is_empty() { "(sin salida en el tiempo de espera)".into() } else { out }))
+    let masked = mask_text(&out);
+    let (shown, cut) = cap(&masked, max);
+    Ok(text_out(if shown.is_empty() {
+        "(sin salida en el tiempo de espera)".into()
+    } else if cut {
+        format!("{shown}\n[… {}]", cut_note(max, masked.chars().count(), "max_chars", RUN_MAX, " o lee la pantalla con read_output"))
+    } else {
+        shown
+    }))
 }
 
 fn open_session(ctx: &Ctx, host: &dyn Host, a: &Args) -> Result<Out, String> {
@@ -977,7 +1274,8 @@ pub fn resources(ctx: &Ctx, host: &dyn Host) -> Vec<Value> {
         }
     }
     if ctx.cfg.scopes.backups {
-        for d in crate::backups::list(&host.data_dir()) {
+        let scope = file_scope(ctx, host);
+        for d in crate::backups::list(&host.data_dir()).into_iter().filter(|d| device_visible(&scope, &d.device)) {
             for f in d.files.iter().take(200) {
                 out.push(json!({ "uri": backup_uri(&d.device, &f.name), "name": format!("backup-{}-{}", d.device, f.name), "title": format!("Respaldo {} {}", d.device, f.name), "mimeType": "text/plain", "size": f.size }));
             }
@@ -997,7 +1295,7 @@ pub fn read_resource(ctx: &Ctx, host: &dyn Host, uri: &str) -> Result<Value, Rpc
     let res = match segs.as_slice() {
         ["sessions"] => {
             let list: Vec<Value> = visible_sessions(ctx, host).iter().map(session_json).collect();
-            text("application/json", serde_json::to_string_pretty(&list).unwrap_or_default())
+            text("application/json", serde_json::to_string(&list).unwrap_or_default())
         }
         ["topology"] => {
             let out = get_topology(host, &Args(empty())).map_err(|_| nf())?;
@@ -1010,17 +1308,21 @@ pub fn read_resource(ctx: &Ctx, host: &dyn Host, uri: &str) -> Result<Value, Rpc
             text("text/plain", mask_text(&cap_tail(&t, 20_000)))
         }
         ["notes", name] if ctx.cfg.scopes.notes => {
-            let name = dec(name).ok_or_else(nf)?;
+            let name = dec(name).filter(|n| plain_note_name(n)).ok_or_else(nf)?;
             let dir = host.notes_dir();
             if crate::notes::is_protected(&dir, &name) || !crate::notes::list(&dir).iter().any(|n| n.name == name && !n.protected) {
                 return Err(nf());
             }
-            let t = crate::notes::read(&dir, &name).map_err(|_| nf())?;
+            // Archivo regular sin enlaces simbólicos (la interfaz lee como siempre).
+            let t = read_checked(&dir.join(format!("{name}.txt")), &dir, || crate::notes::read(&dir, &name)).map_err(|_| nf())?;
             let (t, cut) = cap(&t, MAX_FILE_CHARS);
             text("text/plain", mask_text(&t) + if cut { "\n[… nota recortada]" } else { "" })
         }
         ["backups", device, file] if ctx.cfg.scopes.backups => {
             let (device, file) = (dec(device).ok_or_else(nf)?, dec(file).ok_or_else(nf)?);
+            if !device_visible(&file_scope(ctx, host), &device) {
+                return Err(nf());
+            }
             let (t, cut) = read_backup_masked(host, &device, &file, MAX_FILE_CHARS).map_err(|_| nf())?;
             text("text/plain", t + if cut { "\n[… respaldo recortado]" } else { "" })
         }
@@ -1190,6 +1492,10 @@ pub(crate) mod testhost {
         pub audits: Mutex<Vec<Value>>,
         pub ui: bool,
         pub opened: Mutex<Vec<String>>,
+        /// Demora simulada del equipo por comando (mediciones).
+        pub run_delay: Duration,
+        /// Comando que el equipo responde con error (run_commands se detiene ahí).
+        pub fail_on: Option<String>,
     }
 
     pub fn session(id: &str, name: &str, t: SessionType) -> Session {
@@ -1262,6 +1568,8 @@ pub(crate) mod testhost {
                 audits: Mutex::new(vec![]),
                 ui: true,
                 opened: Mutex::new(vec![]),
+                run_delay: Duration::ZERO,
+                fail_on: None,
             }
         }
     }
@@ -1345,6 +1653,10 @@ pub(crate) mod testhost {
         }
         fn run(&self, id: &str, command: &str, _t: Duration) -> Result<RunOutcome, String> {
             self.sent.lock().unwrap().push((id.into(), command.into()));
+            std::thread::sleep(self.run_delay);
+            if self.fail_on.as_deref() == Some(command) {
+                return Ok(RunOutcome { output: format!("{command}\r\n% Invalid input detected at '^' marker.\r\ncore-sw01#"), ok: false, declined: None, error: None, ran: true });
+            }
             Ok(RunOutcome { output: self.run_raw.replace("show interfaces Gi1/0/1", command), ok: true, declined: None, error: None, ran: true })
         }
         fn open_session(&self, session_id: &str) {
@@ -1421,6 +1733,7 @@ mod tests {
             ("list_backups", json!({})),
             ("diff_backups", json!({ "device": "sw1" })),
             ("run_command", json!({ "connection_id": "t1#1", "command": "show interfaces Gi1/0/1" })),
+            ("run_commands", json!({ "connection_id": "t1#1", "commands": ["show interfaces Gi1/0/1", "show run"] })),
             ("send_command", json!({ "connection_id": "t1#1", "command": "show run" })),
         ] {
             let o = call_ok(&c, &h, name, args);
@@ -1497,10 +1810,10 @@ mod tests {
         let o = call_ok(&marked, &h, "list_sessions", json!({}));
         assert_eq!(o.structured.unwrap()["total"], 2);
         // Lo no visible se informa igual que lo inexistente, en todas las herramientas.
-        for t in ["read_output", "get_session_info", "run_command", "send_command"] {
-            let e = call_err(&marked, &h, t, json!({ "connection_id": "t2#1", "command": "show clock" }));
+        for t in ["read_output", "get_session_info", "run_command", "send_command", "run_commands"] {
+            let e = call_err(&marked, &h, t, json!({ "connection_id": "t2#1", "command": "show clock", "commands": ["show clock"] }));
             assert_eq!(e, NOT_FOUND, "{t}");
-            let e = call_err(&marked, &h, t, json!({ "connection_id": "t9#9", "command": "show clock" }));
+            let e = call_err(&marked, &h, t, json!({ "connection_id": "t9#9", "command": "show clock", "commands": ["show clock"] }));
             assert_eq!(e, NOT_FOUND, "{t}");
         }
         assert!(h.asked.lock().unwrap().is_empty(), "no se pide aprobación para lo no visible");
@@ -1523,14 +1836,14 @@ mod tests {
     fn read_only_tab_rejects_writes_before_asking() {
         let h = FakeHost::new();
         let c = cfg();
-        for t in ["run_command", "send_command"] {
-            let e = call_err(&c, &h, t, json!({ "connection_id": "t2#1", "command": "show clock" }));
+        for t in ["run_command", "send_command", "run_commands"] {
+            let e = call_err(&c, &h, t, json!({ "connection_id": "t2#1", "command": "show clock", "commands": ["show clock", "show version"] }));
             assert_eq!(e, crate::connection::READ_ONLY);
         }
         assert!(h.asked.lock().unwrap().is_empty());
         assert!(h.sent.lock().unwrap().is_empty());
         let audits = h.audits.lock().unwrap();
-        assert!(audits.iter().filter(|a| a["decision"] == "solo_lectura").count() == 2);
+        assert!(audits.iter().filter(|a| a["decision"] == "solo_lectura").count() == 3);
     }
 
     #[test]
@@ -1567,13 +1880,196 @@ mod tests {
         busy.busy.push("t1#1".into());
         assert_eq!(call_err(&c, &busy, "run_command", json!({ "connection_id": "t1#1", "command": "show clock" })), crate::scripts::BUSY);
         assert!(busy.asked.lock().unwrap().is_empty());
-        // Salida acotada.
+        // Salida acotada, con el aviso de cómo pedir más.
         let mut big = FakeHost::new();
         big.run_raw = format!("show x\n{}\nR1#", "y".repeat(5000));
         let s = call_ok(&c, &big, "run_command", json!({ "connection_id": "t1#1", "command": "show x", "max_chars": 1000 })).structured.unwrap();
         assert_eq!(s["output"].as_str().unwrap().chars().count(), 1000);
         assert_eq!(s["truncated"], true);
         assert_eq!(s["totalChars"], 5000);
+        assert!(s["note"].as_str().unwrap().contains("max_chars"), "{s}");
+        let s = call_ok(&c, &big, "run_command", json!({ "connection_id": "t1#1", "command": "show x" })).structured.unwrap();
+        assert!(s.get("note").is_none() && s["truncated"] == false);
+    }
+
+    #[test]
+    fn run_commands_asks_once_for_the_whole_batch_and_stops_at_the_first_error() {
+        let c = cfg();
+        let h = FakeHost::new();
+        let cmds = ["show clock", "show version", "show interfaces Gi1/0/1"];
+        let s = call_ok(&c, &h, "run_commands", json!({ "connection_id": "t1#1", "commands": cmds })).structured.unwrap();
+        // Una sola aprobación con el lote exacto, una línea por comando.
+        assert_eq!(*h.asked.lock().unwrap(), vec![("run_commands".to_string(), cmds.join("\n"))]);
+        let sent: Vec<String> = h.sent.lock().unwrap().iter().map(|x| x.1.clone()).collect();
+        assert_eq!(sent, cmds);
+        let res = s["results"].as_array().unwrap();
+        assert_eq!(res.len(), 3);
+        assert_eq!(res[2]["command"], "show interfaces Gi1/0/1");
+        assert!(res[2]["output"].as_str().unwrap().starts_with("Gi1/0/1 is up"));
+        assert_eq!((s["completed"].as_bool(), s["stoppedAt"].is_null(), s["risk"].as_str()), (Some(true), true, Some("read")));
+        let audit = h.audits.lock().unwrap().last().unwrap().clone();
+        assert_eq!((audit["tool"].as_str(), audit["decision"].as_str(), audit["command"].as_str()), (Some("run_commands"), Some("aprobado"), Some(cmds.join("\n").as_str())));
+
+        // Error del equipo en el segundo: se detiene, el tercero no se envía.
+        let mut h = FakeHost::new();
+        h.fail_on = Some("show version".into());
+        let s = call_ok(&c, &h, "run_commands", json!({ "connection_id": "t1#1", "commands": cmds })).structured.unwrap();
+        assert_eq!(h.sent.lock().unwrap().len(), 2);
+        assert_eq!((s["completed"].as_bool(), s["stoppedAt"].as_u64()), (Some(false), Some(1)));
+        assert_eq!(s["results"][1]["deviceError"], true);
+        assert_eq!(s["skipped"], json!(["show interfaces Gi1/0/1"]));
+
+        // Rechazo: no se envía ninguno.
+        let h = FakeHost::new();
+        *h.verdict.lock().unwrap() = Verdict { kind: VerdictKind::Rejected, risk: Some("disruptive".into()) };
+        assert!(call_err(&c, &h, "run_commands", json!({ "connection_id": "t1#1", "commands": ["show clock", "reload"] })).contains("rechazó"));
+        assert!(h.sent.lock().unwrap().is_empty());
+
+        // Validación antes de preguntar: lista vacía, demasiados, varias líneas, control, tipo.
+        let h = FakeHost::new();
+        let many: Vec<String> = (0..=MAX_BATCH).map(|i| format!("show {i}")).collect();
+        for (args, want) in [
+            (json!({ "connection_id": "t1#1", "commands": [] }), "entre 1"),
+            (json!({ "connection_id": "t1#1", "commands": many }), "entre 1"),
+            (json!({ "connection_id": "t1#1", "commands": ["show clock\nreload"] }), "una sola línea"),
+            (json!({ "connection_id": "t1#1", "commands": ["show clock\rreload"] }), "una sola línea"),
+            (json!({ "connection_id": "t1#1", "commands": ["show\x1b[2Kclock"] }), "control"),
+            (json!({ "connection_id": "t1#1", "commands": ["show clock", 5] }), "texto"),
+            (json!({ "connection_id": "t1#1", "commands": "show clock" }), "lista"),
+            (json!({ "connection_id": "t1#1" }), "Falta"),
+            (json!({ "connection_id": "t1#1", "commands": ["   "] }), "vacío"),
+        ] {
+            let e = call_err(&c, &h, "run_commands", args.clone());
+            assert!(e.contains(want), "{args}: {e}");
+        }
+        assert!(h.asked.lock().unwrap().is_empty() && h.sent.lock().unwrap().is_empty());
+        // Salida por comando acotada con su propio tope.
+        let mut big = FakeHost::new();
+        big.run_raw = format!("show x\n{}\nR1#", "y".repeat(9000));
+        let s = call_ok(&c, &big, "run_commands", json!({ "connection_id": "t1#1", "commands": ["show x"] })).structured.unwrap();
+        assert_eq!(s["results"][0]["output"].as_str().unwrap().chars().count(), BATCH_DEFAULT as usize);
+        assert!(s["results"][0]["note"].as_str().unwrap().contains("max_chars"));
+    }
+
+    #[test]
+    fn default_caps_are_smaller_and_say_how_to_get_more() {
+        let c = cfg();
+        let mut h = FakeHost::new();
+        h.history.insert("t1#1".into(), format!("{}core-sw01#", "x".repeat(10_000)));
+        let o = call_ok(&c, &h, "read_output", json!({ "connection_id": "t1#1" }));
+        assert!(o.text.starts_with("[… salida anterior omitida") && o.text.contains("max_chars"), "{}", &o.text[..120]);
+        assert!(o.text.ends_with("core-sw01#") && o.text.chars().count() < READ_DEFAULT as usize + 200);
+        // Pidiendo todo: sin aviso.
+        let o = call_ok(&c, &h, "read_output", json!({ "connection_id": "t1#1", "max_chars": 20_000 }));
+        assert!(!o.text.contains("omitida") && o.text.chars().count() == 10_010);
+        // send_command acotado con aviso.
+        let o = call_ok(&c, &h, "send_command", json!({ "connection_id": "t1#1", "command": "x".repeat(3000), "max_chars": 1000 }));
+        assert!(o.text.contains("Salida recortada") && o.text.contains("max_chars"));
+        // Búsqueda: página corta por defecto y aviso de que hay más.
+        let s = call_ok(&c, &h, "search_logs", json!({ "query": "secret", "kinds": ["logs", "backups"], "limit": 1 })).structured.unwrap();
+        assert!(s["note"].as_str().unwrap().contains("cursor"));
+        // El esquema anuncia los valores por defecto nuevos.
+        let all = tools(&c);
+        let prop = |t: &str, p: &str| all.iter().find(|x| x["name"] == t).unwrap()["inputSchema"]["properties"][p]["default"].clone();
+        assert_eq!(prop("read_output", "max_chars"), READ_DEFAULT);
+        assert_eq!(prop("run_command", "max_chars"), RUN_DEFAULT);
+        assert_eq!(prop("search_logs", "limit"), SEARCH_DEFAULT);
+        assert_eq!(prop("list_sessions", "limit"), PAGE as u64);
+        // JSON compacto: sin sangría.
+        assert!(!call_ok(&c, &h, "list_connections", json!({})).text.contains("\n  "));
+    }
+
+    /// «Marcadas»: logs y respaldos solo de sesiones marcadas, y nada ambiguo.
+    #[test]
+    fn marked_visibility_limits_logs_and_backups_to_marked_sessions() {
+        let h = FakeHost::new();
+        let w = |rel: &str, body: &str| {
+            let p = h.dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w("logs/core-sw01_20261110-101010.log", "marca-visible\n");
+        w("logs/edge-rt01_20261110-101010.log", "marca-oculta\n");
+        w("logs/core-sw01_y_edge-rt01.log", "marca-ambigua\n");
+        w("logs/sin-sesion_20261110.log", "marca-huerfana\n");
+        w("logs/core-sw01.lab_20261110.log", "marca-destino\n");
+        w("backups/core-sw01/2026-11-01_100000.txt", "hostname core-sw01\nmarca-visible\n");
+        w("backups/core-sw01/2026-11-09_100000.txt", "hostname core-sw01\nmarca-visible\n shutdown\n");
+        w("backups/edge-rt01/2026-11-01_100000.txt", "hostname edge-rt01\nmarca-oculta\n");
+        w("backups/edge-rt01/2026-11-09_100000.txt", "hostname edge-rt01\nmarca-oculta\n shutdown\n");
+        let marked = McpConfig { visibility: Visibility::parse("marked", &["s1".into()]), ..cfg() };
+        let cl = client();
+        let ctx = Ctx { cfg: &marked, client: &cl };
+
+        let s = call_ok(&marked, &h, "list_backups", json!({})).structured.unwrap();
+        let devs: std::collections::BTreeSet<String> = s["backups"].as_array().unwrap().iter().map(|b| b["device"].as_str().unwrap().to_string()).collect();
+        assert_eq!(devs.into_iter().collect::<Vec<_>>(), ["core-sw01"], "ni edge-rt01 ni sw1 (sin sesión)");
+        assert!(call_ok(&marked, &h, "diff_backups", json!({ "device": "core-sw01" })).text.contains("shutdown"));
+        let e = call_err(&marked, &h, "diff_backups", json!({ "device": "edge-rt01" }));
+        assert_eq!(e, call_err(&marked, &h, "diff_backups", json!({ "device": "no-existe" })).replace("no-existe", "edge-rt01"), "igual que inexistente");
+        let uris: Vec<String> = resources(&ctx, &h).iter().map(|r| r["uri"].as_str().unwrap().to_string()).collect();
+        assert!(uris.iter().any(|u| u.contains("backups/core-sw01/")) && !uris.iter().any(|u| u.contains("edge-rt01") || u.contains("backups/sw1/")));
+        assert_eq!(read_resource(&ctx, &h, "netterminal://backups/edge-rt01/2026-11-01_100000.txt").unwrap_err().code, -32002);
+        assert!(read_resource(&ctx, &h, "netterminal://backups/core-sw01/2026-11-01_100000.txt").is_ok());
+
+        let s = call_ok(&marked, &h, "search_logs", json!({ "query": "marca", "kinds": ["logs", "backups"], "limit": 200 })).structured.unwrap();
+        let text = s.to_string();
+        assert!(text.contains("marca-visible") && text.contains("marca-destino"), "{text}");
+        for hidden in ["marca-oculta", "marca-ambigua", "marca-huerfana"] {
+            assert!(!text.contains(hidden), "{hidden}: {text}");
+        }
+        // Con «Todas» no se filtra (como antes).
+        let s = call_ok(&cfg(), &h, "search_logs", json!({ "query": "marca", "kinds": ["logs", "backups"], "limit": 200 })).structured.unwrap().to_string();
+        assert!(s.contains("marca-oculta") && s.contains("marca-ambigua") && s.contains("marca-huerfana"));
+        assert_eq!(call_ok(&cfg(), &h, "list_backups", json!({ "limit": 500 })).structured.unwrap()["total"], 6);
+    }
+
+    #[test]
+    fn log_tokens_match_how_logs_are_named() {
+        let now = chrono::Local::now();
+        for name in ["core-sw01", "Router Core #1", ".oculto", "sw/01:a", "ñandú-01"] {
+            let vars = crate::logfile::LogVars { session: name.into(), host: String::new(), folder: String::new() };
+            let rendered = crate::logfile::render("{session}", &vars, &now).to_string_lossy().to_lowercase();
+            assert_eq!(log_token(name), rendered, "{name}");
+        }
+        assert!(mentions("logs/core-sw01_2026.log", "core-sw01"));
+        assert!(mentions("a/sw01.log", "sw01") && mentions("x-sw01", "sw01"));
+        assert!(!mentions("core-sw010_2026.log", "sw01") && !mentions("asw01", "sw01") && !mentions("x", ""));
+        // Una aparición pegada no tapa otra completa más adelante.
+        assert!(mentions("sw011_sw01.log", "sw01"));
+    }
+
+    /// Las lecturas vía MCP de notas y respaldos no siguen enlaces simbólicos (la interfaz sí lee).
+    #[cfg(unix)]
+    #[test]
+    fn mcp_reads_of_notes_and_backups_do_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+        let h = FakeHost::new();
+        let c = cfg();
+        let cl = client();
+        let ctx = Ctx { cfg: &c, client: &cl };
+        let outside = std::env::temp_dir().join(format!("nt-mcp-fuera-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secreto.txt"), "FUERA_DE_LA_APP").unwrap();
+        std::fs::write(outside.join("2026-11-01_100000.txt"), "FUERA_DE_LA_APP").unwrap();
+        symlink(outside.join("secreto.txt"), h.dir.join("notes/enlace.txt")).unwrap();
+        symlink(outside.join("secreto.txt"), h.dir.join("backups/sw1/2026-11-10_100000.txt")).unwrap();
+        symlink(&outside, h.dir.join("backups/sw9")).unwrap();
+        for uri in ["netterminal://notes/enlace", "netterminal://backups/sw1/2026-11-10_100000.txt", "netterminal://backups/sw9/2026-11-01_100000.txt"] {
+            assert_eq!(read_resource(&ctx, &h, uri).map_err(|e| e.code).unwrap_err(), -32002, "{uri}");
+        }
+        let e = call_err(&c, &h, "diff_backups", json!({ "device": "sw1", "to": "2026-11-10_100000.txt" }));
+        assert!(e.contains("no encontrado"), "{e}");
+        let e = call_err(&c, &h, "diff_backups", json!({ "device": "sw9", "from": "2026-11-01_100000.txt", "to": "2026-11-01_100000.txt" }));
+        assert!(!e.contains("FUERA"), "{e}");
+        // Lo regular se sigue leyendo.
+        assert!(read_resource(&ctx, &h, "netterminal://notes/red").is_ok());
+        assert!(read_resource(&ctx, &h, "netterminal://backups/sw1/2026-11-01_100000.txt").is_ok());
+        // La interfaz conserva su comportamiento.
+        assert_eq!(crate::notes::read(&h.dir.join("notes"), "enlace").unwrap(), "FUERA_DE_LA_APP");
+        // Nombres que el saneado de notas cambiaría: no se leen por MCP.
+        assert!(!plain_note_name(" a") && !plain_note_name("a.") && !plain_note_name("a:b") && plain_note_name("red"));
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -1592,7 +2088,7 @@ mod tests {
         let h = FakeHost::new();
         let ro = McpConfig { read_only: true, ..cfg() };
         let names: Vec<String> = tools(&ro).iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        for w in ["run_command", "send_command", "open_session"] {
+        for w in ["run_command", "run_commands", "send_command", "open_session"] {
             assert!(!names.contains(&w.to_string()));
             let cl = client();
             let ctx = Ctx { cfg: &ro, client: &cl };
@@ -1655,9 +2151,9 @@ mod tests {
         // max_chars se acota al máximo.
         let o = call_ok(&c, &h, "read_output", json!({ "connection_id": "t1#1", "max_chars": 10_000_000 }));
         assert!(o.text.chars().count() <= 50_000);
-        // Paginación del catálogo: 250 comandos de a 100, el riesgo lo calcula la interfaz.
+        // Paginación del catálogo: 250 comandos de a 50 por defecto, el riesgo lo calcula la interfaz.
         let p1 = call_ok(&c, &h, "list_commands", json!({})).structured.unwrap();
-        assert_eq!((p1["commands"].as_array().unwrap().len(), p1["total"].as_u64(), p1["nextCursor"].as_str()), (100, Some(250), Some("o100")));
+        assert_eq!((p1["commands"].as_array().unwrap().len(), p1["total"].as_u64(), p1["nextCursor"].as_str()), (50, Some(250), Some("o50")));
         let p3 = call_ok(&c, &h, "list_commands", json!({ "cursor": "o200" })).structured.unwrap();
         assert_eq!((p3["commands"].as_array().unwrap().len(), p3["nextCursor"].is_null()), (50, true));
         let reads = call_ok(&c, &h, "list_commands", json!({ "risk": "read", "limit": 500 })).structured.unwrap();

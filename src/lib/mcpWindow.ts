@@ -130,3 +130,36 @@ export const canOfferWindow = (req: WindowRequest) => AUTO_TOOLS.has(req.tool) &
 
 /** Minutos restantes (redondeado hacia arriba) para mostrar. */
 export const minutesLeft = (w: ConsultWindow, now: number) => Math.max(0, Math.ceil((w.until - now) / 60_000));
+
+/** Herramienta MCP que ejecuta varias consultas en una llamada (una línea por comando en `detail`). */
+export const BATCH_TOOL = "run_commands";
+/** Comandos máximos de un lote (el mismo MAX_BATCH de mcp_tools.rs). */
+export const BATCH_MAX = 10;
+
+/** Decisión de la ventana (la misma forma que devuelve `autoApprove`). */
+export type WindowDecision = ReturnType<typeof autoApprove>;
+
+/**
+ * Decisión de la ventana para cualquier solicitud. `one` decide UNA solicitud con la regla de siempre
+ * (en la app, `autoApprove` con las ventanas vigentes). Además:
+ * - Sin clave de agente (cliente sin `Mcp-Session-Id`) nunca se aprueba sin diálogo: todos los
+ *   anónimos compartirían la misma ventana.
+ * - Un lote de `run_commands` se aprueba solo si cada línea, por separado, pasa `one` como si fuera un
+ *   `run_command` de esa línea; basta una que no para mostrar el diálogo con el lote completo.
+ * Rust vuelve a exigir lo mismo (cliente identificado, cada línea dentro del tope y sin control).
+ */
+export function autoApproveBatch(req: WindowRequest, one: (r: WindowRequest) => WindowDecision): WindowDecision {
+  if (!req.client_key) return { auto: false, reason: "agente sin sesión MCP" };
+  if (req.tool !== BATCH_TOOL) return one(req);
+  const lines = typeof req.detail === "string" ? req.detail.split("\n") : [];
+  if (!lines.length || lines.length > BATCH_MAX) return { auto: false, reason: "lote" };
+  for (let i = 0; i < lines.length; i++) {
+    const d = one({ ...req, tool: "run_command", detail: lines[i] });
+    if (!d.auto) return { auto: false, reason: `línea ${i + 1}: ${d.reason}` };
+  }
+  return { auto: true, risk: "read" };
+}
+
+/** Como `canOfferWindow`, también para un lote, y solo a un agente identificado (con clave). */
+export const canOfferWindowFor = (req: WindowRequest) =>
+  !!req.client_key && !!req.connection && (canOfferWindow(req) || req.tool === BATCH_TOOL);

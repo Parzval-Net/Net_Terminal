@@ -181,6 +181,9 @@ export function AiSettings({ settings: s, status, sessions = [], windows = [], o
           <p className="mb-1.5 text-[11.5px] text-muted">
             Marca aquí o desde el menú de la pestaña («Visible para agentes IA»). Las conexiones rápidas no se pueden marcar: guárdalas como sesión.
           </p>
+          <p className="mb-1.5 text-[11.5px] text-muted">
+            Logs y respaldos también se limitan a las sesiones marcadas: el agente solo recibe los archivos cuyo nombre corresponde a una sesión marcada (su nombre o destino) y a ninguna sin marcar. Los que no se pueden asociar con certeza, como los de conexiones rápidas o sesiones borradas, no se entregan. Las notas no dependen de la sesión.
+          </p>
           <div className="max-h-44 overflow-y-auto rounded-lg border border-line divide-y divide-line">
             {markable.map((m) => (
               <label key={m.id} className="flex items-center gap-2 px-3 h-8 text-[12.5px]">
@@ -253,7 +256,7 @@ export function AiSettings({ settings: s, status, sessions = [], windows = [], o
       {s.mcpAudit && (
         <div className="-mt-1">
           <div className="flex items-center gap-1.5 mb-1.5">
-            <span className="text-[11.5px] text-muted">Últimos {AUDIT_ROWS} eventos (sin salidas de equipos ni contraseñas)</span>
+            <span className="text-[11.5px] text-muted" title="Las lecturas del agente se registran aparte (carpeta «lecturas»), así no desplazan los comandos">Últimos {AUDIT_ROWS} comandos y decisiones (sin salidas de equipos ni contraseñas; las lecturas van aparte)</span>
             <button onClick={loadAudit} className="ml-auto flex items-center gap-1 px-2 h-6 rounded text-[11.5px] text-muted hover:text-fg hover:bg-hover">
               <RefreshCw size={12} /> Actualizar
             </button>

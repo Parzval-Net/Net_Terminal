@@ -148,6 +148,21 @@ fn append_with(dir: &Path, ev: &Value, max: u64) -> Result<(), String> {
     f.write_all(&line).map_err(|e| e.to_string())
 }
 
+/// Subcarpeta de las lecturas (`<datos>/mcp-audit/lecturas/audit.jsonl`, con su propia rotación):
+/// un agente que hace miles de lecturas solo rota ese archivo y nunca desplaza los registros de
+/// comandos, aprobaciones y rechazos, que quedan en `audit.jsonl`.
+pub const READS_DIR: &str = "lecturas";
+
+/// Evento de lectura (herramientas y recursos sin escritura): va al archivo de lecturas.
+pub fn is_read(ev: &Event) -> bool {
+    matches!(ev.decision, "lectura" | "error")
+}
+
+/// Agrega un evento de lectura en su archivo aparte (mismo formato, tope y permisos).
+pub fn append_read(data_dir: &Path, ev: &Event) -> Result<(), String> {
+    append_with(&dir(data_dir).join(READS_DIR), &to_json(ev, chrono::Local::now()), MAX_BYTES)
+}
+
 /// Últimos `n` eventos (el más reciente al final), leyendo el archivo actual y, si hace falta,
 /// los anteriores. Se lee como máximo el final de cada archivo.
 pub fn tail(data_dir: &Path, n: usize) -> Vec<Value> {
@@ -254,6 +269,32 @@ mod tests {
         assert!(t.iter().all(|v| v["tool"] == "run_command"));
         assert_eq!(tail(&data_dir, 100000).len().min(MAX_TAIL), tail(&data_dir, 100000).len());
         let _ = fs::remove_dir_all(&data_dir);
+    }
+
+    /// Miles de lecturas rotan solo su propio archivo: el registro de comandos queda intacto.
+    #[test]
+    fn reads_cannot_rotate_out_the_command_log() {
+        let data = tmp("reads");
+        let cmd = ev(Some("reload"), "aprobado");
+        assert!(!is_read(&cmd));
+        append(&data, &cmd).unwrap();
+        let before = fs::read(dir(&data).join(FILE)).unwrap();
+        let mut read = ev(None, "lectura");
+        read.tool = "read_output";
+        assert!(is_read(&read) && is_read(&ev(None, "error")));
+        let line = to_json(&read, chrono::Local::now());
+        let reads = dir(&data).join(READS_DIR);
+        for _ in 0..3000 {
+            append_with(&reads, &line, 4096).unwrap();
+        }
+        assert!(rotated(&reads, KEEP).exists(), "las lecturas rotaron");
+        assert_eq!(fs::read(dir(&data).join(FILE)).unwrap(), before, "los comandos no se tocaron");
+        assert!(!rotated(&dir(&data), 1).exists());
+        assert_eq!(tail(&data, 10).len(), 1);
+        assert_eq!(tail(&data, 10)[0]["decision"], "aprobado");
+        append_read(&data, &read).unwrap();
+        assert_eq!(tail(&data, 10).len(), 1, "el visor de comandos no se llena de lecturas");
+        let _ = fs::remove_dir_all(&data);
     }
 
     #[cfg(unix)]

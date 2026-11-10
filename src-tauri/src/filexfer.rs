@@ -341,13 +341,37 @@ impl EchoScan {
             self.end = output[from..].find(command).map(|i| from + i + command.len());
             self.searched = output.len();
         }
-        let after = &output[self.end.unwrap_or(0)..];
-        if !after.contains('\n') {
-            return false;
-        }
-        let last = after.trim_end_matches([' ', '\t']).rsplit('\n').next().unwrap_or("");
-        p.prompt.is_match(last)
+        ends_at_prompt(p, &output[self.end.unwrap_or(0)..])
     }
+}
+
+/// Hay al menos un salto de línea y la última línea es un prompt del equipo.
+fn ends_at_prompt(p: &Patterns, after: &str) -> bool {
+    if !after.contains('\n') {
+        return false;
+    }
+    let last = after.trim_end_matches([' ', '\t']).rsplit('\n').next().unwrap_or("");
+    p.prompt.is_match(last)
+}
+
+/// Fin de un envío de varias líneas (`send_command` del servidor MCP), con la misma regla que
+/// `run`: los ecos de todas las líneas aparecen en orden y, tras el último, la última línea es un
+/// prompt. Sin eco reconocible (líneas que el equipo recorta, sesiones sin eco) no se da por
+/// terminado y quien llama sigue esperando el silencio, como antes.
+pub fn lines_finished(output: &str, lines: &[&str]) -> bool {
+    let p = patterns();
+    // Lo barato primero: casi siempre el final todavía no es un prompt.
+    if !ends_at_prompt(p, output) {
+        return false;
+    }
+    let mut pos = 0;
+    for l in lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        match output[pos..].find(l) {
+            Some(i) => pos += i + l.len(),
+            None => return false,
+        }
+    }
+    pos > 0 && ends_at_prompt(p, &output[pos..])
 }
 
 /// IP local que el sistema usaría para llegar a `host` (la que el equipo debe usar
@@ -451,6 +475,24 @@ mod tests {
         assert!(!e.finished(p, &out, cmd));
         out.push_str("  1  -rw- 1 a.bin\nRouter#");
         assert!(e.finished(p, &out, cmd));
+    }
+
+    #[test]
+    fn lines_finished_needs_every_echo_in_order_and_a_final_prompt() {
+        assert!(lines_finished("R1#show clock\r\n*10:00 UTC\r\nR1#", &["show clock"]));
+        assert!(!lines_finished("R1#show clock\r\n*10:00 UTC\r\n", &["show clock"]));
+        assert!(!lines_finished("R1#show clock", &["show clock"]), "solo el eco");
+        // Paginador o pregunta del equipo: no es fin (se espera el silencio, como antes).
+        assert!(!lines_finished("R1#show run\r\nhostname R1\r\n --More-- ", &["show run"]));
+        assert!(!lines_finished("R1#reload\r\nProceed with reload? [confirm]", &["reload"]));
+        // Varias líneas iguales: hace falta el eco de cada una.
+        let two = ["show clock", "show clock"];
+        assert!(!lines_finished("R1#show clock\r\n10:00\r\nR1#", &two));
+        assert!(lines_finished("R1#show clock\r\n10:00\r\nR1#show clock\r\n10:01\r\nR1#", &two));
+        assert!(lines_finished("sw01#conf t\r\nsw01(config)#interface Gi1/0/1\r\nsw01(config-if)#", &["conf t", "interface Gi1/0/1"]));
+        // Sin eco reconocible: no se adivina.
+        assert!(!lines_finished("R1#\r\nR1#", &["show clock"]));
+        assert!(!lines_finished("\r\nR1#", &[]));
     }
 
     #[test]
