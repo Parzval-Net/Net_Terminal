@@ -238,16 +238,13 @@ impl SessionStore {
         self.persist(&list)
     }
 
-    /// Escritura atómica: archivo temporal + rename, para no corromper el JSON.
+    /// Escritura atómica (temporal único, fsync y rename) para no corromper el JSON.
     fn persist(&self, list: &[Session]) -> Result<(), String> {
         if let Some(e) = &self.load_error {
             return Err(e.clone());
         }
         let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-        let tmp = self.file_path.with_extension("json.tmp");
-        fs::write(&tmp, json).map_err(|e| e.to_string())?;
-        restrict(&tmp);
-        fs::rename(&tmp, &self.file_path).map_err(|e| e.to_string())
+        crate::seal::write_atomic(&self.file_path, json.as_bytes())
     }
 }
 
@@ -328,6 +325,38 @@ mod tests {
         let id = store.list()[0].id.clone();
         assert_eq!(super::SessionStore::new(&dir).list()[0].id, id);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Guardados simultáneos: cada uno usa su propio temporal, el archivo final es JSON
+    /// íntegro con todas las sesiones y no quedan temporales.
+    #[test]
+    fn concurrent_saves_keep_file_intact() {
+        let dir = temp_dir();
+        let store = std::sync::Arc::new(super::SessionStore::new(&dir));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let st = store.clone();
+                std::thread::spawn(move || {
+                    for j in 0..10 {
+                        let s: crate::models::Session = serde_json::from_str(&format!(
+                            r#"{{"id":"","name":"s{i}-{j}","type":"ssh","host":"192.0.2.1","created_at":""}}"#
+                        ))
+                        .unwrap();
+                        st.save(s).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let reloaded = super::SessionStore::new(&dir);
+        assert_eq!(reloaded.list().len(), store.list().len());
+        assert!(reloaded.list().len() >= 80);
+        let tmps = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(tmps, 0);
+        assert_eq!(corrupt_backups(&dir), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Un archivo sano no se reescribe al abrir: conserva campos de una versión más nueva.

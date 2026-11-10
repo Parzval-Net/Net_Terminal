@@ -53,6 +53,9 @@ jobs:
       # --ignore-scripts: ningún paquete npm ejecuta código al instalarse (solo fsevents
       # declara script y es opcional de macOS; el build no lo necesita).
       - run: npm ci --ignore-scripts && npm audit --audit-level=high
+      # Un tag no publica con tipos o pruebas de la interfaz rotos (scripts-api.test.mjs usa python3, ya presente).
+      - run: npx tsc --noEmit -p .
+      - run: npm test
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libudev-dev libdbus-1-dev pkg-config

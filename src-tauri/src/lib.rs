@@ -1049,15 +1049,12 @@ fn merge_topology(settings: serde_json::Value, topo: serde_json::Value) -> serde
     serde_json::Value::Object(out)
 }
 
-/// Escribe JSON de forma atómica (temporal y rename) y con permisos restringidos. Legible con
+/// Escribe JSON de forma atómica (`seal::write_atomic`: temporal único, fsync y rename) y con permisos restringidos. Legible con
 /// sangría si es chico; compacto si pasa de 512 KB (la mitad de bytes y de tiempo).
 fn write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
     let compact = serde_json::to_string(value).map_err(|e| e.to_string())?;
     let json = if compact.len() < 512 * 1024 { serde_json::to_string_pretty(value).map_err(|e| e.to_string())? } else { compact };
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    session_store::restrict(&tmp);
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    seal::write_atomic(path, json.as_bytes())
 }
 
 #[tauri::command]
@@ -1529,6 +1526,25 @@ mod tests {
         let big = d.join("b.json");
         write_json(&big, &json!({"x": "y".repeat(600 * 1024)})).unwrap();
         assert!(!std::fs::read_to_string(&big).unwrap().contains('\n'), "grande: compacto");
+        // Guardados simultáneos del mismo archivo: queda un JSON íntegro y sin temporales.
+        let same = d.join("c.json");
+        let hs: Vec<_> = (0..8)
+            .map(|i| {
+                let p = same.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        write_json(&p, &json!({"n": i, "pad": "z".repeat(100_000)})).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&same).unwrap()).unwrap();
+        assert_eq!(v["pad"].as_str().unwrap().len(), 100_000);
+        let tmps = std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(tmps, 0);
         std::fs::remove_dir_all(&d).unwrap();
     }
 
