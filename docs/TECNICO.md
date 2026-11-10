@@ -348,6 +348,7 @@ La llave de la bóveda se toma una sola vez para todo el flujo (`Credentials::ho
 | Excluida | `tftpPort`, `httpPort`, `syslogPort`, `syslogSave`, `ftpPort`, `snmpTrapPort`, `snmpTrapBind`, `serverGuard` | Servidores integrados: un archivo podría dejarlos en todas las interfaces, sin filtro de clientes ni detención automática |
 | Excluida | `autoLegacySsh` | Algoritmos SSH débiles |
 | Excluida | `vaultAutoLockMin`, `vaultLockOnSleep` | Política local de la bóveda |
+| Excluida | `dataLockStopLogs` | Política local del modo portable cifrado (logs al bloquear) |
 | Excluida | `logsDir` | Ruta local |
 | Excluida | `monitors`, `topoSources` | Se encienden solos o envían comandos a los equipos |
 | Excluida | `topology`, `topoSnapshots`, `sidebarOrder`, `deviceInfo`, `speedHistory`, `updateDismissed` | Datos de este equipo |

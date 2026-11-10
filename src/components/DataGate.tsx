@@ -17,7 +17,7 @@ export function DataGate({ children }: { children: ReactNode }) {
   const refresh = useCallback(
     () =>
       datacryptStatus()
-        .then(setSt)
+        .then((s) => setSt(s ?? PLAIN_STATUS))
         // Sin backend (navegador de desarrollo) o una versión que no lo tiene: carpeta en claro.
         .catch(() => setSt(PLAIN_STATUS)),
     [],
@@ -71,7 +71,7 @@ export function DataGate({ children }: { children: ReactNode }) {
 
 function Shell({ children, labelledBy }: { children: ReactNode; labelledBy?: string }) {
   return (
-    <div className="fixed inset-0 z-[100] grid place-items-center bg-bg p-4" data-datagate>
+    <div className="fixed inset-0 z-[1000] grid place-items-center bg-bg p-4" data-datagate>
       <div aria-labelledby={labelledBy} className="w-[420px] max-w-full bg-panel border border-line rounded-xl shadow-pop p-6 space-y-4">
         {children}
       </div>
@@ -103,7 +103,7 @@ export function UnlockScreen({ st, onDone, overlay }: { st: DataStatus; onDone: 
     }
   };
   return (
-    <div {...modal.overlay} className="fixed inset-0 z-[100] grid place-items-center bg-bg p-4" data-datagate>
+    <div {...modal.overlay} className="fixed inset-0 z-[1000] grid place-items-center bg-bg p-4" data-datagate>
       <form
         {...modal.dialog}
         className="w-[420px] max-w-full bg-panel border border-line rounded-xl shadow-pop p-6 space-y-4"
@@ -218,7 +218,7 @@ function ResumeScreen({ op, onDone }: { op: DataOp; onDone: () => void }) {
   };
   const encrypting = op === "encrypt";
   return (
-    <div {...modal.overlay} className="fixed inset-0 z-[100] grid place-items-center bg-bg p-4" data-datagate>
+    <div {...modal.overlay} className="fixed inset-0 z-[1000] grid place-items-center bg-bg p-4" data-datagate>
       <div {...modal.dialog} className="w-[460px] max-w-full bg-panel border border-line rounded-xl shadow-pop p-6 space-y-4">
         <div className="flex items-center gap-2.5">
           <RotateCcw size={20} className="text-warn shrink-0" aria-hidden />

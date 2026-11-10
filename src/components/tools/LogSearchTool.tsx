@@ -302,7 +302,7 @@ export default function LogSearchTool({ visible }: { visible?: boolean }) {
   const [encrypted, setEncrypted] = useState(false);
   useEffect(() => {
     datacryptStatus()
-      .then((s) => setEncrypted(s.encrypted))
+      .then((s) => setEncrypted(!!s?.encrypted))
       .catch(() => {});
   }, []);
   const openFile = (f: FileHits, reveal: boolean) => {

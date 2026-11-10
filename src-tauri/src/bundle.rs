@@ -83,7 +83,7 @@ pub const VAULT_NEEDED: &str =
 /// sensibles que vienen apagadas (API local, servidores, algoritmos legacy, bloqueo de la bóveda),
 /// rutas locales, datos del equipo y lo que se exporta aparte o no tiene sentido en otro equipo.
 /// La interfaz tiene la misma lista (`src/lib/bundle.ts`); una prueba de Node exige que coincidan.
-pub const SETTINGS_EXCLUDED: [&str; 34] = [
+pub const SETTINGS_EXCLUDED: [&str; 35] = [
     // API local (MCP): token, encendido, puerto, aprobación y solo lectura.
     "mcpToken",
     "mcpEnabled",
@@ -109,6 +109,8 @@ pub const SETTINGS_EXCLUDED: [&str; 34] = [
     // Bloqueo automático de la bóveda (política local).
     "vaultAutoLockMin",
     "vaultLockOnSleep",
+    // Modo portable cifrado: qué pasa con los logs al bloquear (política local).
+    "dataLockStopLogs",
     // Rutas locales.
     "logsDir",
     // Monitores (se encienden solos) y fuentes de Topología (envían comandos a los equipos).

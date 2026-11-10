@@ -18,7 +18,10 @@ export function DataCryptSettings({ settings, onChange, onVaultChanged }: { sett
   const [dialog, setDialog] = useState<"enable" | "disable" | null>(null);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [fixing, setFixing] = useState<DataOp | "fix" | null>(null);
-  const refresh = () => datacryptStatus().then(setSt).catch(() => setSt(null));
+  const refresh = () =>
+    datacryptStatus()
+      .then((s) => setSt(s ?? null))
+      .catch(() => setSt(null));
   useEffect(() => {
     refresh();
   }, []);
@@ -71,12 +74,12 @@ export function DataCryptSettings({ settings, onChange, onVaultChanged }: { sett
         <span className="inline-flex items-center gap-1 font-medium text-ok">
           <LockKeyhole size={12} aria-hidden /> activo
         </span>
-        <span className="text-muted">: datos cifrados con la contraseña maestra. Bloquear la bóveda bloquea también los datos.</span>
+        <span className="text-muted">· datos cifrados con la contraseña maestra. Bloquear la bóveda bloquea también los datos.</span>
       </p>
       {settings && onChange && (
         <Item
           label="Detener las grabaciones de log al bloquear"
-          hint="Apagado: cada log en curso sigue grabándose cifrado con la llave de su propio archivo (no la de la carpeta) y la sesión no se corta. Encendido: se detienen y se avisa."
+          hint="Apagado: siguen grabándose cifrados con la llave de su archivo"
         >
           <Switch
             checked={settings.dataLockStopLogs}

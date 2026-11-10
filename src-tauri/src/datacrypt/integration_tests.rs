@@ -321,7 +321,7 @@ fn bench_datacrypt() {
     unregister(&sh);
     let _ = fs::remove_dir_all(&d);
     // 4. Búsqueda en 64 MB de logs (16 archivos de 4 MB).
-    let text: String = (0..80_000).map(|i| format!("[2026-01-01 10:00:00] Gi1/0/{} up up linea {i}\n", i % 48)).collect();
+    let text: String = (0..120_000).map(|i| format!("[2026-01-01 10:00:00] Gi1/0/{} up up linea {i}\n", i % 48)).collect();
     let text = &text.as_bytes()[..4 * 1024 * 1024];
     for enc in [false, true] {
         let e = Enc::new("bench-search");
