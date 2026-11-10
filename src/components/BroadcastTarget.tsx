@@ -27,7 +27,7 @@ export const BroadcastTargetPicker = memo(function BroadcastTargetPicker() {
     if (target.mode === "current") return null;
     const r = resolveTargets(
       target,
-      ws.tabs.map((t) => ({ id: t.id, session: t.session, title: t.title })),
+      ws.tabs.map((t) => ({ id: t.id, session: t.session, title: t.title, readOnly: t.readOnly })),
       (id) => ws.tabs.find((t) => t.id === id)?.status,
       ws.activeId,
       ws.panes,

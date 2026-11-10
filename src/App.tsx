@@ -56,7 +56,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { BookOpen, NotebookPen, Pin, Search as SearchIcon, Sparkles, SquareTerminal, Wrench, X as XIcon, Zap, Plus } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { ConnStatus, Session, Tab, TabState, historyKey, tabTitle } from "./types";
-import { closeAllLabel, focusLabel, historyLabel, isMac, localOsVendor, modLabel } from "./lib/platform";
+import { closeAllLabel, focusLabel, highlightLabel, historyLabel, isMac, localOsVendor, markHereLabel, modLabel, nextMarkLabel, prevMarkLabel } from "./lib/platform";
 import { presets, resolvePreset, useSystemDark } from "./lib/theme";
 import { DataNotices, Settings, logOptions, useSettings } from "./lib/settings";
 import { useAlerts } from "./lib/alerts";
@@ -607,13 +607,13 @@ function Workspace({
   useEffect(() => persist("broadcastDelay", bcDelay), [bcDelay]);
   useEffect(() => {
     publishWorkspace({
-      tabs: tabs.map((t) => ({ id: t.id, title: tabTitle(t), session: t.session, status: states[t.id]?.status ?? "connecting" })),
+      tabs: tabs.map((t) => ({ id: t.id, title: tabTitle(t), session: t.session, status: states[t.id]?.status ?? "connecting", readOnly: t.readOnly })),
       panes: visiblePanes,
       activeId,
     });
   }, [tabs, states, activeId, visiblePanes]);
   /** Destino que muestran Notas y catálogo: la pestaña activa o el grupo de difusión. */
-  const sendTarget = broadcastMode ? targetLabel(bcTarget, workspace) : activeConnected ? tabTitle(activeTab!) : null;
+  const sendTarget = broadcastMode ? targetLabel(bcTarget, workspace) : activeConnected && !activeTab!.readOnly ? tabTitle(activeTab!) : null;
   /**
    * Por qué Notas y Catálogo no pueden enviar ahora. Con Herramientas a la vista nunca se envía a la
    * "última terminal": el destino sería una pestaña que el usuario no está viendo. Se le dice y se le
@@ -628,6 +628,8 @@ function Workspace({
         : "Estás en Herramientas. Abre una sesión para ejecutar."
       : !activeTab
         ? "Abre una sesión para ejecutar comandos."
+        : activeTab.readOnly
+          ? `${tabTitle(activeTab)} está en solo lectura: la interfaz no le envía nada. Desactívalo en el menú de la pestaña para ejecutar.`
         : states[activeTab.id]?.status === "connecting"
           ? `Conectando ${tabTitle(activeTab)}…`
           : `${tabTitle(activeTab)} está desconectada. Reconecta para ejecutar.`;
@@ -678,11 +680,12 @@ function Workspace({
 
   const startScript = async (script: string, l: ScriptLaunch) => {
     setScriptLaunch(null);
+    // Las pestañas en solo lectura no reciben scripts lanzados desde la interfaz (el diálogo ya las omite; esto es la red de seguridad).
     const targets = l.targets.flatMap((t) => {
       const ctrl = controllers.current.get(t.id);
-      return ctrl && ctrl.isConnected() ? [{ conn: ctrl.connId(), platform: t.session.platform ?? null }] : [];
+      return ctrl && ctrl.isConnected() && !tabs.find((x) => x.id === t.id)?.readOnly ? [{ conn: ctrl.connId(), platform: t.session.platform ?? null }] : [];
     });
-    if (!targets.length) return toast("Conecta una sesión antes de ejecutar el script", "error");
+    if (!targets.length) return toast("Conecta una sesión (que no esté en solo lectura) antes de ejecutar el script", "error");
     try {
       const run = await apiRunScript(script, targets, {
         allowChanges: l.allowChanges,
@@ -830,6 +833,7 @@ function Workspace({
     const target = tabs.find((t) => t.id === tabId);
     const ctrl = tabId ? controllers.current.get(tabId) : undefined;
     if (!ctrl || !target || !ctrl.isConnected()) return;
+    if (target.readOnly) return toast(`${tabTitle(target)} está en solo lectura: no se envía nada. Desactívalo en el menú de la pestaña`, "error");
     if (labOwns(target.id)) return toast("El CLI Lab está ejecutando en esta pestaña: espera a que termine o usa Detener", "error");
     // Cada línea se ejecuta con Enter, también la última.
     const trimmed = text.replace(/\s+$/, "");
@@ -890,6 +894,9 @@ function Workspace({
     onFocusMode: () => setFocusMode((f) => !f),
     onFind: () => activeCtrl()?.openFind(),
     onHistory: () => h.openHistory(),
+    onHighlight: () => h.highlight(),
+    onMarkHere: () => h.markHere(),
+    onJumpMark: (dir) => h.jumpMark(undefined, dir),
   });
 
   const saveSession = async (session: Session, connect: boolean, cred: CredChange = { action: "keep" }) => {
@@ -1005,7 +1012,8 @@ function Workspace({
   const terminals = useMemo(
     () =>
       tabs
-        .filter((t) => t.session.type !== "local" && states[t.id]?.status === "connected")
+        // Las pestañas en solo lectura no se ofrecen a las herramientas (respaldos, transferencias, topología): escriben en la sesión.
+        .filter((t) => t.session.type !== "local" && states[t.id]?.status === "connected" && !t.readOnly)
         .map((t) => ({
           connId: controllers.current.get(t.id)?.connId() ?? "",
           tabId: t.id,
@@ -1066,7 +1074,7 @@ function Workspace({
         .then((n) => toast(`${plural(n, "línea copiada", "líneas copiadas")} al portapapeles`)),
     toolsConnId: () => {
       const c = lastTermRef.current ? controllers.current.get(lastTermRef.current) : undefined;
-      return c?.isConnected() ? c.connId() : null;
+      return c?.isConnected() && !tabs.find((t) => t.id === lastTermRef.current)?.readOnly ? c.connId() : null;
     },
     scp: (req: ScpRequest) => {
       const s = req.session;
@@ -1106,6 +1114,7 @@ function Workspace({
       });
     },
     typeCommand: (cmd: string) => {
+      if (activeTab?.readOnly) return toast("Pestaña en solo lectura: no se escribe nada en el equipo", "error");
       const type = (text: string) => activeCtrl()?.type(text);
       if (templateVars(cmd).length) setTemplate({ text: cmd, then: type });
       else type(cmd);
@@ -1137,6 +1146,7 @@ function Workspace({
     sendBreak: (id: string | undefined = activeId ?? undefined) => {
       const ctrl = id ? controllers.current.get(id) : undefined;
       if (!ctrl) return;
+      if (tabs.find((t) => t.id === id)?.readOnly) return toast("Pestaña en solo lectura: no se envía el Break", "error");
       sendBreak(ctrl.connId()).catch((e) => toastFail("enviar Break", e));
       ctrl.focus();
     },
@@ -1150,6 +1160,30 @@ function Workspace({
       setActiveId(id);
     },
     openHistory: (id: string | undefined = activeId ?? undefined) => id && setHistoryFor(id),
+    // Resaltado al vuelo, marcadores y solo lectura de la pestaña (la activa si no se indica otra).
+    highlight: (id: string | undefined = activeId ?? undefined) => id && controllers.current.get(id)?.openHighlight(),
+    markHere: (id: string | undefined = activeId ?? undefined) => id && controllers.current.get(id)?.markHere(),
+    jumpMark: (id: string | undefined, dir: "prev" | "next") => {
+      const to = id ?? activeId;
+      if (to) controllers.current.get(to)?.jumpMark(dir);
+    },
+    openMarks: (id: string | undefined = activeId ?? undefined) => id && controllers.current.get(id)?.openMarks(),
+    setAutoMark: (autoMarkCommands: boolean) => update({ autoMarkCommands }),
+    toggleReadOnly: (id: string | undefined = activeId ?? undefined) => {
+      const t = tabs.find((x) => x.id === id);
+      if (!t) return;
+      const on = !t.readOnly;
+      setTabs((ts) => ts.map((x) => (x.id === t.id ? { ...x, readOnly: on || undefined } : x)));
+      // Lo que ya está en marcha (scripts, CLI Lab, difusión) y el servidor MCP escriben desde el backend: no pasan por este bloqueo.
+      const running = scriptRun || isLabRunning() || isBroadcastRunning();
+      toast(
+        on
+          ? `${tabTitle(t)} en solo lectura: la interfaz no envía nada a esta pestaña${running ? ". Lo que ya está en ejecución (script, CLI Lab o difusión) puede seguir escribiendo" : ""}${settings.mcpEnabled ? ". El servidor MCP no respeta este modo" : ""}`
+          : `Solo lectura desactivada en ${tabTitle(t)}`,
+        running && on ? "error" : "info",
+      );
+      controllers.current.get(t.id)?.focus();
+    },
     toggleTools,
     requestCloseTools,
     closeHistory: () => setHistoryFor(null),
@@ -1169,7 +1203,7 @@ function Workspace({
     labTargets: () => resolveTargets(bcTarget, tabs, (id) => states[id]?.status, activeId, visiblePanes),
     labConn: (id: string) => {
       const c = controllers.current.get(id);
-      return c?.isConnected() ? c.connId() : undefined;
+      return c?.isConnected() && !tabs.find((t) => t.id === id)?.readOnly ? c.connId() : undefined;
     },
     // Activa "algoritmos legacy" en la pestaña y, si es una sesión guardada, la deja guardada.
     /** Lectura pasiva de pantalla (al conectar o tras un show version): fija plataforma y resaltado. */
@@ -1219,6 +1253,11 @@ function Workspace({
     onBreak: h.sendBreak,
     onFind: h.find,
     onHistory: h.openHistory,
+    onHighlight: h.highlight,
+    onMarkHere: h.markHere,
+    onJumpMark: h.jumpMark,
+    onMarks: h.openMarks,
+    onToggleReadOnly: h.toggleReadOnly,
     onRename: h.renameTab,
     onReorder: h.reorderTab,
     onDuplicate: h.duplicateTab,
@@ -1398,6 +1437,8 @@ function Workspace({
               register={register}
               onFindState={onFindState}
               catalog={catalog}
+              readOnly={t.readOnly}
+              onAutoMark={h.setAutoMark}
             />
             );
           })}
@@ -1476,7 +1517,7 @@ function Workspace({
             theme={preset.theme}
             font={settings.fontFamily}
             fontSize={Math.max(11, settings.fontSize - 1)}
-            target={broadcastMode ? sendTarget : activeConnected ? activeTab!.session.name : null}
+            target={broadcastMode ? sendTarget : activeConnected && !activeTab!.readOnly ? activeTab!.session.name : null}
             onSend={h.sendToSession}
             onCapture={h.capture}
           />
@@ -1515,6 +1556,7 @@ function Workspace({
           onFind={() => (activeId && findOpenIds[activeId] ? controllers.current.get(activeId)?.closeFind() : h.find())}
           onHistory={() => (historyFor ? h.closeHistory() : h.openHistory())}
           historyOpen={!!historyFor}
+          onToggleReadOnly={activeTab ? () => h.toggleReadOnly(activeTab.id) : undefined}
         />}
       </main>
 
@@ -1668,6 +1710,16 @@ function Workspace({
             ...(activeTab
               ? [
                   { label: "Buscar en la terminal", detail: "Busca texto en la salida de la pestaña activa", shortcut: `${modLabel}F`, run: () => h.find() },
+                  { label: "Resaltar…", detail: "Resalta un texto o una expresión regular en la salida de la pestaña activa (solo esta pestaña)", shortcut: highlightLabel, run: () => h.highlight() },
+                  { label: "Marcar aquí", detail: "Deja un marcador en la línea del cursor (o en la primera de la selección)", shortcut: markHereLabel, run: () => h.markHere() },
+                  { label: "Marcador anterior", detail: "Salta al marcador anterior del historial de la terminal", shortcut: prevMarkLabel, run: () => h.jumpMark(undefined, "prev") },
+                  { label: "Marcador siguiente", detail: "Salta al marcador siguiente del historial de la terminal", shortcut: nextMarkLabel, run: () => h.jumpMark(undefined, "next") },
+                  { label: "Marcadores", detail: "Lista de marcadores de la pestaña activa y marcar cada comando al enviarlo", run: () => h.openMarks() },
+                  {
+                    label: activeTab.readOnly ? "Desactivar solo lectura" : "Solo lectura",
+                    detail: activeTab.readOnly ? "Vuelve a permitir teclado, pegado y envíos en la pestaña activa" : "Modo monitoreo: la pestaña activa no envía nada al equipo; copiar, buscar y desplazarse siguen",
+                    run: () => h.toggleReadOnly(),
+                  },
                   ...(!activeTab.session.scp
                     ? [{ label: "Historial de comandos enviados", detail: "Últimos comandos de Notas, catálogo y botones para este equipo", shortcut: historyLabel, run: () => h.openHistory() }]
                     : []),

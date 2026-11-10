@@ -1,10 +1,10 @@
-import { ArrowDownToLine, ArrowRightToLine, ClipboardCopy, Columns2, Copy, CopyX, Eraser, History, LayoutGrid, ListX, MousePointerClick, PanelLeftDashed, PanelTop, Pencil, Plus, RefreshCcw, RotateCcw, Rows2, Save, Search, Square, SquareTerminal, Undo2, Unplug, X, Zap } from "lucide-react";
+import { ArrowDownToLine, ArrowRightToLine, Bookmark, BookmarkPlus, ChevronDown, ChevronUp, ClipboardCopy, Columns2, Copy, CopyX, Eraser, Highlighter, History, LayoutGrid, ListX, Lock, LockOpen, MousePointerClick, PanelLeftDashed, PanelTop, Pencil, Plus, RefreshCcw, RotateCcw, Rows2, Save, Search, Square, SquareTerminal, Undo2, Unplug, X, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import { SplitLayout, layoutLabel } from "../lib/split";
 import type { TabLayout } from "../lib/settings";
 import type { Tab, TabState } from "../types";
 import type { CloseScope } from "../lib/closeAll";
-import { historyLabel, modLabel } from "../lib/platform";
+import { highlightLabel, historyLabel, markHereLabel, modLabel, nextMarkLabel, prevMarkLabel } from "../lib/platform";
 
 /** [etiqueta, icono, acción, deshabilitado/marcado, atajo, separador antes] — formato de ContextMenu. */
 export type MenuItem = [string, ReactNode, () => void, boolean?, string?, boolean?];
@@ -23,6 +23,12 @@ export interface TabMenuHandlers {
   onFind?: (id: string) => void;
   onHistory?: (id: string) => void;
   onSaveAs?: (id: string) => void;
+  /** Resaltado al vuelo, marcadores y solo lectura de la pestaña (ver TermController). */
+  onHighlight?: (id: string) => void;
+  onMarkHere?: (id: string) => void;
+  onJumpMark?: (id: string, dir: "prev" | "next") => void;
+  onMarks?: (id: string) => void;
+  onToggleReadOnly?: (id: string) => void;
   /** Cierra varias pestañas (con un solo aviso): todas, las demás o las que siguen a `id`. */
   onCloseMany?: (scope: CloseScope, id: string) => void;
   /** Pestañas abiertas, para saber si hay otras o alguna después de esta. */
@@ -66,7 +72,8 @@ export function tabMenuItems(t: Tab, state: TabState | undefined, p: TabMenuHand
     ...(p.onBreak && (t.session.type === "serial" || t.session.type === "telnet")
       ? ([["Enviar Break", <Zap size={13} />, () => p.onBreak!(t.id), state?.status !== "connected"]] as MenuItem[])
       : []),
-    ["Copiar toda la salida", <ClipboardCopy size={13} />, () => p.onCopyAll(t.id)],
+    ...annotateItems(t, p),
+    ["Copiar toda la salida", <ClipboardCopy size={13} />, () => p.onCopyAll(t.id), false, undefined, !!p.onHighlight],
     ["Limpiar historial", <Eraser size={13} />, () => p.onClearScrollback(t.id)],
     ["Reiniciar terminal", <RefreshCcw size={13} />, () => p.onResetTerminal(t.id)],
     // Solo pestañas abiertas por conexión rápida (sesión sin id) que no sean locales ni SCP.
@@ -77,6 +84,28 @@ export function tabMenuItems(t: Tab, state: TabState | undefined, p: TabMenuHand
     ...closeManyItems(t, p),
     ...layoutItem(p),
   ];
+}
+
+/**
+ * Resaltar, marcadores y solo lectura. "Solo lectura" va con el estado en el nombre (Activar/Desactivar) y un
+ * candado distinto, así se entiende sin marca de selección.
+ */
+function annotateItems(t: Tab, p: TabMenuHandlers): MenuItem[] {
+  const out: MenuItem[] = [];
+  if (p.onHighlight) out.push(["Resaltar…", <Highlighter size={13} />, () => p.onHighlight!(t.id), false, highlightLabel, true]);
+  if (p.onMarkHere) out.push(["Marcar aquí", <BookmarkPlus size={13} />, () => p.onMarkHere!(t.id), false, markHereLabel]);
+  if (p.onJumpMark) {
+    out.push(["Marcador anterior", <ChevronUp size={13} />, () => p.onJumpMark!(t.id, "prev"), false, prevMarkLabel]);
+    out.push(["Marcador siguiente", <ChevronDown size={13} />, () => p.onJumpMark!(t.id, "next"), false, nextMarkLabel]);
+  }
+  if (p.onMarks) out.push(["Marcadores…", <Bookmark size={13} />, () => p.onMarks!(t.id)]);
+  if (p.onToggleReadOnly)
+    out.push(
+      t.readOnly
+        ? ["Desactivar solo lectura", <LockOpen size={13} />, () => p.onToggleReadOnly!(t.id)]
+        : ["Solo lectura (modo monitoreo)", <Lock size={13} />, () => p.onToggleReadOnly!(t.id)],
+    );
+  return out;
 }
 
 /** Cerrar varias: "a la derecha" en la barra horizontal y "abajo" en la columna vertical. */

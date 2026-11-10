@@ -1,5 +1,5 @@
 import { memo, useEffect, useId, useState } from "react";
-import { ArrowLeftRight, KeyRound, Bot, Circle, CircleCheck, CircleDashed, CircleDot, CircleOff, History, RotateCcw, Search, ShieldAlert, ShieldCheck, Unplug } from "lucide-react";
+import { ArrowLeftRight, KeyRound, Bot, Circle, CircleCheck, CircleDashed, CircleDot, CircleOff, History, Lock, RotateCcw, Search, ShieldAlert, ShieldCheck, Unplug } from "lucide-react";
 import {
   DeviceInfo,
   LIFE_LABEL,
@@ -50,6 +50,8 @@ interface Props {
   findOpen?: boolean;
   /** Modelo y versión leídos de la pantalla (show version): ciclo de vida del equipo. */
   device?: DeviceInfo;
+  /** Desactiva el modo solo lectura de la pestaña (el candado de la barra es el atajo del menú de la pestaña). */
+  onToggleReadOnly?: () => void;
 }
 
 /**
@@ -70,6 +72,7 @@ export const StatusBar = memo(function StatusBar({
   historyOpen,
   findOpen,
   device,
+  onToggleReadOnly,
 }: Props) {
   const logHintId = useId();
   const ai = aiEnabled && (
@@ -96,6 +99,17 @@ export const StatusBar = memo(function StatusBar({
         {/* Barra muy angosta: queda el ícono de forma propia; el estado se lee igual (texto solo para lectores) y va en el tooltip. */}
         <span className="sr-only @[34rem]:not-sr-only">{statusText[state.status]}</span>
       </span>
+      {tab.readOnly && (
+        <BarBtn
+          onClick={onToggleReadOnly}
+          title="Solo lectura: la pestaña no envía nada al equipo. Clic para desactivar"
+          aria-label="Solo lectura activada: desactivar"
+          className="!text-warn font-medium"
+        >
+          <Lock size={12} aria-hidden />
+          <span className="hidden @[34rem]:inline">Solo lectura</span>
+        </BarBtn>
+      )}
       <span className="font-medium text-fg/80">{typeLabel[session.type]}</span>
       <span className="truncate min-w-0">{sessionTarget(session)}</span>
       {session.type === "ssh" && !!session.tunnels?.length && (

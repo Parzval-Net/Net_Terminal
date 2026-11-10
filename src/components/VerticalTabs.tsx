@@ -4,7 +4,7 @@ import { Columns2, LayoutGrid, Maximize2, Minimize2, PanelLeftClose, PanelLeftOp
 import { tabTitle } from "../types";
 import { ContextMenu } from "./Sidebar";
 import { SessionIcon, isQuickSession } from "./SessionIcon";
-import { StatusDot, TabBarProps, TabEnd, dropMark, tabLabel } from "./TabBar";
+import { ReadOnlyMark, StatusDot, TabBarProps, TabEnd, dropMark, tabLabel } from "./TabBar";
 import { useTabDrag } from "../lib/tabDrag";
 import { useTabKeys } from "../lib/useTabKeys";
 import { MenuItem, layoutItem, newTabMenuItems, splitMenuItems, tabMenuItems } from "./tabMenu";
@@ -185,7 +185,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
               role="tab"
               data-id={t.id}
               aria-selected={active}
-              aria-label={tabLabel(title, status, marker)}
+              aria-label={tabLabel(title, status, marker, t.readOnly)}
               tabIndex={focusId === t.id ? 0 : -1}
               onMouseDown={(e) => {
                 if (e.button === 1) {
@@ -220,6 +220,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                     active={active}
                     className={`absolute bottom-0.5 left-0.5 ring-1 ${active ? "ring-term" : "ring-[var(--chrome)]"}`}
                   />
+                  {t.readOnly && <ReadOnlyMark size={10} className="absolute top-0 left-0.5" />}
                   {marker && (
                     <span
                       className={`absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full ${marker === "alert" ? "bg-danger" : "bg-accent"}`}
@@ -253,6 +254,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                   ) : (
                     <span className={`truncate flex-1 min-w-0 ${t.title ? "italic" : ""}`}>{title}</span>
                   )}
+                  {t.readOnly && <ReadOnlyMark />}
                   {marker === "alert" ? (
                     <span aria-hidden className="text-[11px] font-semibold text-danger shrink-0" title="Alerta por palabra clave">
                       ▲

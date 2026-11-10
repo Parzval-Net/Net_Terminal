@@ -67,6 +67,8 @@ export interface Settings {
   customRules: HlRule[];
   /** Pausa entre líneas al enviar desde Notas (consolas lentas). */
   sendLineDelay: number;
+  /** Deja un marcador en la terminal al ejecutar cada comando (para saltar entre comandos). */
+  autoMarkCommands: boolean;
   logTimestamps: boolean;
   /** Carpetas creadas a mano (pueden estar vacías). */
   extraFolders: string[];
@@ -160,6 +162,7 @@ export const defaultSettings: Settings = {
   highlightSchemes: ["cisco", "common"],
   customRules: [],
   sendLineDelay: 0,
+  autoMarkCommands: false,
   logTimestamps: false,
   extraFolders: [],
   sidebarOrder: {},

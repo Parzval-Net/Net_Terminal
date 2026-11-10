@@ -79,6 +79,12 @@ export interface Tab {
   session: Session;
   /** Nombre puesto por el usuario solo para esta pestaña. */
   title?: string;
+  /**
+   * Modo monitoreo: la interfaz no envía nada a esta pestaña (teclado, pegado, botones, Notas, catálogo,
+   * historial, CLI Lab, difusión, scripts lanzados desde la interfaz). Solo de esta pestaña y de esta
+   * sesión de trabajo: no se guarda ni se hereda al duplicarla.
+   */
+  readOnly?: boolean;
 }
 
 export const tabTitle = (t: Tab) => t.title?.trim() || t.session.name;

@@ -26,7 +26,15 @@ export interface ShortcutActions {
   onFocusMode: () => void;
   onFind: () => void;
   onHistory: () => void;
+  /** Resaltado y marcadores de la pestaña activa (acciones de TermController). */
+  onHighlight: () => void;
+  onMarkHere: () => void;
+  onJumpMark: (dir: "prev" | "next") => void;
 }
+
+/** Campo de texto editable que no es la entrada de la terminal (el textarea auxiliar de xterm sí cuenta como terminal). */
+const isTextField = (t: EventTarget | null) =>
+  t instanceof HTMLElement && !t.classList.contains("xterm-helper-textarea") && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
 
 /**
  * Atajos globales (paleta, pestañas, paneles, modo foco, zoom de la terminal…). Se vuelve a registrar en
@@ -37,6 +45,9 @@ export function useShortcuts(a: ShortcutActions) {
     const onKey = (e: KeyboardEvent) => {
       const action = shortcutFor(e);
       if (!action) return;
+      // ⌘⇧↑/↓ (Ctrl+Shift+↑/↓) saltan entre marcadores solo desde la terminal: en un campo de texto (Notas, filtros)
+      // son "seleccionar hasta el inicio o fin" y se dejan al editor.
+      if ((action === "prevMark" || action === "nextMark") && isTextField(e.target)) return;
       e.preventDefault();
       const { tabs, activeId, activeTab } = a;
       const cycle = (step: number) => {
@@ -81,6 +92,14 @@ export function useShortcuts(a: ShortcutActions) {
           return a.onFind();
         case "history":
           return activeTab && !activeTab.session.scp && a.onHistory();
+        case "highlight":
+          return a.onHighlight();
+        case "markHere":
+          return a.onMarkHere();
+        case "prevMark":
+          return a.onJumpMark("prev");
+        case "nextMark":
+          return a.onJumpMark("next");
         case "nextTab":
           return cycle(1);
         case "prevTab":

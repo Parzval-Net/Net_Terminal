@@ -22,7 +22,7 @@ export interface BroadcastTarget {
 
 /** Lo que el selector necesita saber del espacio de trabajo. */
 export interface WorkspaceSnapshot {
-  tabs: { id: string; title: string; session: Session; status: ConnStatus }[];
+  tabs: { id: string; title: string; session: Session; status: ConnStatus; /** Pestaña en solo lectura: nunca es destino. */ readOnly?: boolean }[];
   /** Pestañas en paneles visibles; null si la vista dividida está apagada. */
   panes: string[] | null;
   activeId: string | null;
@@ -107,6 +107,7 @@ export function resolveTargets(
   const out: Resolved = { targets: [], skipped: [] };
   for (const t of chosen) {
     if (t.session.type === "local") out.skipped.push({ tab: t, reason: "Terminal local" });
+    else if (t.readOnly) out.skipped.push({ tab: t, reason: "Solo lectura" });
     else if (status(t.id) !== "connected") out.skipped.push({ tab: t, reason: "Desconectada" });
     else out.targets.push(t);
   }

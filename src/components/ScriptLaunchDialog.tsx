@@ -39,7 +39,7 @@ export function ScriptLaunchDialog({ script, onRun, onCancel }: Props) {
   const [vaultType, setVaultType] = useState(false);
 
   const resolved = useMemo(() => {
-    const tabs = ws.tabs.map((t) => ({ id: t.id, session: t.session, title: t.title }) as Tab);
+    const tabs = ws.tabs.map((t) => ({ id: t.id, session: t.session, title: t.title, readOnly: t.readOnly }) as Tab);
     const r = resolveTargets(target, tabs, (id) => ws.tabs.find((t) => t.id === id)?.status, ws.activeId, ws.panes);
     // La pestaña activa, si está entre los destinos, es la sesión principal.
     r.targets.sort((a, b) => Number(b.id === ws.activeId) - Number(a.id === ws.activeId));

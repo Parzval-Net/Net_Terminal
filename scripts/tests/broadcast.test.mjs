@@ -35,6 +35,16 @@ const skippedIds = (r) => r.skipped.map((s) => `${s.tab.id}:${s.reason}`);
 const T = (mode, o = {}) => ({ mode, tabIds: [], folder: "", ...o });
 
 // ---------- resolveTargets ----------
+// Una pestaña en solo lectura nunca es destino (ni de la difusión, ni del CLI Lab, ni de un script lanzado desde la interfaz).
+{
+  const ro = [{ ...tabs[0], readOnly: true }, tabs[1], tabs[2]];
+  let r = X.resolveTargets(T("tabs", { tabIds: ["a", "b"] }), ro, status, "a", null);
+  assert.deepEqual([ids(r), skippedIds(r)], [["b"], ["a:Solo lectura"]]);
+  r = X.resolveTargets(T("current"), ro, status, "a", null);
+  assert.deepEqual([ids(r), skippedIds(r)], [[], ["a:Solo lectura"]]);
+  r = X.resolveTargets(T("folder", { folder: "Clientes" }), ro, status, "a", null);
+  assert.deepEqual(ids(r), ["b", "c"]);
+}
 {
   let r = X.resolveTargets(T("current"), tabs, status, "a", null);
   assert.deepEqual([ids(r), r.skipped.length], [["a"], 0]);

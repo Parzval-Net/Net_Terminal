@@ -1177,6 +1177,11 @@ if (new URLSearchParams(location.search).has("video")) {
   window.__ntMockAsync = () => {
     for (const id of channels.keys()) out(id, `\r\n*Oct 21 10:42:17: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/3, changed state to down\r\n${promptOf(id)}${lineBuf.get(id) ?? ""}`);
   };
+  // Pruebas: escribe texto crudo (secuencias de escape incluidas) en la salida de todas las pestañas conectadas,
+  // p. ej. "\x1b[?1049h" (pantalla alterna de vim/less) o "\x1b[?2004h" (pegado entre corchetes).
+  window.__ntMockOut = (text) => {
+    for (const id of channels.keys()) out(id, text);
+  };
   // Medición: salida masiva (show running-config largo) a todas las pestañas, en bloques como un equipo real.
   window.__ntMockFlood = (lines = 20000) => {
     const row = (i) => `interface GigabitEthernet1/0/${i % 48} description UPLINK ${i} ip address 10.${i % 255}.1.1 255.255.255.0 shutdown\r\n`;

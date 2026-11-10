@@ -7,7 +7,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Lock, X } from "lucide-react";
 import type { ITheme } from "@xterm/xterm";
 import { ConnStatus, Session } from "../types";
 import { fontStack } from "../lib/theme";
@@ -27,6 +27,10 @@ const notifyScpExit = (transfer: string, reason: string | null, closed = false) 
   window.dispatchEvent(new CustomEvent<ScpExit>(SCP_EXIT_EVENT, { detail: { transfer, reason, closed } }));
 import { ConfirmDialog } from "./ConfirmDialog";
 import { type CatalogVendor, riskLabel } from "../lib/packs";
+import { HighlightEngine, MarkEngine, type MarkInfo } from "../lib/termDecor";
+import { type PasteAnalysis, type PasteDecision, analyzePaste, pasteChunks, pasteDecision } from "../lib/pasteGuard";
+import { type TermHl, validateHl } from "../lib/termHl";
+import { HighlightDialog, LineSendBar, type LineSendOpts, type LineSendState, MarksDialog, PasteDialog, useAnnounce } from "./TermTools";
 import {
   CREDENTIALS,
   InputTracker,
@@ -79,7 +83,15 @@ export interface TermController {
   recentText: (lines: number) => string;
   /** Aviso local en la pestaña (no se envía al equipo). */
   notice: (text: string) => void;
+  /** Resaltado al vuelo, marcadores (ver lib/termDecor): diálogos y acciones de la pestaña. */
+  openHighlight: () => void;
+  openMarks: () => void;
+  markHere: () => void;
+  jumpMark: (dir: "prev" | "next") => void;
 }
+
+/** Aviso al intentar escribir en una pestaña de solo lectura. */
+export const READ_ONLY_MSG = "Pestaña en solo lectura";
 
 /** Coincidencias que cuenta la búsqueda (tope del addon: protege el rendimiento con historial grande). */
 const FIND_LIMIT = 1000;
@@ -124,6 +136,13 @@ interface Props {
   onFindState?: (id: string, open: boolean) => void;
   /** Catálogo de comandos: fuente de las sugerencias. */
   catalog?: CatalogVendor[];
+  /**
+   * Modo monitoreo: la pestaña descarta teclado, pegado y envíos (botones, Notas, catálogo, historial,
+   * CLI Lab, difusión, sugerencias). Copiar, buscar y desplazarse siguen. Solo gobierna la interfaz.
+   */
+  readOnly?: boolean;
+  /** Enciende o apaga "Marcar cada comando al enviarlo" (ajuste global; también está en el diálogo de Marcadores). */
+  onAutoMark?: (on: boolean) => void;
 }
 
 /** Lista de sugerencias (Ctrl+. por defecto, configurable). */
@@ -162,7 +181,7 @@ const NOOP = () => {};
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
-export const TerminalView = memo(function TerminalView({ id, session, active, visible = active, rect, onFocusPane, settings, theme, onStatus, onLog, logPath, onActivity, onEnableLegacy, onScreenHint, register, onFindState, catalog }: Props) {
+export const TerminalView = memo(function TerminalView({ id, session, active, visible = active, rect, onFocusPane, settings, theme, onStatus, onLog, logPath, onActivity, onEnableLegacy, onScreenHint, register, onFindState, catalog, readOnly = false, onAutoMark }: Props) {
   const screenHintRef = useRef(onScreenHint);
   screenHintRef.current = onScreenHint;
   // "Visible" decide WebGL y el aviso de actividad; "active" (foco) decide el teclado.
@@ -198,8 +217,12 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
   const compiledRef = useRef(compiled);
   compiledRef.current = compiled;
   const [findOpen, setFindOpen] = useState(false);
-  /** Bloque multilínea pegado que espera confirmación antes de llegar al equipo. */
-  const [pasteAsk, setPasteAsk] = useState<string | null>(null);
+  /** Pegado que espera confirmación antes de llegar al equipo (con su análisis: líneas, caracteres especiales, riesgo). */
+  const [pasteAsk, setPasteAsk] = useState<{ text: string; a: PasteAnalysis; d: PasteDecision } | null>(null);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const onAutoMarkRef = useRef(onAutoMark);
+  onAutoMarkRef.current = onAutoMark;
   const [query, setQuery] = useState("");
   /** Coincidencias de la búsqueda (posición actual y total); el addon solo las cuenta con decoraciones. */
   const [found, setFound] = useState<{ index: number; count: number } | null>(null);
@@ -222,6 +245,24 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
   const [suggestAsk, setSuggestAsk] = useState<{ entry: SuggestEntry; buf: string; q: string } | null>(null);
   const suggestRef = useRef<{ refresh: () => void; reset: () => void; pick: (e: SuggestEntry, buf: string, confirmed: boolean) => void } | null>(null);
   const listId = useId();
+  // Resaltado al vuelo y marcadores: los motores se crean con la terminal pero no hacen nada (ni se suscriben
+  // a la salida) hasta que el usuario agrega un resaltado o una marca.
+  const [dialog, setDialog] = useState<"hl" | "marks" | null>(null);
+  const dialogRef = useRef(dialog);
+  dialogRef.current = dialog;
+  const hlRef = useRef<HighlightEngine | null>(null);
+  const marksRef = useRef<MarkEngine | null>(null);
+  const [hlList, setHlList] = useState<(TermHl & { count: number })[]>([]);
+  const [hlCapped, setHlCapped] = useState(false);
+  const [markList, setMarkList] = useState<MarkInfo[]>([]);
+  const hlSeq = useRef(0);
+  const flashRef = useRef<HTMLDivElement>(null);
+  const [lineSend, setLineSend] = useState<LineSendState | null>(null);
+  const lineStopRef = useRef<(() => void) | null>(null);
+  const lineStartRef = useRef<((text: string, o: LineSendOpts) => void) | null>(null);
+  const announce = useAnnounce(lineSend);
+  /** Devuelve el foco a la terminal tras cerrar un diálogo: un tick después, cuando su trampa de foco ya no existe. */
+  const refocus = () => void window.setTimeout(() => termRef.current?.focus(), 0);
 
   useEffect(() => {
     const term = new Terminal({
@@ -274,6 +315,46 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       screenTimer = window.setTimeout(() => !disposed && screenHintRef.current?.(id), ms);
     };
     let disposed = false;
+    // Resaltado al vuelo y marcadores (ver lib/termDecor): sin suscripciones hasta que se usan.
+    const hlEngine = new HighlightEngine(term, () => {
+      if (disposed || dialogRef.current !== "hl") return;
+      setHlList(hlEngine.list());
+      setHlCapped(hlEngine.capped);
+    });
+    const markEngine = new MarkEngine(term, () => {
+      if (!disposed && dialogRef.current === "marks") setMarkList(markEngine.list());
+    });
+    hlRef.current = hlEngine;
+    marksRef.current = markEngine;
+    /** Aviso breve dentro de la pestaña (región role=status). El mismo aviso repetido en menos de 1,5 s no se vuelve a mostrar. */
+    let flashTimer: number | undefined;
+    let flashText = "";
+    let flashAt = 0;
+    const notify = (text: string) => {
+      const el = flashRef.current;
+      const now = performance.now();
+      if (!el || (text === flashText && now - flashAt < 1500)) return;
+      flashText = text;
+      flashAt = now;
+      el.textContent = text;
+      el.style.opacity = "1";
+      window.clearTimeout(flashTimer);
+      flashTimer = window.setTimeout(() => {
+        el.style.opacity = "0";
+        el.textContent = "";
+      }, 2600);
+    };
+    /** Envío línea a línea en curso (pegado seguro): `stop` lo detiene tras la línea actual. */
+    let lineRun: { stop: boolean } | null = null;
+    /** Última tecla del usuario: distingue lo que teclea de las respuestas que xterm genera solo (consultas del equipo, foco, ratón). */
+    let lastKeyAt = 0;
+    const refuse = () => {
+      if (performance.now() - lastKeyAt < 120) notify(READ_ONLY_MSG);
+    };
+    /** Marca automática de la línea del cursor al ejecutar un comando (opción de Ajustes de terminal; apagada por defecto). */
+    const autoMark = () => {
+      if (settingsRef.current.autoMarkCommands) markEngine.mark("auto");
+    };
     let attempt = 0;
     // Reconexión automática: se cancela con Esc o al desconectar a mano.
     let manualClose = false;
@@ -312,11 +393,11 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     // Prompt típico de equipos y shells (PROMPT); nunca se envía sobre un pedido de credenciales (CREDENTIALS).
     const cleanTail = () => tail.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/\r/g, "");
     /** Espera a que el equipo muestre su prompt (o quede en silencio sin pedir credenciales). */
-    const waitReady = async (connId: string, since: number, maxMs: number) => {
+    const waitReady = async (connId: string, since: number, maxMs: number, stopped?: () => boolean) => {
       const start = Date.now();
       while (Date.now() - start < maxMs) {
         await new Promise((r) => setTimeout(r, 150));
-        if (disposed || connIdRef.current !== connId || statusRef.current !== "connected") return false;
+        if (disposed || connIdRef.current !== connId || statusRef.current !== "connected" || stopped?.()) return false;
         if (lastDataAt <= since) continue;
         const quiet = Date.now() - lastDataAt;
         const t = cleanTail();
@@ -333,6 +414,8 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       if (!(await waitReady(connId, 0, 120_000))) return;
       for (const line of lines) {
         if (disposed || connIdRef.current !== connId || statusRef.current !== "connected") return;
+        // Solo lectura: los comandos al conectar tampoco se envían.
+        if (readOnlyRef.current) return notify(`${READ_ONLY_MSG}: no se envían los comandos al conectar`);
         const sent = Date.now();
         await invoke("write", { id: connId, data: line + newline() }).catch(() => {});
         await waitReady(connId, sent, 5000);
@@ -506,7 +589,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     const { __ntSuggestPerf: perfLog, __ntSuggestCost: perfCost } = window as unknown as { __ntSuggestPerf?: number[]; __ntSuggestCost?: number[] };
     let keyAt = 0;
     const screenEl = term.element?.querySelector<HTMLElement>(".xterm-screen") ?? null;
-    const tracking = () => suggestAllowed(settingsRef.current.commandSuggest, sessionRef.current);
+    const tracking = () => !readOnlyRef.current && suggestAllowed(settingsRef.current.commandSuggest, sessionRef.current);
     const suggestIndex = () => {
       const platform = sessionRef.current.platform;
       const cat = catalogRef.current;
@@ -836,6 +919,15 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         return;
       }
       if (statusRef.current !== "connected") return;
+      // Envío línea a línea en curso: lo tecleado no se mezcla con él (Esc lo detiene).
+      if (lineRun) {
+        if (data === "\x1b") lineRun.stop = true;
+        else notify("Envío línea a línea en curso: Esc lo detiene");
+        return;
+      }
+      // Solo lectura: se descarta todo (teclas, pegado y respuestas automáticas de xterm); solo avisa si fue una tecla.
+      if (readOnlyRef.current) return refuse();
+      if (data === "\r") autoMark();
       if (data === "\r" && screenHintRef.current) {
         // Solo al presionar Enter y solo si la línea es un comando de versión: costo cero por tecla.
         const buf = term.buffer.active;
@@ -860,6 +952,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
 
     /** Envía al equipo lo tecleado (o insertado por una sugerencia). */
     function sendInput(data: string) {
+      if (readOnlyRef.current) return;
       const s = sessionRef.current;
       if (s.local_echo) term.write(data.replace(/\r/g, "\r\n").replace(/[\x7f\b]/g, "\b \b"));
       const out = s.newline && s.newline !== "cr" ? data.replace(/\r/g, newline()) : data;
@@ -877,28 +970,101 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       if (sel) writeText(sel).catch(() => {});
     });
 
-    // Pegar varias líneas en un equipo remoto equivale a aplicar configuración: se confirma.
-    // Un "\r" suelto también es otra línea para el equipo.
-    const needsConfirm = (text: string) =>
-      settingsRef.current.confirmSend && sessionRef.current.type !== "local" && /[\r\n]\s*\S/.test(text.trimEnd());
+    // Pegado seguro. En un equipo remoto, lo que se ejecuta al pegar equivale a escribirlo: se analiza
+    // (líneas, caracteres especiales, riesgo por línea con computeRisk) y se confirma con la misma regla que
+    // Notas, catálogo y botones (ver lib/pasteGuard). Una sola línea sin Enter final no se ejecuta: pasa directo.
     // Sin los marcadores de pegado entre corchetes: un texto copiado que trae "ESC[201~"
     // cerraría el modo antes de tiempo y la shell ejecutaría el resto como si se tecleara.
     const cleanPaste = (text: string) => text.replace(/\x1b\[20[01]~/g, "");
+    const handlePaste = (text: string) => {
+      if (readOnlyRef.current) return notify(READ_ONLY_MSG);
+      if (lineRun) return notify("Envío línea a línea en curso: Esc lo detiene");
+      // Aplicaciones de pantalla completa (vim, nano, less: búfer alterno): no se interfiere. term.paste respeta
+      // el pegado entre corchetes que la aplicación haya activado.
+      if (term.buffer.active.type === "alternate") return term.paste(text);
+      const remote = sessionRef.current.type !== "local";
+      if (!remote) return term.paste(text);
+      const a = analyzePaste(text);
+      const d = pasteDecision(a, { remote, confirmSend: settingsRef.current.confirmSend });
+      if (d.ask) setPasteAsk({ text, a, d });
+      else term.paste(text);
+    };
     const paste = async () => {
       const text = cleanPaste(await readText().catch(() => ""));
       if (!text) return;
-      if (needsConfirm(text)) setPasteAsk(text);
-      else term.paste(text);
+      handlePaste(text);
     };
     // Cmd+V en macOS llega por el menú nativo como evento "paste", sin pasar por paste().
     const onNativePaste = (e: ClipboardEvent) => {
+      if (readOnlyRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        return notify(READ_ONLY_MSG);
+      }
       const text = cleanPaste(e.clipboardData?.getData("text/plain") ?? "");
       if (!text) return;
       e.preventDefault();
       e.stopPropagation();
-      if (needsConfirm(text)) setPasteAsk(text);
-      else term.paste(text);
+      handlePaste(text);
     };
+    /**
+     * Envío línea a línea: escribe una línea, espera la pausa (y opcionalmente el prompt, con la misma espera que los
+     * comandos al conectar) y sigue. Para consolas lentas. Esc o "Detener" lo cortan tras la línea en curso.
+     */
+    let progressAt = 0;
+    const sendLines = async (text: string, o: LineSendOpts) => {
+      if (lineRun || statusRef.current !== "connected" || readOnlyRef.current) return;
+      const chunks = pasteChunks(text, "\r");
+      if (!chunks.length) return;
+      const run = { stop: false };
+      lineRun = run;
+      lineStopRef.current = () => {
+        run.stop = true;
+      };
+      const connId = connIdRef.current;
+      const total = chunks.length;
+      let done = 0;
+      let state: LineSendState["state"] = "done";
+      let reason: string | undefined;
+      setLineSend({ done: 0, total, state: "run" });
+      for (const chunk of chunks) {
+        if (run.stop) {
+          state = "stopped";
+          break;
+        }
+        if (disposed || connIdRef.current !== connId || statusRef.current !== "connected") {
+          state = "stopped";
+          reason = "se perdió la conexión";
+          break;
+        }
+        if (readOnlyRef.current) {
+          state = "stopped";
+          reason = "la pestaña pasó a solo lectura";
+          break;
+        }
+        const ends = chunk.endsWith("\r");
+        if (ends) autoMark();
+        const sent = Date.now();
+        if (tracking()) tracker.input(chunk);
+        sendInput(chunk);
+        done++;
+        const now = performance.now();
+        if (now - progressAt > 60) {
+          progressAt = now;
+          setLineSend({ done, total, state: "run" });
+        }
+        if (!ends) continue;
+        if (o.waitPrompt) await waitReady(connId, sent, 8000, () => run.stop);
+        if (o.delayMs > 0) await new Promise((r) => setTimeout(r, o.delayMs));
+      }
+      lineRun = null;
+      lineStopRef.current = null;
+      if (!disposed) {
+        setLineSend({ done, total, state, reason });
+        window.setTimeout(() => setLineSend((cur) => (cur && cur.state !== "run" && cur.done === done ? null : cur)), 4000);
+      }
+    };
+    lineStartRef.current = (text, o) => void sendLines(text, o);
     hostRef.current!.addEventListener("paste", onNativePaste, true);
 
     // Texto de la línea del cursor (para reconocer un prompt de Huawei sin plataforma detectada).
@@ -911,6 +1077,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       if (e.type === "keydown") swallowPress = false;
       else if (e.type === "keypress" && swallowPress) return false;
       if (e.type !== "keydown") return true;
+      lastKeyAt = performance.now();
       // Retroceso según la sesión (DEL o BS): xterm lo envía igual y onData lo traduce.
       backspaceKey =
         e.key === "Backspace"
@@ -973,19 +1140,28 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       getSelection: () => term.getSelection(),
       isConnected: () => statusRef.current === "connected",
       send: async (text, lineDelayMs) => {
+        // Solo lectura (o un envío línea a línea en curso): nada llega al equipo. App avisa antes; esto es la red de seguridad.
+        if (readOnlyRef.current) {
+          notify(READ_ONLY_MSG);
+          throw new Error(READ_ONLY_MSG);
+        }
+        if (lineRun) throw new Error("Hay un envío línea a línea en curso en esta pestaña");
         const data = text.replace(/\r?\n/g, newline());
         if (lineDelayMs <= 0) {
+          autoMark();
           await invoke("write", { id: connIdRef.current, data });
           return;
         }
         const lines = data.split(/(?<=\r\n|\r(?!\n)|(?<!\r)\n)/);
         for (const line of lines) {
-          if (disposed || statusRef.current !== "connected") break;
+          if (disposed || statusRef.current !== "connected" || readOnlyRef.current) break;
+          autoMark();
           await invoke("write", { id: connIdRef.current, data: line });
           await new Promise((r) => setTimeout(r, lineDelayMs));
         }
       },
       type: (text) => {
+        if (readOnlyRef.current) return notify(READ_ONLY_MSG);
         if (statusRef.current === "connected") invoke("write", { id: connIdRef.current, data: text }).catch(() => {});
         term.focus();
       },
@@ -993,6 +1169,43 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       notice: (text) => term.write(`\r\n${dim(`── ${text} ──`)}\r\n`),
       clearScrollback: () => term.clear(),
       reset: () => term.reset(),
+      openHighlight: () => {
+        setHlList(hlEngine.list());
+        setHlCapped(hlEngine.capped);
+        setDialog("hl");
+      },
+      openMarks: () => {
+        setMarkList(markEngine.list());
+        setDialog("marks");
+      },
+      markHere: () => {
+        // Con texto seleccionado la marca va en su primera línea; si no, en la línea del cursor.
+        const sel = term.hasSelection() ? term.getSelectionPosition() : undefined;
+        const r = markEngine.mark("manual", sel?.start.y);
+        notify(
+          r === "add"
+            ? "Línea marcada"
+            : r === "remove"
+              ? "Marca quitada"
+              : r === "promote"
+                ? "Marca fijada"
+                : r === "alt"
+                  ? "Las pantallas completas (vim, less) no admiten marcadores"
+                  : "No se pudo marcar esta línea",
+        );
+        term.focus();
+      },
+      jumpMark: (dir) => {
+        const r = markEngine.jump(dir);
+        notify(
+          r
+            ? `Marcador ${r.index} de ${r.total}: ${r.info.text}`
+            : markEngine.count
+              ? `No hay marcadores ${dir === "prev" ? "anteriores" : "siguientes"}`
+              : "No hay marcadores: usa «Marcar aquí»",
+        );
+        term.focus();
+      },
       recentText: (n) => {
         // Hasta la fila del cursor: las filas en blanco del viewport bajo él no cuentan (ver recentRows).
         const buf = term.buffer.active;
@@ -1023,6 +1236,14 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       releaseChannels();
       cancelRetry();
       hl.dispose();
+      if (lineRun) lineRun.stop = true;
+      window.clearTimeout(flashTimer);
+      hlEngine.dispose();
+      markEngine.dispose();
+      hlRef.current = null;
+      marksRef.current = null;
+      lineStartRef.current = null;
+      lineStopRef.current = null;
       register(id, null);
       observer.disconnect();
       cancelAnimationFrame(frame);
@@ -1096,12 +1317,20 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
   useEffect(() => {
     if (active) termRef.current?.focus();
   }, [active]);
+  // Un diálogo de la pestaña no sobrevive a que deje de verse (cambio de pestaña con el teclado): su trampa de foco
+  // quedaría activa sin que se vea. Un pegado pendiente se cancela: no se escribe nada.
+  useEffect(() => {
+    if (!visible) {
+      setDialog(null);
+      setPasteAsk(null);
+    }
+  }, [visible]);
 
   // Sugerencias: al activarlas se parte sin seguimiento (hasta el próximo prompt); la
   // sugerencia se recalcula al cambiar foco, visibilidad, plataforma, catálogo, tema, fuente o sus ajustes.
   useEffect(() => {
     suggestRef.current?.reset();
-  }, [settings.commandSuggest]);
+  }, [settings.commandSuggest, readOnly]);
   useEffect(() => {
     suggestRef.current?.refresh();
   }, [active, visible, settings.commandSuggest, session.platform, catalog, theme, settings.fontFamily, settings.fontSize, settings.lineHeight, settings.suggestColor, settings.suggestStyle, settings.suggestTip, settings.suggestTabAccept]);
@@ -1237,15 +1466,103 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         </div>
       )}
       {pasteAsk !== null && (
-        <PasteConfirm
-          text={pasteAsk}
+        <PasteDialog
           target={session.name}
-          onDone={(ok) => {
-            if (ok) termRef.current?.paste(pasteAsk);
+          analysis={pasteAsk.a}
+          decision={pasteAsk.d}
+          defaultDelay={settings.sendLineDelay || 100}
+          onPaste={() => {
+            termRef.current?.paste(pasteAsk.text);
             setPasteAsk(null);
-            termRef.current?.focus();
+            refocus();
+          }}
+          onLineByLine={(o) => {
+            lineStartRef.current?.(pasteAsk.text, o);
+            setPasteAsk(null);
+            refocus();
+          }}
+          onCancel={() => {
+            setPasteAsk(null);
+            refocus();
           }}
         />
+      )}
+      {dialog === "hl" && (
+        <HighlightDialog
+          tabName={session.name}
+          items={hlList}
+          capped={hlCapped}
+          onAdd={(spec) => {
+            const eng = hlRef.current;
+            if (!eng) return "La terminal no está lista";
+            const err = validateHl(spec, eng.list());
+            if (err) return err;
+            eng.add({ id: ++hlSeq.current, ...spec });
+            setHlList(eng.list());
+            return null;
+          }}
+          onRemove={(rid) => {
+            hlRef.current?.remove(rid);
+            setHlList(hlRef.current?.list() ?? []);
+            setHlCapped(false);
+          }}
+          onClear={() => {
+            hlRef.current?.clear();
+            setHlList([]);
+            setHlCapped(false);
+          }}
+          onClose={() => {
+            setDialog(null);
+            refocus();
+          }}
+        />
+      )}
+      {dialog === "marks" && (
+        <MarksDialog
+          tabName={session.name}
+          items={markList}
+          autoMark={!!settings.autoMarkCommands}
+          onAutoMark={(v) => onAutoMarkRef.current?.(v)}
+          onGoto={(line) => {
+            marksRef.current?.goto(line);
+            setDialog(null);
+            refocus();
+          }}
+          onRemove={(mid) => {
+            marksRef.current?.remove(mid);
+            setMarkList(marksRef.current?.list() ?? []);
+          }}
+          onClear={() => {
+            marksRef.current?.clear();
+            setMarkList([]);
+          }}
+          onClose={() => {
+            setDialog(null);
+            refocus();
+          }}
+        />
+      )}
+      {lineSend && <LineSendBar s={lineSend} onStop={() => lineStopRef.current?.()} />}
+      <p role="status" aria-live="polite" className="sr-only">
+        {announce}
+      </p>
+      {/* Avisos breves de la pestaña (marcadores, solo lectura): se actualizan por DOM, sin render por tecla. */}
+      <div
+        ref={flashRef}
+        role="status"
+        aria-live="polite"
+        className="absolute top-3 left-1/2 -translate-x-1/2 z-[14] max-w-[min(520px,90%)] truncate pointer-events-none rounded-md border border-line bg-panel px-3 py-1.5 text-[12px] shadow-pop transition-opacity"
+        style={{ opacity: 0 }}
+      />
+      {readOnly && (
+        <div
+          aria-hidden
+          className="absolute bottom-1.5 right-5 z-[4] pointer-events-none flex items-center gap-1 rounded-md border border-line bg-panel/90 px-1.5 py-0.5 text-[11px] text-muted"
+          title="Solo lectura: la pestaña no envía nada al equipo"
+        >
+          <Lock size={11} />
+          Solo lectura
+        </div>
       )}
       {findOpen && (
         <div
@@ -1345,37 +1662,5 @@ function IconBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
       {...props}
       className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
     />
-  );
-}
-
-function PasteConfirm({ text, target, onDone }: { text: string; target: string; onDone: (ok: boolean) => void }) {
-  const lines = text.replace(/\r\n/g, "\n").trimEnd().split("\n");
-  return (
-    <div
-      role="alertdialog"
-      aria-modal="true"
-      aria-labelledby="paste-title"
-      className="absolute left-1/2 bottom-6 -translate-x-1/2 w-[min(560px,92%)] bg-panel border border-line rounded-xl shadow-pop p-4 z-20"
-      onKeyDown={(e) => {
-        if (e.key === "Escape") onDone(false);
-      }}
-    >
-      <h3 id="paste-title" className="text-[13px] font-semibold mb-1">
-        ¿Pegar {lines.length} líneas en {target}?
-      </h3>
-      <p className="text-[12px] text-muted mb-2">Cada línea se ejecuta en el equipo como si la escribieras.</p>
-      <pre className="max-h-40 overflow-auto rounded-md bg-hover p-2 font-mono text-[12px] whitespace-pre">
-        {lines.slice(0, 12).join("\n")}
-        {lines.length > 12 ? `\n… y ${lines.length - 12} líneas más` : ""}
-      </pre>
-      <div className="flex justify-end gap-2 mt-3">
-        <button onClick={() => onDone(false)} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover">
-          Cancelar
-        </button>
-        <button autoFocus onClick={() => onDone(true)} className="px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90">
-          Pegar
-        </button>
-      </div>
-    </div>
   );
 }

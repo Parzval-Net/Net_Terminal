@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Columns2, LayoutGrid, Maximize2, Minimize2, Plus, Rows2, X } from "lucide-react";
+import { Columns2, LayoutGrid, Lock, Maximize2, Minimize2, Plus, Rows2, X } from "lucide-react";
 import { newTabMenuItems } from "./tabMenu";
 import { SplitLayout, layoutLabel } from "../lib/split";
 import type { TabLayout } from "../lib/settings";
@@ -33,6 +33,12 @@ export interface TabBarProps {
   onHistory?: (id: string) => void;
   /** Guarda una pestaña abierta con conexión rápida como sesión. */
   onSaveAs?: (id: string) => void;
+  /** Resaltado al vuelo, marcadores y solo lectura de una pestaña (menú contextual). */
+  onHighlight?: (id: string) => void;
+  onMarkHere?: (id: string) => void;
+  onJumpMark?: (id: string, dir: "prev" | "next") => void;
+  onMarks?: (id: string) => void;
+  onToggleReadOnly?: (id: string) => void;
   /** Cerrar varias pestañas desde el menú contextual (con un solo aviso). */
   onCloseMany?: (scope: CloseScope, id: string) => void;
   onRename: (id: string, title: string | undefined) => void;
@@ -137,10 +143,19 @@ export function TabEnd({ status, active, tabIndex, title, onClose }: { status: C
 }
 
 /** Nombre accesible de una pestaña: título, estado de conexión y marcas pendientes (el punto y los símbolos no se leen). */
-export const tabLabel = (title: string, status: ConnStatus, marker: "alert" | "activity" | null) =>
+export const tabLabel = (title: string, status: ConnStatus, marker: "alert" | "activity" | null, readOnly = false) =>
   `${title}, ${status === "connected" ? "conectada" : status === "connecting" ? "conectando" : "desconectada"}${
-    marker === "alert" ? ", alerta por palabra clave" : marker === "activity" ? ", salida nueva" : ""
-  }`;
+    readOnly ? ", solo lectura" : ""
+  }${marker === "alert" ? ", alerta por palabra clave" : marker === "activity" ? ", salida nueva" : ""}`;
+
+/** Candado de una pestaña en solo lectura: forma además de color; el estado también va en el nombre accesible (tabLabel). */
+export function ReadOnlyMark({ className = "", size = 11 }: { className?: string; size?: number }) {
+  return (
+    <span title="Solo lectura" className={`shrink-0 grid place-items-center ${className}`}>
+      <Lock aria-hidden size={size} />
+    </span>
+  );
+}
 
 export const TabBar = memo(function TabBar(props: TabBarProps) {
   const {
@@ -227,7 +242,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
               data-tab={t.id}
               role="tab"
               aria-selected={active}
-              aria-label={tabLabel(tabTitle(t), status, marker)}
+              aria-label={tabLabel(tabTitle(t), status, marker, t.readOnly)}
               tabIndex={focusId === t.id ? 0 : -1}
               onMouseDown={(e) => {
                 if (e.button === 1) {
@@ -287,6 +302,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
               ) : (
                 <span className={`truncate flex-1 ${t.title ? "italic" : ""}`}>{tabTitle(t)}</span>
               )}
+              {t.readOnly && <ReadOnlyMark />}
               {alerted?.has(t.id) && !active ? (
                 <span aria-hidden className="text-[11px] font-semibold text-danger shrink-0" title="Alerta por palabra clave">
                   ▲

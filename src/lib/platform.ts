@@ -22,6 +22,17 @@ export const closeAllLabel = isMac ? "⌘⇧W" : "Ctrl+Shift+Alt+W";
  *  - Historial de comandos: Y (como el historial de Chrome/Safari, ⌘Y). Ctrl+Shift+Y está libre.
  */
 export const focusLabel = isMac ? "⌘⇧M" : "Ctrl+Shift+M";
+/**
+ * Resaltado al vuelo y marcadores de la terminal (también ⌘⇧ / Ctrl+Shift, misma tecla en todos los sistemas):
+ *  - Resaltar: R. Ctrl+Shift+R solo recarga páginas en navegadores y la app ya cancela esas teclas.
+ *  - Marcar aquí: S (de "señalar"). Libre en la app y en los sistemas (la app no tiene "Guardar como").
+ *  - Marcador anterior / siguiente: flechas ↑ ↓ (como saltar entre marcas en iTerm2).
+ * No se usan A, Q, H (Finder), U (entrada Unicode de GTK) ni V/C (pegar y copiar en la terminal).
+ */
+export const highlightLabel = isMac ? "⌘⇧R" : "Ctrl+Shift+R";
+export const markHereLabel = isMac ? "⌘⇧S" : "Ctrl+Shift+S";
+export const prevMarkLabel = isMac ? "⌘⇧↑" : "Ctrl+Shift+↑";
+export const nextMarkLabel = isMac ? "⌘⇧↓" : "Ctrl+Shift+↓";
 export const historyLabel = isMac ? "⌘Y" : "Ctrl+Shift+Y";
 
 export type AppAction =
@@ -36,6 +47,10 @@ export type AppAction =
   | "closeAll"
   | "focusMode"
   | "history"
+  | "highlight"
+  | "markHere"
+  | "prevMark"
+  | "nextMark"
   | "newSession"
   | "quickConnect"
   | "cliLab"
@@ -77,6 +92,11 @@ export function shortcutFor(e: KeyboardEvent): AppAction | null {
   // no distingue el Shift (⌘M minimizaría la ventana, por eso aquí se exige Shift).
   const sh = isMac ? e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey : e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
   if (sh && (key === "m" || e.code === "KeyM")) return "focusMode";
+  // Resaltado y marcadores de la terminal: Shift explícito en todos los sistemas (⌘R y ⌘S sueltos no se toman).
+  if (sh && (key === "r" || e.code === "KeyR")) return "highlight";
+  if (sh && (key === "s" || e.code === "KeyS")) return "markHere";
+  if (sh && key === "arrowup") return "prevMark";
+  if (sh && key === "arrowdown") return "nextMark";
 
   if (!isMod(e)) return null;
   switch (key) {
