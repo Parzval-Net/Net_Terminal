@@ -369,14 +369,14 @@ function DisableDialog({ onClose, onDone }: { onClose: () => void; onDone: (r: D
           leerlos. Antes de tocar nada se verifica que todos los archivos cifrados estén íntegros. Las contraseñas siguen en la bóveda cifrada.
         </p>
         <Field label="Contraseña maestra" value={master} onChange={setMaster} autoComplete="current-password" />
-        {loss.length > 0 && !accepted && <LossConfirm loss={loss} busy={running} onAccept={() => setAccepted(loss)} />}
-        {accepted && <p className="text-[12px] text-warn">Pérdida aceptada: vuelve a escribir la contraseña y confirma.</p>}
-        {running && <ProgressBar p={p} label="Descifrando" />}
-        {error && (
+        {error && !accepted && (
           <p role="alert" className="text-[12px] text-danger">
             {error}
           </p>
         )}
+        {loss.length > 0 && !accepted && <LossConfirm loss={loss} busy={running} onAccept={() => setAccepted(loss)} />}
+        {accepted && <p className="text-[12px] text-warn">Pérdida aceptada: vuelve a escribir la contraseña y confirma.</p>}
+        {running && <ProgressBar p={p} label="Descifrando" />}
         <div className="flex justify-end gap-2">
           <button type="button" data-autofocus onClick={close} disabled={running} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover disabled:opacity-50">
             Cancelar
