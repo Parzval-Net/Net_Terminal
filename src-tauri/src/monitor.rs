@@ -224,6 +224,117 @@ mod tests {
         assert!(!parse_ping(false, timeout, 1000.0).0);
     }
 
+    fn up(text: &str) -> Option<f64> {
+        let r = parse_ping(true, text, 777.0);
+        assert!(r.0 && r.2.is_none(), "{text:?} -> {r:?}");
+        r.1
+    }
+
+    fn down(success: bool, text: &str) -> String {
+        let r = parse_ping(success, text, 777.0);
+        assert!(!r.0 && r.1.is_none(), "{text:?} -> {r:?}");
+        r.2.unwrap()
+    }
+
+    #[test]
+    fn ping_windows_english_and_spanish() {
+        assert_eq!(up("Reply from 192.0.2.1: bytes=32 time=14ms TTL=117"), Some(14.0));
+        assert_eq!(up("Reply from 192.0.2.1: bytes=32 time<1ms TTL=64"), Some(1.0));
+        assert_eq!(up("Respuesta desde 192.0.2.1: bytes=32 tiempo=3ms TTL=64"), Some(3.0));
+        // Ping completo de Windows con estadísticas: toma el tiempo de la respuesta, no del resumen.
+        let full = "Pinging 192.0.2.1 with 32 bytes of data:\r\nReply from 192.0.2.1: bytes=32 time=21ms TTL=58\r\n\r\nPing statistics for 192.0.2.1:\r\n    Packets: Sent = 1, Received = 1, Lost = 0 (0% loss),\r\nApproximate round trip times in milli-seconds:\r\n    Minimum = 21ms, Maximum = 21ms, Average = 21ms\r\n";
+        assert_eq!(up(full), Some(21.0));
+        // Windows devuelve código 0 aunque el destino sea inaccesible o el TTL expire en tránsito.
+        assert!(down(true, "Reply from 192.0.2.254: Destination host unreachable.").contains("unreachable"));
+        assert!(down(true, "Reply from 192.0.2.254: Destination net unreachable.").contains("unreachable"));
+        down(true, "Reply from 198.51.100.1: TTL expired in transit.");
+        assert!(down(true, "Respuesta desde 192.0.2.254: Host de destino inaccesible.").contains("inaccesible"));
+    }
+
+    #[test]
+    fn ping_windows_timeouts_and_resolution_errors() {
+        assert!(down(false, "Pinging 192.0.2.9 with 32 bytes of data:\r\nRequest timed out.\r\n").contains("timed out"));
+        assert!(down(false, "Haciendo ping a 192.0.2.9 con 32 bytes de datos:\r\nTiempo de espera agotado para esta solicitud.\r\n").contains("Tiempo de espera"));
+        assert!(down(false, "Ping request could not find host nohost.example. Please check the name and try again.").contains("could not find"));
+        assert!(down(false, "Error en la transmisión. Error de hardware o de GENERAL FAILURE.\r\nNo se pudo encontrar el host").contains("No se pudo"));
+        // Idiomas sin palabra clave: motivo genérico, y sigue contando como caído.
+        assert_eq!(down(false, "Zeitüberschreitung der Anforderung."), "Sin respuesta");
+        // Un "TTL=" con código de salida distinto de 0 no cuenta como respuesta.
+        down(false, "Reply from 192.0.2.1: bytes=32 time=1ms TTL=64");
+    }
+
+    #[test]
+    fn ping_other_locales_rtt() {
+        assert_eq!(up("Antwort von 192.0.2.1: Bytes=32 Zeit=15ms TTL=64"), Some(15.0));
+        assert_eq!(up("Antwort von 192.0.2.1: Bytes=32 Zeit<1ms TTL=64"), Some(1.0));
+        assert_eq!(up("Réponse de 192.0.2.1 : octets=32 temps=9 ms TTL=64"), Some(9.0));
+        assert_eq!(up("Resposta de 192.0.2.1: bytes=32 tempo=8ms TTL=64"), Some(8.0));
+        // Decimal con coma.
+        assert_eq!(up("64 bytes from 192.0.2.1: icmp_seq=1 ttl=64 time=0,321 ms"), Some(0.321));
+    }
+
+    #[test]
+    fn ping_macos_and_linux() {
+        let mac = "PING 192.0.2.1 (192.0.2.1): 56 data bytes\n64 bytes from 192.0.2.1: icmp_seq=0 ttl=64 time=1.234 ms\n\n--- 192.0.2.1 ping statistics ---\n1 packets transmitted, 1 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 1.234/1.234/1.234/0.000 ms\n";
+        assert_eq!(up(mac), Some(1.234));
+        let linux = "PING 192.0.2.1 (192.0.2.1) 56(84) bytes of data.\n64 bytes from 192.0.2.1: icmp_seq=1 ttl=63 time=0.456 ms\n\n--- 192.0.2.1 ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss, time 0ms\nrtt min/avg/max/mdev = 0.456/0.456/0.456/0.000 ms\n";
+        assert_eq!(up(linux), Some(0.456));
+        // IPv6: macOS y Linux usan hlim/ttl; el RTT sigue en "time=".
+        assert_eq!(up("16 bytes from 2001:db8::1, icmp_seq=0 hlim=64 time=2.5 ms"), Some(2.5));
+        assert_eq!(up("64 bytes from 2001:db8::1: icmp_seq=1 ttl=64 time=3.25 ms"), Some(3.25));
+        // Sin "time=" legible pero con respuesta: usa el tiempo de pared medido.
+        assert_eq!(up("64 bytes from 192.0.2.1: icmp_seq=1 ttl=64"), Some(777.0));
+    }
+
+    #[test]
+    fn ping_macos_and_linux_loss_and_errors() {
+        let loss = "PING 192.0.2.9 (192.0.2.9): 56 data bytes\nRequest timeout for icmp_seq 0\n\n--- 192.0.2.9 ping statistics ---\n1 packets transmitted, 0 packets received, 100.0% packet loss\n";
+        assert!(down(false, loss).contains("timeout"));
+        let linux_loss = "PING 192.0.2.9 (192.0.2.9) 56(84) bytes of data.\n\n--- 192.0.2.9 ping statistics ---\n1 packets transmitted, 0 received, 100% packet loss, time 0ms\n";
+        assert!(down(false, linux_loss).contains("100% packet loss"));
+        assert!(down(false, "From 192.0.2.1 icmp_seq=1 Destination Host Unreachable").contains("Unreachable"));
+        assert!(down(false, "ping: cannot resolve nohost.example: Unknown host").to_lowercase().contains("unknown host"));
+        assert!(down(false, "ping: unknown host nohost.example").contains("unknown host"));
+        assert!(down(false, "Paquetes: enviados = 1, recibidos = 0, perdidos = 1 (100% perdidos),").contains("100% perdidos"));
+        assert_eq!(down(false, ""), "Sin respuesta");
+        assert_eq!(down(true, ""), "Sin respuesta");
+        // Con éxito pero sin TTL ni hlim no hay respuesta real.
+        assert_eq!(down(true, "1 packets transmitted, 1 received"), "Sin respuesta");
+    }
+
+    /// Salida de Windows en español para tiempos menores a 1 ms. A CONFIRMAR con un equipo real:
+    /// según Windows en español el texto es "tiempo<1m" (sin "s"); el regex exige "ms" y el
+    /// RTT sale como el tiempo de pared del proceso (decenas de ms) en vez de 1 ms.
+    #[test]
+    #[ignore = "a confirmar: Windows es-ES imprime 'tiempo<1m'; hoy el RTT cae al tiempo de pared"]
+    fn ping_windows_spanish_sub_millisecond_without_s() {
+        assert_eq!(parse_ping(true, "Respuesta desde 192.0.2.1: bytes=32 tiempo<1m TTL=64", 777.0).1, Some(1.0));
+    }
+
+    #[test]
+    fn validate_host_boundaries() {
+        assert!(validate_host(&"a".repeat(253)).is_ok());
+        assert!(validate_host(&"a".repeat(254)).is_err());
+        assert!(validate_host("  192.0.2.1  ").is_ok(), "se recorta");
+        assert!(validate_host("").is_err() && validate_host("   ").is_err());
+        for bad in ["a b", "a\tb", "a\nb", "a;b", "a|b", "a&b", "a$b", "a`b", "a'b", "a/b", "ñandú.example", "192.0.2.1\0", "--help", "-1", "$(id)"] {
+            assert!(validate_host(bad).is_err(), "{bad:?}");
+        }
+        for ok in ["192.0.2.1", "r1_core-01.example.net", "fe80::1%eth0", "2001:db8::1", "[2001:db8::1]", "LOCALHOST"] {
+            assert!(validate_host(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn resolve_accepts_ip_literals_without_dns() {
+        let a = resolve("[2001:db8::1]", 22).unwrap();
+        assert_eq!(a[0].to_string(), "[2001:db8::1]:22");
+        assert_eq!(resolve("192.0.2.1", 8080).unwrap()[0].to_string(), "192.0.2.1:8080");
+        // Sin direcciones: falla sin conectar y con el motivo.
+        let r = tcp_probe_addrs(&[], Duration::from_millis(100));
+        assert_eq!((r.0, r.1, r.2.as_deref()), (false, None, Some("sin dirección")));
+    }
+
     #[test]
     fn rejects_option_injection_in_host() {
         assert!(validate_host("-f").is_err());

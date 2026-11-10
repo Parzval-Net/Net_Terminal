@@ -110,6 +110,20 @@ impl McpServer {
     }
 
     fn ask(&self, app: &AppHandle, tool: &str, target: &str, detail: &str) -> bool {
+        self.ask_with(tool, target, detail, APPROVAL_TIMEOUT, |event, payload| {
+            let _ = app.emit(event, payload);
+        })
+    }
+
+    /// Núcleo de `ask` con la emisión de eventos y el plazo inyectables (para pruebas).
+    fn ask_with(
+        &self,
+        tool: &str,
+        target: &str,
+        detail: &str,
+        timeout: Duration,
+        emit: impl Fn(&str, Value),
+    ) -> bool {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = channel();
         {
@@ -119,14 +133,20 @@ impl McpServer {
             }
             pending.insert(id.clone(), tx);
         }
-        let _ = app.emit(
+        emit(
             "mcp-approval",
-            ApprovalRequest { id: id.clone(), tool: tool.into(), target: target.into(), detail: detail.into() },
+            serde_json::to_value(ApprovalRequest {
+                id: id.clone(),
+                tool: tool.into(),
+                target: target.into(),
+                detail: detail.into(),
+            })
+            .unwrap_or_default(),
         );
-        let ok = rx.recv_timeout(APPROVAL_TIMEOUT).unwrap_or(false);
+        let ok = rx.recv_timeout(timeout).unwrap_or(false);
         self.approvals.lock().unwrap().remove(&id);
         // Cierra el diálogo también cuando venció: si no, aprobarlo después no tendría efecto.
-        let _ = app.emit("mcp-approval-closed", id);
+        emit("mcp-approval-closed", Value::String(id));
         ok
     }
 }
@@ -148,8 +168,17 @@ fn origin_allowed(origin: Option<&str>) -> bool {
     match origin {
         None => true,
         Some(o) => {
-            let host = o.split("://").nth(1).unwrap_or("").split([':', '/']).next().unwrap_or("");
-            matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+            let rest = o.split("://").nth(1).unwrap_or("");
+            // IPv6 entre corchetes: el host termina en "]" (sus ":" no separan el puerto). Solo
+            // se acepta el loopback exacto, sin nada más que un puerto numérico detrás.
+            if let Some(v6) = rest.strip_prefix('[') {
+                let Some((ip, tail)) = v6.split_once(']') else { return false };
+                let tail = tail.split(['/', '?', '#']).next().unwrap_or("");
+                let port_ok = tail.is_empty() || tail.strip_prefix(':').is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+                return ip == "::1" && port_ok;
+            }
+            let host = rest.split([':', '/']).next().unwrap_or("");
+            matches!(host, "127.0.0.1" | "localhost")
         }
     }
 }
@@ -167,10 +196,13 @@ fn reply(req: tiny_http::Request, status: u16, body: Option<Value>) {
     let _ = req.respond(resp);
 }
 
-fn serve(app: AppHandle, mut req: tiny_http::Request) {
-    let mcp = &app.state::<AppState>().mcp;
-    let cfg = mcp.config.lock().unwrap().clone();
+fn serve(app: AppHandle, req: tiny_http::Request) {
+    let cfg = app.state::<AppState>().mcp.config.lock().unwrap().clone();
+    serve_with(req, &cfg, |m| handle(&app, &cfg, m));
+}
 
+/// Validación HTTP y despacho JSON-RPC; `dispatch` atiende cada mensaje (inyectable en pruebas).
+fn serve_with(mut req: tiny_http::Request, cfg: &McpConfig, dispatch: impl Fn(&Value) -> Option<Value>) {
     if req.url().split('?').next() != Some("/mcp") {
         return reply(req, 404, None);
     }
@@ -198,8 +230,8 @@ fn serve(app: AppHandle, mut req: tiny_http::Request) {
     };
 
     let responses: Vec<Value> = match &msg {
-        Value::Array(batch) => batch.iter().filter_map(|m| handle(&app, &cfg, m)).collect(),
-        single => handle(&app, &cfg, single).into_iter().collect(),
+        Value::Array(batch) => batch.iter().filter_map(&dispatch).collect(),
+        single => dispatch(single).into_iter().collect(),
     };
     match (msg.is_array(), responses.len()) {
         (_, 0) => reply(req, 202, None),
@@ -234,6 +266,10 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 
 /// Procesa un mensaje JSON-RPC. Las notificaciones (sin id) no tienen respuesta.
 fn handle(app: &AppHandle, cfg: &McpConfig, msg: &Value) -> Option<Value> {
+    handle_with(cfg, msg, |name, args| call_tool(app, cfg, name, args))
+}
+
+fn handle_with(cfg: &McpConfig, msg: &Value, call: impl Fn(&str, &Value) -> Result<String, String>) -> Option<Value> {
     let id = msg.get("id")?.clone();
     let params = msg.get("params").cloned().unwrap_or(json!({}));
     let result = match msg["method"].as_str().unwrap_or("") {
@@ -257,7 +293,7 @@ fn handle(app: &AppHandle, cfg: &McpConfig, msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            let (text, is_error) = match call_tool(app, cfg, name, &args) {
+            let (text, is_error) = match call(name, &args) {
                 Ok(t) => (t, false),
                 Err(e) => (e, true),
             };
@@ -319,6 +355,17 @@ fn tools(cfg: &McpConfig) -> Value {
     Value::Array(list)
 }
 
+/// En solo lectura las herramientas que ejecutan o abren cosas quedan deshabilitadas.
+fn write_allowed(cfg: &McpConfig, tool: &str) -> bool {
+    !cfg.read_only || !matches!(tool, "send_command" | "open_session")
+}
+
+/// Enviar un comando exige aprobación del usuario si la política lo pide y siempre en
+/// terminales locales (un comando ahí corre en la máquina del usuario).
+fn needs_approval(cfg: &McpConfig, local_session: bool) -> bool {
+    cfg.require_approval || local_session
+}
+
 fn call_tool(app: &AppHandle, cfg: &McpConfig, name: &str, args: &Value) -> Result<String, String> {
     let state = app.state::<AppState>();
     let activity = |target: &str, detail: &str, ok: bool| {
@@ -355,7 +402,7 @@ fn call_tool(app: &AppHandle, cfg: &McpConfig, name: &str, args: &Value) -> Resu
             activity(&info.name, "read_output", true);
             state.conns.history(id, max).ok_or_else(|| "Conexión no encontrada".into())
         }
-        "send_command" if !cfg.read_only => {
+        "send_command" if write_allowed(cfg, name) => {
             let id = args["connection_id"].as_str().unwrap_or("");
             let command = visible_command(args["command"].as_str().unwrap_or(""))?;
             let command = command.as_str();
@@ -365,7 +412,7 @@ fn call_tool(app: &AppHandle, cfg: &McpConfig, name: &str, args: &Value) -> Resu
                 return Err(crate::scripts::BUSY.into());
             }
             let local = session.session_type == crate::models::SessionType::Local;
-            if (cfg.require_approval || local) && !state.mcp.ask(app, name, &info.name, command) {
+            if needs_approval(cfg, local) && !state.mcp.ask(app, name, &info.name, command) {
                 activity(&info.name, command, false);
                 return Err("El usuario rechazó la ejecución".into());
             }
@@ -377,7 +424,7 @@ fn call_tool(app: &AppHandle, cfg: &McpConfig, name: &str, args: &Value) -> Resu
             activity(&info.name, command, true);
             Ok(if out.is_empty() { "(sin salida en el tiempo de espera)".into() } else { out })
         }
-        "open_session" if !cfg.read_only => {
+        "open_session" if write_allowed(cfg, name) => {
             let wanted = args["name"].as_str().unwrap_or("");
             let session = state
                 .store
@@ -425,6 +472,397 @@ mod tests {
             assert!(visible_command(bad).is_err(), "{bad:?}");
         }
         assert!(visible_command("interface Gi0/1\n\tdescription uplink").is_ok());
+    }
+
+    const TOKEN: &str = "tok-0123456789abcdef01234567";
+
+    fn cfg() -> McpConfig {
+        McpConfig { enabled: true, port: 0, token: TOKEN.into(), require_approval: true, read_only: false }
+    }
+
+    fn fake_call(name: &str, args: &Value) -> Result<String, String> {
+        match name {
+            "ok" => Ok(format!("hecho {}", args["x"])),
+            _ => Err(format!("Herramienta desconocida o deshabilitada: {name}")),
+        }
+    }
+
+    /// Levanta un tiny_http real en loopback (puerto 0), atiende una petición con `serve_with`
+    /// y devuelve (estado, cuerpo) de la respuesta cruda recibida por TCP.
+    fn http(cfg: McpConfig, raw: Vec<u8>) -> (u16, String) {
+        use std::io::Write;
+        let server = Server::http(("127.0.0.1", 0)).unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let req = server.recv_timeout(Duration::from_secs(5)).unwrap().expect("sin petición");
+            serve_with(req, &cfg, |m| handle_with(&self::cfg(), m, fake_call));
+        });
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(&raw).unwrap();
+        let mut out = Vec::new();
+        let _ = s.read_to_end(&mut out);
+        t.join().unwrap();
+        let text = String::from_utf8_lossy(&out).to_string();
+        let status = text.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status, body)
+    }
+
+    fn post(path: &str, headers: &[(&str, &str)], body: &str) -> Vec<u8> {
+        let mut r = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:47821\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        for (k, v) in headers {
+            r.push_str(&format!("{k}: {v}\r\n"));
+        }
+        r.push_str("\r\n");
+        r.push_str(body);
+        r.into_bytes()
+    }
+
+    fn bearer() -> String {
+        format!("Bearer {TOKEN}")
+    }
+
+    const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#;
+
+    #[test]
+    fn rpc_initialize_negotiates_protocol() {
+        let r = handle_with(&cfg(), &serde_json::from_str(INIT).unwrap(), fake_call).unwrap();
+        assert_eq!(r["id"], 1);
+        assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(r["result"]["serverInfo"]["name"], "netterminal");
+        // Versión desconocida o ausente: responde la más nueva soportada.
+        let m = json!({"id": 2, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}});
+        assert_eq!(handle_with(&cfg(), &m, fake_call).unwrap()["result"]["protocolVersion"], PROTOCOLS[0]);
+        let m = json!({"id": 3, "method": "initialize"});
+        assert_eq!(handle_with(&cfg(), &m, fake_call).unwrap()["result"]["protocolVersion"], PROTOCOLS[0]);
+    }
+
+    #[test]
+    fn rpc_notifications_ping_unknown_method() {
+        assert!(handle_with(&cfg(), &json!({"method": "notifications/initialized"}), fake_call).is_none());
+        let r = handle_with(&cfg(), &json!({"id": "a", "method": "ping"}), fake_call).unwrap();
+        assert_eq!(r["id"], "a");
+        assert_eq!(r["result"], json!({}));
+        let r = handle_with(&cfg(), &json!({"id": 9, "method": "resources/list"}), fake_call).unwrap();
+        assert_eq!(r["error"]["code"], -32601);
+        assert_eq!(r["id"], 9);
+    }
+
+    #[test]
+    fn rpc_tools_list_and_call() {
+        let r = handle_with(&cfg(), &json!({"id": 1, "method": "tools/list"}), fake_call).unwrap();
+        let names: Vec<&str> =
+            r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["list_sessions", "list_connections", "read_output", "send_command", "open_session"]);
+        let call = json!({"id": 2, "method": "tools/call", "params": {"name": "ok", "arguments": {"x": 7}}});
+        let r = handle_with(&cfg(), &call, fake_call).unwrap();
+        assert_eq!(r["result"]["isError"], false);
+        assert_eq!(r["result"]["content"][0]["text"], "hecho 7");
+        // Error de herramienta: isError verdadero, no un error JSON-RPC.
+        let call = json!({"id": 3, "method": "tools/call", "params": {"name": "nope"}});
+        let r = handle_with(&cfg(), &call, fake_call).unwrap();
+        assert_eq!(r["result"]["isError"], true);
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("desconocida"));
+    }
+
+    #[test]
+    fn read_only_blocks_write_tools_and_advertises_only_reads() {
+        let ro = McpConfig { read_only: true, ..cfg() };
+        for t in ["send_command", "open_session"] {
+            assert!(!write_allowed(&ro, t));
+            assert!(write_allowed(&cfg(), t));
+        }
+        for t in ["list_sessions", "list_connections", "read_output"] {
+            assert!(write_allowed(&ro, t));
+        }
+        for t in tools(&ro).as_array().unwrap() {
+            assert_eq!(t["annotations"]["readOnlyHint"], true, "{}", t["name"]);
+        }
+        let all = tools(&cfg());
+        let send = all.as_array().unwrap().iter().find(|t| t["name"] == "send_command").unwrap();
+        assert_eq!(send["annotations"]["destructiveHint"], true);
+    }
+
+    #[test]
+    fn http_rejects_missing_and_wrong_token() {
+        assert_eq!(http(cfg(), post("/mcp", &[], INIT)).0, 401);
+        assert_eq!(http(cfg(), post("/mcp", &[("Authorization", "Bearer nope")], INIT)).0, 401);
+        // Sin el prefijo "Bearer ".
+        assert_eq!(http(cfg(), post("/mcp", &[("Authorization", TOKEN)], INIT)).0, 401);
+        // Mismo largo, un carácter distinto.
+        let mut bad = TOKEN.to_string();
+        bad.replace_range(0..1, "X");
+        assert_eq!(http(cfg(), post("/mcp", &[("Authorization", &format!("Bearer {bad}"))], INIT)).0, 401);
+        // Token configurado demasiado corto o vacío: nunca autentica, ni con el mismo valor.
+        let weak = McpConfig { token: "corto".into(), ..cfg() };
+        assert_eq!(http(weak, post("/mcp", &[("Authorization", "Bearer corto")], INIT)).0, 401);
+        let empty = McpConfig { token: String::new(), ..cfg() };
+        assert_eq!(http(empty, post("/mcp", &[("Authorization", "Bearer ")], INIT)).0, 401);
+    }
+
+    #[test]
+    fn http_accepts_valid_request() {
+        let b = bearer();
+        let h = [("Authorization", b.as_str())];
+        let (st, body) = http(cfg(), post("/mcp", &h, INIT));
+        assert_eq!(st, 200);
+        let r: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(r["result"]["serverInfo"]["name"], "netterminal");
+        assert_eq!(http(cfg(), post("/mcp?x=1", &h, INIT)).0, 200);
+        // Notificación: 202 sin cuerpo.
+        let (st, body) = http(cfg(), post("/mcp", &h, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#));
+        assert_eq!((st, body.as_str()), (202, ""));
+        // Lote: responde solo a los mensajes con id.
+        let batch = r#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","method":"x"},{"jsonrpc":"2.0","id":2,"method":"ping"}]"#;
+        let (st, body) = http(cfg(), post("/mcp", &h, batch));
+        assert_eq!(st, 200);
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap().as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn http_only_loopback_origin_and_host() {
+        let b = bearer();
+        let ok = ("Authorization", b.as_str());
+        assert_eq!(http(cfg(), post("/mcp", &[ok, ("Origin", "https://evil.example")], INIT)).0, 403);
+        assert_eq!(http(cfg(), post("/mcp", &[ok, ("Origin", "http://localhost:3000")], INIT)).0, 200);
+        // Host externo (DNS rebinding) con token válido: se rechaza.
+        let raw = format!(
+            "POST /mcp HTTP/1.1\r\nHost: attacker.example:47821\r\nAuthorization: {b}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{INIT}",
+            INIT.len()
+        );
+        assert_eq!(http(cfg(), raw.into_bytes()).0, 403);
+        // Sin Host (HTTP/1.0) también.
+        let raw = format!("POST /mcp HTTP/1.0\r\nAuthorization: {b}\r\nContent-Length: {}\r\n\r\n{INIT}", INIT.len());
+        assert_eq!(http(cfg(), raw.into_bytes()).0, 403);
+        // El origen se valida antes que el token.
+        assert_eq!(http(cfg(), post("/mcp", &[("Origin", "https://evil.example")], INIT)).0, 403);
+    }
+
+    /// El loopback IPv6 entre corchetes se acepta (con o sin puerto); cualquier otra dirección
+    /// IPv6, una forma equivalente o algo pegado tras el corchete se rechaza.
+    #[test]
+    fn origin_allowed_accepts_ipv6_loopback() {
+        for ok in ["http://[::1]:8080", "http://[::1]", "https://[::1]/mcp", "http://[::1]:47821/x?y"] {
+            assert!(origin_allowed(Some(ok)), "{ok}");
+        }
+        // Header Host de un cliente que se conecta por IPv6.
+        assert!(origin_allowed(Some(&format!("http://{}", "[::1]:47821"))));
+        for bad in [
+            "http://[::2]:8080",
+            "http://[::]:8080",
+            "http://[0:0:0:0:0:0:0:1]:8080",
+            "http://[::ffff:127.0.0.1]",
+            "http://[::1].evil.example",
+            "http://[::1]evil.example",
+            "http://[::1]:80@evil.example",
+            "http://[::1]:",
+            "http://[::1",
+            "http://[fe80::1%25lo0]",
+        ] {
+            assert!(!origin_allowed(Some(bad)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn origin_allowed_edge_cases() {
+        for ok in ["http://127.0.0.1:1/x", "https://localhost"] {
+            assert!(origin_allowed(Some(ok)), "{ok}");
+        }
+        for bad in [
+            "http://127.0.0.2",
+            "http://0.0.0.0",
+            "http://localhost@evil.example",
+            "http://evil.example/localhost",
+            "null",
+            "",
+            "http://127.0.0.1.evil.example",
+        ] {
+            assert!(!origin_allowed(Some(bad)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn http_wrong_path_method_and_bad_bodies() {
+        let b = bearer();
+        let h = [("Authorization", b.as_str())];
+        assert_eq!(http(cfg(), post("/otra", &h, INIT)).0, 404);
+        let get = format!("GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {b}\r\nConnection: close\r\n\r\n");
+        assert_eq!(http(cfg(), get.into_bytes()).0, 405);
+        // Un GET sin token es 401: el método no se revela antes de autenticar.
+        let get = "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        assert_eq!(http(cfg(), get.as_bytes().to_vec()).0, 401);
+        let (st, body) = http(cfg(), post("/mcp", &h, "{no es json"));
+        assert_eq!(st, 400);
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["error"]["code"], -32700);
+    }
+
+    #[test]
+    fn http_body_is_capped_at_one_mib() {
+        let b = bearer();
+        let h = [("Authorization", b.as_str())];
+        let big = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"ping","pad":"{}"}}"#, "a".repeat(MAX_BODY as usize + 10));
+        assert_eq!(http(cfg(), post("/mcp", &h, &big)).0, 400);
+        let ok = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"ping","pad":"{}"}}"#, "a".repeat(MAX_BODY as usize - 200));
+        assert_eq!(http(cfg(), post("/mcp", &h, &ok)).0, 200);
+    }
+
+    #[test]
+    fn concurrency_cap_rejects_the_overflow() {
+        use std::sync::atomic::AtomicUsize;
+        let active = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let rx = Arc::new(Mutex::new(rx));
+        for i in 0..MAX_CONCURRENT {
+            let rx = rx.clone();
+            assert!(crate::servers::spawn_limited(&active, MAX_CONCURRENT, i, move |_| {
+                let _ = rx.lock().unwrap().recv();
+            })
+            .is_ok());
+        }
+        // La petición siguiente se devuelve para responder 503.
+        assert_eq!(crate::servers::spawn_limited(&active, MAX_CONCURRENT, 99, |_| {}), Err(99));
+        for _ in 0..MAX_CONCURRENT {
+            tx.send(()).unwrap();
+        }
+    }
+
+    #[test]
+    fn approval_rejected_timed_out_and_capped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        type Log = Arc<Mutex<Vec<(String, Value)>>>;
+        fn emit(ev: Log) -> impl Fn(&str, Value) {
+            move |e, p| ev.lock().unwrap().push((e.to_string(), p))
+        }
+        let srv = Arc::new(McpServer::default());
+        let events: Log = Arc::new(Mutex::new(Vec::new()));
+
+        // Tiempo agotado: nadie responde, se rechaza y se cierra el diálogo.
+        assert!(!srv.ask_with("send_command", "R1", "show clock", Duration::from_millis(30), emit(events.clone())));
+        {
+            let ev = events.lock().unwrap();
+            assert_eq!(ev[0].0, "mcp-approval");
+            assert_eq!(ev[0].1["detail"], "show clock");
+            assert_eq!(ev[0].1["target"], "R1");
+            assert_eq!(ev[1].0, "mcp-approval-closed");
+        }
+        assert!(srv.approvals.lock().unwrap().is_empty());
+
+        // Rechazo y aprobación del usuario, vía decide() con el id del evento.
+        for answer in [false, true] {
+            events.lock().unwrap().clear();
+            let (s2, ev2) = (srv.clone(), events.clone());
+            let h = std::thread::spawn(move || s2.ask_with("send_command", "R1", "x", Duration::from_secs(5), emit(ev2)));
+            let id = loop {
+                if let Some(id) = events.lock().unwrap().first().and_then(|e| e.1["id"].as_str().map(String::from)) {
+                    break id;
+                }
+                std::thread::yield_now();
+            };
+            srv.decide(&id, answer);
+            assert_eq!(h.join().unwrap(), answer);
+        }
+        // Decidir un id inexistente o ya cerrado no hace nada.
+        srv.decide("no-existe", true);
+
+        // Tope de pendientes: la solicitud MAX_PENDING_APPROVALS + 1 se rechaza sin esperar.
+        let gate = Arc::new(AtomicUsize::new(0));
+        let mut hs = vec![];
+        for _ in 0..MAX_PENDING_APPROVALS {
+            let (s2, g) = (srv.clone(), gate.clone());
+            hs.push(std::thread::spawn(move || {
+                s2.ask_with("t", "r", "c", Duration::from_secs(5), |e, _| {
+                    if e == "mcp-approval" {
+                        g.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            }));
+        }
+        while gate.load(Ordering::SeqCst) < MAX_PENDING_APPROVALS {
+            std::thread::yield_now();
+        }
+        let t0 = std::time::Instant::now();
+        assert!(!srv.ask_with("t", "r", "c", Duration::from_secs(5), |_, _| {}));
+        assert!(t0.elapsed() < Duration::from_secs(1));
+        let ids: Vec<String> = srv.approvals.lock().unwrap().keys().cloned().collect();
+        assert_eq!(ids.len(), MAX_PENDING_APPROVALS);
+        for id in ids {
+            srv.decide(&id, false);
+        }
+        for h in hs {
+            assert!(!h.join().unwrap());
+        }
+    }
+
+    #[test]
+    fn command_text_shown_to_approver_is_exact() {
+        assert_eq!(visible_command("reload\r\n").unwrap(), "reload");
+        assert_eq!(
+            visible_command("configure terminal\nno router bgp 65000").unwrap(),
+            "configure terminal\nno router bgp 65000"
+        );
+        assert!(visible_command("   \n\t ").is_err());
+        for bad in ["show\u{2066}x", "a\u{FEFF}b", "a\x7fb"] {
+            assert!(visible_command(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// Mismo fixture que scripts/tests/riskParity.test.mjs. Rust no clasifica riesgo: el MCP
+    /// pide aprobación para TODO comando (no por riesgo), así que aquí se exige que cada caso
+    /// del fixture llegue al diálogo tal cual o se rechace de forma explícita, y que ninguno
+    /// quede sin aprobación con la política por defecto. La clasificación (read/change/
+    /// disruptive) vive solo en src/lib/packs.ts (computeRisk) y la valida la prueba de Node.
+    #[test]
+    fn risk_fixture_commands_always_need_approval_and_reach_the_dialog_verbatim() {
+        let fixture: Value = serde_json::from_str(include_str!("../../scripts/tests/fixtures/risk-cases.json")).unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() >= 150, "{} casos", cases.len());
+        let (mut shown, mut rejected) = (0, 0);
+        for c in cases {
+            let (cmd, risk) = (c["cmd"].as_str().unwrap(), c["risk"].as_str().unwrap());
+            assert!(matches!(risk, "read" | "change" | "disruptive"), "{cmd:?}");
+            assert!(needs_approval(&cfg(), false), "{cmd:?}");
+            match visible_command(cmd) {
+                Ok(v) => {
+                    shown += 1;
+                    assert!(!v.is_empty());
+                    assert!(!v.contains('\r'), "{cmd:?}");
+                    assert_eq!(v, v.trim_end());
+                    // Lo que ve el usuario es lo que se envía: mismas líneas, sin extras.
+                    let normalized = cmd.replace("\r\n", "\n").replace('\r', "\n");
+                    assert_eq!(v, normalized.trim_end());
+                }
+                Err(_) => {
+                    rejected += 1;
+                    let blank = cmd.trim().is_empty();
+                    let hidden = cmd.chars().any(|ch| ch.is_control() && !matches!(ch, '\n' | '\t' | '\r'));
+                    assert!(blank || hidden, "rechazado sin motivo: {cmd:?}");
+                }
+            }
+        }
+        assert!(shown > 100 && rejected >= 5, "mostrados {shown}, rechazados {rejected}");
+    }
+
+    #[test]
+    fn approval_policy() {
+        let strict = cfg();
+        let lax = McpConfig { require_approval: false, ..cfg() };
+        assert!(needs_approval(&strict, false));
+        assert!(needs_approval(&strict, true));
+        // Sin la política, remoto va sin aprobar, pero un terminal local siempre la pide.
+        assert!(!needs_approval(&lax, false));
+        assert!(needs_approval(&lax, true));
+    }
+
+    #[test]
+    fn token_comparison_is_length_and_content_exact() {
+        assert!(token_matches(TOKEN, TOKEN));
+        assert!(!token_matches(&TOKEN[..TOKEN.len() - 1], TOKEN));
+        assert!(!token_matches(&format!("{TOKEN}x"), TOKEN));
+        assert!(token_matches("", ""));
     }
 
     #[test]

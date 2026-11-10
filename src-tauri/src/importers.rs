@@ -1326,4 +1326,536 @@ rdp=#91#4%192.0.2.9%3389%#MobaFont#0# #-1\r\n\
         assert_eq!(parse_file(&ok, None).unwrap().format, "csv");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    // ---------- Pruebas adicionales ----------
+
+    const SECRET: &str = "S3cr3t-PW-do-not-import";
+
+    fn names(p: &ImportPreview) -> Vec<&str> {
+        p.sessions.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    fn utf16le(s: &str) -> Vec<u8> {
+        let mut b = vec![0xFF, 0xFE];
+        for u in s.encode_utf16() {
+            b.extend_from_slice(&u.to_le_bytes());
+        }
+        b
+    }
+
+    fn tmpdir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("nt-import-t-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn reg(name: &str, body: &str) -> String {
+        format!("[HKEY_CURRENT_USER\\Software\\SimonTatham\\PuTTY\\Sessions\\{name}]\r\n{body}\r\n\r\n")
+    }
+
+    // --- decode y detect ---
+
+    #[test]
+    fn decode_handles_bom_utf16_utf8_and_latin1() {
+        assert_eq!(decode(&utf16le("ñandú")), "ñandú");
+        let mut be = vec![0xFE, 0xFF];
+        for u in "ab".encode_utf16() {
+            be.extend_from_slice(&u.to_be_bytes());
+        }
+        assert_eq!(decode(&be), "ab");
+        let mut u8bom = vec![0xEF, 0xBB, 0xBF];
+        u8bom.extend_from_slice("sesión".as_bytes());
+        assert_eq!(decode(&u8bom), "sesión");
+        // Latin-1/Windows-1252: 0xF3 = ó.
+        assert_eq!(decode(b"sesi\xf3n"), "sesión");
+        assert_eq!(decode(b""), "");
+        // Solo el BOM, sin contenido.
+        assert_eq!(decode(&[0xFF, 0xFE]), "");
+    }
+
+    #[test]
+    fn detect_by_name_and_content() {
+        assert_eq!(detect("config", "").as_deref(), Some("openssh"));
+        assert_eq!(detect("x.txt", "Host r1\n HostName 192.0.2.1").as_deref(), Some("openssh"));
+        assert_eq!(detect("a.mxtsessions", "").as_deref(), Some("mobaxterm"));
+        assert_eq!(detect("a.txt", "[Bookmarks_2]\n").as_deref(), Some("mobaxterm"));
+        assert_eq!(detect("a.csv", "x").as_deref(), Some("csv"));
+        assert_eq!(detect("a.txt", "[HKEY_CURRENT_USER\\Software\\SimonTatham\\PuTTY\\Sessions\\a]").as_deref(), Some("putty"));
+        assert_eq!(detect("a.xml", "<VanDyke version=\"3\">").as_deref(), Some("securecrt"));
+        assert_eq!(detect("a.xml", "<key name=\"Sessions\">").as_deref(), Some("securecrt"));
+        assert_eq!(detect("notas.txt", "hola mundo"), None);
+    }
+
+    #[test]
+    fn parse_file_forced_and_auto_format() {
+        let d = tmpdir();
+        let f = d.join("datos.txt");
+        std::fs::write(&f, "r1;;ssh;192.0.2.1;22;noc\n").unwrap();
+        assert!(parse_file(&f, None).is_err(), "sin pistas no se adivina");
+        assert_eq!(parse_file(&f, Some("csv")).unwrap().sessions.len(), 1);
+        assert!(parse_file(&f, Some("auto")).is_err());
+        assert!(parse_file(&f, Some("pdf")).unwrap_err().contains("Formato desconocido"));
+        assert!(parse_file(&d, None).unwrap_err().contains("No es un archivo"));
+        assert!(parse_file(&d.join("no-existe.csv"), None).is_err());
+        // Fuera de SecureCRT el tope es de 8 MB.
+        let big = d.join("grande.csv");
+        std::fs::write(&big, format!("r1,,ssh,192.0.2.1\n{}", "#".repeat(MAX_OTHER + 1))).unwrap();
+        assert!(parse_file(&big, None).unwrap_err().contains("supera"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    // --- PuTTY ---
+
+    #[test]
+    fn putty_utf16_file_end_to_end_with_spaces_and_escapes() {
+        let mut t = String::from("Windows Registry Editor Version 5.00\r\n\r\n");
+        t.push_str(&reg("Mi%20Router%20%C3%B1", "\"HostName\"=\"192.0.2.1\"\r\n\"Protocol\"=\"ssh\""));
+        t.push_str(&reg("Default%20Settings", "\"HostName\"=\"192.0.2.99\""));
+        t.push_str("[HKEY_CURRENT_USER\\Software\\SimonTatham\\PuTTY\\SshHostKeys]\r\n\"rsa2@22:192.0.2.1\"=\"0x1\"\r\n\r\n");
+        t.push_str("[HKEY_CURRENT_USER\\Software\\SimonTatham\\PuTTY\\Sessions\\a\\b]\r\n\"HostName\"=\"192.0.2.50\"\r\n\r\n");
+        let d = tmpdir();
+        let f = d.join("putty.reg");
+        std::fs::write(&f, utf16le(&t)).unwrap();
+        let p = parse_file(&f, None).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+        assert_eq!(p.format, "putty");
+        // Default Settings, claves de host y subclaves anidadas no son sesiones.
+        assert_eq!(names(&p), ["Mi Router ñ"]);
+        assert_eq!(p.sessions[0].folder.as_deref(), Some("PuTTY"));
+    }
+
+    #[test]
+    fn putty_protocols_default_and_backspace() {
+        let mut t = String::new();
+        t.push_str(&reg("sinproto", "\"HostName\"=\"192.0.2.1\""));
+        t.push_str(&reg("raw1", "\"HostName\"=\"192.0.2.2\"\r\n\"Protocol\"=\"raw\"\r\n\"PortNumber\"=dword:000007d1"));
+        t.push_str(&reg("del", "\"HostName\"=\"192.0.2.3\"\r\n\"BackspaceIsDelete\"=dword:00000001"));
+        t.push_str(&reg("bs", "\"HostName\"=\"192.0.2.4\"\r\n\"BackspaceIsDelete\"=dword:00000000"));
+        t.push_str(&reg("ssh-user", "\"HostName\"=\"ops@192.0.2.5\"\r\n\"UserName\"=\"explicito\""));
+        t.push_str(&reg("ssh-user2", "\"HostName\"=\"ops@192.0.2.6\""));
+        t.push_str(&reg("bad", "\"HostName\"=\"192.0.2.7\"\r\n\"Protocol\"=\"ssh1\""));
+        let p = parse("putty", &t);
+        assert_eq!(names(&p), ["sinproto", "raw1", "del", "bs", "ssh-user", "ssh-user2"], "{:?}", p.warnings);
+        assert_eq!(p.sessions[0].session_type, SessionType::Ssh);
+        assert_eq!((p.sessions[1].session_type.clone(), p.sessions[1].port), (SessionType::Raw, Some(2001)));
+        assert_eq!(p.sessions[2].backspace, None);
+        assert_eq!(p.sessions[3].backspace.as_deref(), Some("bs"));
+        assert_eq!(p.sessions[4].username.as_deref(), Some("explicito"));
+        assert_eq!(p.sessions[5].username.as_deref(), Some("ops"));
+        assert_eq!(p.sessions[5].host.as_deref(), Some("192.0.2.6"));
+        assert!(p.warnings.iter().any(|w| w.contains("bad") && w.contains("ssh1")));
+    }
+
+    #[test]
+    fn putty_serial_variants() {
+        let mut t = String::new();
+        t.push_str(&reg(
+            "c1",
+            "\"Protocol\"=\"serial\"\r\n\"SerialLine\"=\"/dev/ttyUSB0\"\r\n\"SerialSpeed\"=dword:00002580\r\n\"SerialDataBits\"=dword:00000007\r\n\"SerialStopHalfbits\"=dword:00000004\r\n\"SerialParity\"=dword:00000001\r\n\"SerialFlowControl\"=dword:00000002\r\n\"BackspaceIsDelete\"=dword:00000000",
+        ));
+        t.push_str(&reg(
+            "c2",
+            "\"Protocol\"=\"serial\"\r\n\"SerialLine\"=\"COM9\"\r\n\"SerialStopHalfbits\"=dword:00000003\r\n\"SerialParity\"=dword:00000003\r\n\"SerialFlowControl\"=dword:00000003",
+        ));
+        t.push_str(&reg("c3", "\"Protocol\"=\"serial\"\r\n\"SerialLine\"=\"\""));
+        t.push_str(&reg("c4", "\"Protocol\"=\"serial\"\r\n\"SerialLine\"=\"-oBad\""));
+        let p = parse("putty", &t);
+        assert_eq!(names(&p), ["c1", "c2"], "{:?}", p.warnings);
+        let c = &p.sessions[0];
+        assert_eq!(
+            (c.serial_port.as_deref(), c.baud_rate, c.data_bits, c.stop_bits, c.parity.as_deref(), c.flow_control.as_deref()),
+            (Some("/dev/ttyUSB0"), Some(9600), Some(7), Some(2), Some("odd"), Some("hardware"))
+        );
+        assert_eq!(c.backspace.as_deref(), Some("bs"));
+        let c = &p.sessions[1];
+        // Sin velocidad ni bits de datos: valores por defecto 9600 8N1; sin flow: XON/XOFF en PuTTY.
+        assert_eq!((c.baud_rate, c.data_bits, c.stop_bits, c.parity.as_deref()), (Some(9600), Some(8), Some(1), Some("none")));
+        assert_eq!(c.flow_control.as_deref(), Some("none"));
+        let w = p.warnings.join("\n");
+        assert!(w.contains("1,5 bits") && w.contains("mark/space") && w.contains("DSR/DTR"));
+        assert!(w.contains("c3: puerto serial vacío o inválido") && w.contains("c4: puerto serial vacío o inválido"));
+    }
+
+    #[test]
+    fn putty_ignores_proxy_forwardings_command_and_passwords() {
+        let t = reg(
+            "p1",
+            &format!(
+                "\"HostName\"=\"192.0.2.1\"\r\n\"ProxyMethod\"=dword:00000003\r\n\"ProxyHost\"=\"192.0.2.250\"\r\n\"ProxyUsername\"=\"u\"\r\n\"ProxyPassword\"=\"{SECRET}\"\r\n\"ProxyTelnetCommand\"=\"connect %host\"\r\n\"RemoteCommand\"=\"rm -rf /\"\r\n\"PortForwardings\"=\"L1=192.0.2.2:1\"\r\n\"PublicKeyFile\"=\"C:\\\\k.ppk\""
+            ),
+        );
+        let p = parse("putty", &t);
+        let s = &p.sessions[0];
+        assert!(s.ssh_args.is_none() && s.on_connect.is_none() && s.tunnels.is_none() && s.identity_file.is_none());
+        assert!(s.jump_host.is_none());
+        let w = p.warnings.join("\n");
+        assert!(w.contains("proxy") && w.contains("túneles") && w.contains("comando remoto") && w.contains(".ppk"));
+        assert!(!serde_json::to_string(&p).unwrap().contains(SECRET));
+    }
+
+    #[test]
+    fn putty_reg_value_parsing() {
+        assert_eq!(reg_value("\"A\"=\"x\\\\y\\\"z\""), Some(("A".into(), "x\\y\"z".into())));
+        assert_eq!(reg_value("\"N\"=dword:0000ffff"), Some(("N".into(), "65535".into())));
+        assert_eq!(reg_value("\"N\"=dword:zz"), None);
+        assert_eq!(reg_value("\"B\"=hex:01,02"), None);
+        assert_eq!(reg_value("sin comillas"), None);
+        assert_eq!(url_decode("100%"), "100%");
+        assert_eq!(url_decode("%zz%41"), "%zzA");
+        assert_eq!(url_decode("a%2"), "a%2");
+    }
+
+    // --- MobaXterm ---
+
+    #[test]
+    fn mobaxterm_serial_baud_sum_and_data_bits() {
+        let conf = "[Bookmarks]\r\nSubRep=\r\n\
+s1=#131#8%-2%1115200%3%0%0%0%2%COM7  (USB)#x#0#\r\n\
+s2=#131#8%-2%9600%8%1%2%0%2%/dev/ttyUSB1#x#0#\r\n\
+s3=#131#8%-2%1000000%0%0%0%0%2%COM8#x#0#\r\n\
+s4=#131#8%-2%1115200%3%0%0%0%2%#x#0#\r\n";
+        let p = parse("mobaxterm", conf);
+        assert_eq!(names(&p), ["s1", "s2", "s3"], "{:?}", p.warnings);
+        assert_eq!((p.sessions[0].baud_rate, p.sessions[0].data_bits), (Some(115200), Some(8)));
+        assert_eq!(p.sessions[0].serial_port.as_deref(), Some("COM7"));
+        assert_eq!((p.sessions[1].baud_rate, p.sessions[1].parity.as_deref(), p.sessions[1].stop_bits), (Some(9600), Some("odd"), Some(2)));
+        // 1.000.000 exacto no es una velocidad válida: cae al valor por defecto.
+        assert_eq!(p.sessions[2].baud_rate, Some(9600));
+        assert_eq!(p.warnings.iter().filter(|w| w.contains("control de flujo")).count(), 1, "un solo aviso global");
+        assert!(p.warnings.iter().any(|w| w.contains("s4: puerto serial vacío")));
+        assert_eq!(moba_baud("115200"), Some(115200));
+        assert_eq!(moba_baud("49"), None);
+        assert_eq!(moba_baud("abc"), None);
+        assert_eq!(moba_baud("5000001"), None);
+    }
+
+    #[test]
+    fn mobaxterm_folders_ini_and_ignored_sections() {
+        let conf = "[Misc]\r\nx=#109#0%192.0.2.99%22%a\r\n[Bookmarks]\r\nSubRep=\r\nImgNum=42\r\nraiz=#109#0%192.0.2.1%22%%%#m#0#\r\n\
+[Bookmarks_1]\r\nSubRep=A\\B\\C\r\nImgNum=41\r\nn1=#109#0%192.0.2.2%22%%%#m#0#\r\n\
+[Bookmarks_2]\r\nSubRep=Lab/Equipos\r\nn2=#98#1%192.0.2.3%23%#m#0#\r\n\
+[Passwords]\r\nuser@srv=" ;
+        let conf = format!("{conf}{SECRET}\r\n[Credentials]\r\ncred=#1#2%3\r\n");
+        let p = parse("mobaxterm", &conf);
+        assert_eq!(names(&p), ["raiz", "n1", "n2"], "{:?}", p.warnings);
+        assert_eq!(p.sessions[0].folder, None);
+        assert_eq!(p.sessions[1].folder.as_deref(), Some("A/B/C"));
+        assert_eq!(p.sessions[2].folder.as_deref(), Some("Lab/Equipos"));
+        assert!(!serde_json::to_string(&p).unwrap().contains(SECRET));
+    }
+
+    #[test]
+    fn mobaxterm_jump_hosts_and_unsupported() {
+        let line = "j=#109#0%192.0.2.1%22%ops%%-1%-1%echo hola%192.0.2.250__PIPE__192.0.2.251%2222__PIPE__22%gw1__PIPE__%0%0%0%%%-1%0%0%0%%1080%%0%0%1%#m#0#\r\n";
+        let p = parse("mobaxterm", &format!("[Bookmarks]\r\n{line}"));
+        assert_eq!(p.sessions[0].jump_host.as_deref(), Some("gw1@192.0.2.250:2222,192.0.2.251"));
+        assert!(p.sessions[0].on_connect.is_none());
+        assert!(p.warnings.iter().any(|w| w.contains("comando al iniciar sesión")));
+        // Comentarios, líneas sin '=' o sin '#' se ignoran sin romper.
+        let p = parse("mobaxterm", "[Bookmarks]\r\nbasura\r\nx=sin almohadillas\r\n=#1#2\r\n");
+        assert!(p.sessions.is_empty());
+        // Tipo 5 (VNC) no soportado.
+        let p = parse("mobaxterm", "[Bookmarks]\r\nvnc=#91#5%192.0.2.9%5900%#m#0#\r\n");
+        assert!(p.sessions.is_empty() && p.warnings[0].contains("tipo de sesión 5"));
+    }
+
+    #[test]
+    fn mobaxterm_never_imports_commands_keys_or_proxies() {
+        let line = format!("t=#109#0%192.0.2.1%22%ops%%-1%-1%reload%%%%0%0%0%C:\\\\k\\\\id_rsa%%0%0%0%0%%1080%%0%0%1%{SECRET}#m#0#\r\n");
+        let p = parse("mobaxterm", &format!("[Bookmarks]\r\n{line}"));
+        let s = &p.sessions[0];
+        assert!(s.on_connect.is_none() && s.ssh_args.is_none() && s.identity_file.is_none() && s.tunnels.is_none());
+        assert!(!serde_json::to_string(&p).unwrap().contains(SECRET));
+        assert!(p.warnings.iter().any(|w| w.contains("llave privada")));
+    }
+
+    // --- OpenSSH ---
+
+    #[test]
+    fn openssh_patterns_match_include_and_first_value_wins() {
+        let cfg = "Include ~/.ssh/config.d/*\nInclude otro\n\
+Host a b\n  HostName 192.0.2.1\n  HostName 192.0.2.99\n  User uno\n  User dos\n\
+Host *.lab !x ?ab web?\n  User comodin\n\
+Host c\n  HostName=%h.example.net\n  Port 2022\n  ProxyJump none\n  Port 3022\n\
+Match user root\n  HostName 192.0.2.77\n\
+Host \"d\"\n  HostName \"192.0.2.4\"\n  IdentityFile \"~/.ssh/mi llave\"\n";
+        let p = parse("openssh", cfg);
+        assert_eq!(names(&p), ["a", "b", "c", "d"], "{:?}", p.warnings);
+        assert_eq!(p.sessions[0].host.as_deref(), Some("192.0.2.1"), "gana el primer valor, como ssh");
+        assert_eq!(p.sessions[0].username.as_deref(), Some("uno"));
+        assert_eq!(p.sessions[1].host.as_deref(), Some("192.0.2.1"));
+        // %h se reemplaza por el alias; el puerto del primer Port.
+        assert_eq!(p.sessions[2].host.as_deref(), Some("c.example.net"));
+        assert_eq!(p.sessions[2].port, Some(2022));
+        assert!(p.sessions[2].jump_host.is_none(), "ProxyJump none");
+        // El Match corta el bloque: su HostName no se asigna a "c".
+        assert_eq!(p.sessions[3].identity_file.as_deref(), Some("~/.ssh/mi llave"));
+        assert!(p.sessions.iter().all(|s| s.folder.as_deref() == Some("SSH config")));
+        let w = p.warnings.join("\n");
+        assert!(w.contains("Include no se sigue"));
+        assert!(w.contains("1 bloques Match omitidos"));
+        assert!(w.contains("4 patrones con comodín"), "{w}");
+    }
+
+    #[test]
+    fn openssh_proxyjump_variants_and_injection() {
+        let cfg = "Host j1\n  HostName 192.0.2.1\n  ProxyJump gw@192.0.2.250:2222,192.0.2.251\n\
+Host j2\n  HostName 192.0.2.2\n  ProxyJump -oProxyCommand=x\n\
+Host j3\n  HostName 192.0.2.3\n  ProxyJump a b\n\
+Host j4\n  HostName 192.0.2.4\n  ProxyJump [2001:db8::1]:22\n\
+Host j5\n  HostName 192.0.2.5\n  ProxyJump gw@host:0\n\
+Host j6\n  HostName 192.0.2.6\n  User -oBad\n\
+Host j7\n  HostName 192.0.2.7\n  User $(id)\n";
+        let p = parse("openssh", cfg);
+        assert_eq!(names(&p), ["j1", "j2", "j3", "j4", "j5", "j6", "j7"]);
+        assert_eq!(p.sessions[0].jump_host.as_deref(), Some("gw@192.0.2.250:2222,192.0.2.251"));
+        for i in [1, 2, 4] {
+            assert!(p.sessions[i].jump_host.is_none(), "j{}", i + 1);
+        }
+        assert_eq!(p.sessions[3].jump_host.as_deref(), Some("[2001:db8::1]:22"));
+        assert!(p.sessions[5].username.is_none() && p.sessions[6].username.is_none());
+        assert_eq!(p.warnings.iter().filter(|w| w.contains("jump host inválido")).count(), 3);
+        assert_eq!(p.warnings.iter().filter(|w| w.contains("usuario inválido")).count(), 2);
+    }
+
+    #[test]
+    fn openssh_never_imports_commands_or_tunnels() {
+        let cfg = "Host h\n  HostName 192.0.2.1\n  ProxyCommand ssh -W %h:%p bastion\n  LocalCommand rm -rf /\n  RemoteCommand sudo su\n  KnownHostsCommand /x\n  DynamicForward 1080\n  RemoteForward 80 192.0.2.5:80\n  SendEnv *\n  PermitLocalCommand yes\n";
+        let p = parse("openssh", cfg);
+        let s = &p.sessions[0];
+        assert!(s.ssh_args.is_none() && s.on_connect.is_none() && s.tunnels.is_none() && s.jump_host.is_none());
+        let w = p.warnings.join("\n");
+        for k in ["ProxyCommand", "LocalCommand", "RemoteCommand", "KnownHostsCommand", "túneles"] {
+            assert!(w.contains(k), "{k}");
+        }
+    }
+
+    // --- CSV ---
+
+    #[test]
+    fn csv_headers_in_both_languages_and_delimiters() {
+        let en = parse("csv", "Name,Folder,Protocol,Hostname,Port,User\nr1,Lab,ssh,192.0.2.1,2200,noc\n");
+        let es = parse("csv", "NOMBRE;CARPETA;TIPO;DIRECCIÓN;PUERTO;USUARIO\nr1;Lab;ssh;192.0.2.1;2200;noc\n");
+        let tab = parse("csv", "name\tfolder\ttype\thost\tport\tusername\nr1\tLab\tssh\t192.0.2.1\t2200\tnoc\n");
+        for p in [&en, &es, &tab] {
+            assert_eq!(p.sessions.len(), 1, "{:?}", p.warnings);
+            let s = &p.sessions[0];
+            assert_eq!((s.name.as_str(), s.folder.as_deref(), s.port, s.username.as_deref()), ("r1", Some("Lab"), Some(2200), Some("noc")));
+        }
+        // Columnas en otro orden y subconjunto.
+        let p = parse("csv", "ip,name\n192.0.2.9,solo-ip\n");
+        assert_eq!(p.sessions[0].host.as_deref(), Some("192.0.2.9"));
+        assert_eq!(p.sessions[0].name, "solo-ip");
+        // Sin columna de host: aviso y nada importado.
+        let p = parse("csv", "name,folder\nx,y\n");
+        assert!(p.sessions.is_empty() && p.warnings[0].contains("falta la columna host"));
+    }
+
+    #[test]
+    fn csv_serial_types_quotes_and_comments() {
+        let p = parse(
+            "csv",
+            "# comentario\r\nname,folder,type,host,port,user\r\n\"con \"\"comillas\"\"\",\"A/B\",TCP,192.0.2.1,2001,\r\nconsola,Lab,Serial,COM3,115200,\r\nbad,,serial,,115200,\r\nport,,ssh,192.0.2.2,xx,\r\n,,,192.0.2.3,,\r\n",
+        );
+        assert_eq!(p.sessions[0].name, "con \"comillas\"");
+        assert_eq!((p.sessions[0].session_type.clone(), p.sessions[0].port), (SessionType::Raw, Some(2001)));
+        assert_eq!(p.sessions[0].folder.as_deref(), Some("A/B"));
+        let c = &p.sessions[1];
+        assert_eq!((c.serial_port.as_deref(), c.baud_rate, c.host.as_deref()), (Some("COM3"), Some(115200), None));
+        assert!(!p.sessions.iter().any(|s| s.name == "bad"));
+        assert_eq!(p.sessions[2].port, None, "puerto inválido: por defecto");
+        assert!(p.warnings.iter().any(|w| w.contains("puerto inválido")));
+        // Sin nombre: usa el host.
+        assert_eq!(p.sessions.last().unwrap().name, "192.0.2.3");
+        // Con salto de línea dentro de comillas.
+        let p = parse("csv", "r1,\"Sitio\nUno\",ssh,192.0.2.1\n");
+        assert_eq!(p.sessions[0].folder.as_deref(), Some("Sitio Uno"));
+        assert!(parse("csv", "").sessions.is_empty());
+    }
+
+    #[test]
+    fn csv_password_columns_are_never_imported() {
+        let p = parse(
+            "csv",
+            &format!("name,host,user,password,ssh_args,on_connect,proxy\nr1,192.0.2.1,noc,{SECRET},-L 1:2:3,reload,192.0.2.250\n"),
+        );
+        let s = &p.sessions[0];
+        assert!(s.ssh_args.is_none() && s.on_connect.is_none() && s.jump_host.is_none() && s.tunnels.is_none());
+        assert!(!serde_json::to_string(&p).unwrap().contains(SECRET));
+        let by_pos = parse("csv", &format!("r1,,ssh,192.0.2.1,22,noc,{SECRET}\n"));
+        assert!(!serde_json::to_string(&by_pos).unwrap().contains(SECRET));
+    }
+
+    // --- SecureCRT ---
+
+    #[test]
+    fn securecrt_nested_folders_default_and_unsupported() {
+        let xml = r#"<VanDyke><key name="Sessions">
+<key name="Default"><dword name="Is Session">1</dword><string name="Protocol Name">SSH2</string><string name="Hostname">192.0.2.200</string></key>
+<key name="Default_Telnet"><dword name="Is Session">1</dword><string name="Protocol Name">Telnet</string><string name="Hostname">192.0.2.201</string></key>
+<key name="__FolderData__"><dword name="Is Session">1</dword><string name="Protocol Name">SSH2</string><string name="Hostname">192.0.2.202</string></key>
+<key name="L1"><key name="L2"><key name="L3">
+  <key name="Default"><dword name="Is Session">1</dword><string name="Protocol Name">SSH2</string><string name="Hostname">192.0.2.1</string></key>
+  <key name="hoja"><dword name="Is Session">1</dword><string name="Protocol Name">SSH2</string><string name="Hostname">192.0.2.2</string>
+    <string name="Password V2">02:SECRETO</string><string name="Login Script"/><string name="Firewall Name">None</string></key>
+</key></key></key>
+<key name="ssh1"><dword name="Is Session">1</dword><string name="Protocol Name">SSH1</string><string name="Hostname">192.0.2.3</string></key>
+<key name="rlogin"><dword name="Is Session">1</dword><string name="Protocol Name">RLogin</string><string name="Hostname">192.0.2.4</string></key>
+<key name="sinproto"><dword name="Is Session">1</dword><string name="Hostname">192.0.2.5</string></key>
+<key name="sinhost"><dword name="Is Session">1</dword><string name="Protocol Name">SSH2</string><string name="Hostname"></string></key>
+<key name="raiz"><dword name="Is Session">1</dword><string name="Protocol Name">Raw</string><string name="Hostname">192.0.2.6</string><dword name="Port">7000</dword></key>
+</key><key name="Otra"><key name="x"><dword name="Is Session">1</dword><string name="Protocol Name">SSH2</string><string name="Hostname">192.0.2.7</string></key></key></VanDyke>"#;
+        let p = parse("securecrt", xml);
+        assert_eq!(names(&p), ["Default", "hoja", "raiz"], "{:?}", p.warnings);
+        // "Default" dentro de una carpeta sí es una sesión; los de la raíz no.
+        assert_eq!(p.sessions[0].folder.as_deref(), Some("L1/L2/L3"));
+        assert_eq!(p.sessions[0].host.as_deref(), Some("192.0.2.1"));
+        assert_eq!(p.sessions[2].port, Some(7000));
+        let w = p.warnings.join("\n");
+        assert!(w.contains("SSH1 no es compatible") && w.contains("protocolo RLogin") && w.contains("desconocido"));
+        assert!(w.contains("sinhost: host vacío o inválido"));
+        assert!(!serde_json::to_string(&p).unwrap().contains("SECRETO"));
+    }
+
+    #[test]
+    fn securecrt_xml_errors_and_entities() {
+        assert!(parse_text("securecrt", "<key name=\"Sessions\"><!-- sin cerrar").is_err());
+        assert!(parse_text("securecrt", "<key name=\"Sessions\"><![CDATA[x").is_err());
+        assert!(parse_text("securecrt", "<key name=\"Sessions\"").is_err());
+        assert_eq!(xml_unescape("a &amp; b &lt;&gt; &quot;&apos; &#65;&#x42; &bogus; &"), "a & b <> \"' AB &bogus; &");
+        assert_eq!(xml_unescape("&#xD800;"), "&#xD800;", "escalar inválido se deja tal cual");
+        // Sin sesiones: vacío, sin error.
+        assert!(parse("securecrt", "<VanDyke></VanDyke>").sessions.is_empty());
+    }
+
+    #[test]
+    fn securecrt_never_imports_credentials_scripts_or_tunnels() {
+        let xml = r#"<key name="Sessions"><key name="r"><dword name="Is Session">1</dword><string name="Protocol Name">SSH2</string>
+<string name="Hostname">192.0.2.1</string><string name="Username">noc</string><string name="Password V2">02:SECRETO</string>
+<string name="Login Script">send "reload"</string><string name="Firewall Name">Session:bastion</string>
+<array name="Port Forward Table V3"><string>x</string></array></key></key>"#;
+        let p = parse("securecrt", xml);
+        let s = &p.sessions[0];
+        assert!(s.on_connect.is_none() && s.ssh_args.is_none() && s.tunnels.is_none() && s.jump_host.is_none());
+        assert!(!serde_json::to_string(&p).unwrap().contains("SECRETO"));
+        assert!(p.warnings.iter().any(|w| w.contains("firewall")) && p.warnings.iter().any(|w| w.contains("túneles")));
+    }
+
+    // --- Límites y validación ---
+
+    #[test]
+    fn max_sessions_is_enforced_with_one_warning() {
+        let mut csv = String::from("name,host\n");
+        for i in 0..MAX_SESSIONS + 50 {
+            csv.push_str(&format!("r{i},192.0.2.{}\n", i % 250 + 1));
+        }
+        let p = parse("csv", &csv);
+        assert_eq!(p.sessions.len(), MAX_SESSIONS);
+        assert_eq!(p.warnings.iter().filter(|w| w.contains("máximo")).count(), 1);
+        assert_eq!(p.sessions.last().unwrap().name, format!("r{}", MAX_SESSIONS - 1));
+    }
+
+    #[test]
+    fn warnings_are_capped_with_overflow_summary() {
+        let mut csv = String::from("name,host\n");
+        for i in 0..MAX_WARNINGS + 37 {
+            csv.push_str(&format!("m{i},-oBad{i}\n"));
+        }
+        let p = parse("csv", &csv);
+        assert!(p.sessions.is_empty());
+        assert_eq!(p.warnings.len(), MAX_WARNINGS + 1);
+        assert_eq!(p.warnings.last().unwrap(), "… y 37 avisos más");
+    }
+
+    #[test]
+    fn xml_token_limit_boundary() {
+        assert!(xml_tokens(&"<a>".repeat(MAX_XML_TOKENS)).is_ok());
+        assert!(xml_tokens(&"<a>".repeat(MAX_XML_TOKENS + 1)).is_err());
+    }
+
+    #[test]
+    fn malicious_hosts_are_rejected_in_every_format() {
+        let bad_hosts = ["-oProxyCommand=sh", "-J evil", "a b", "host\tname", "h\u{7}ost", "h\u{1b}[2Jost", "a;b", "a|b", "a`b`", "$(id)", "a&b", "a\\b", "ñandú", "a\u{202e}b"];
+        for h in bad_hosts {
+            assert!(clean_host(h).is_none(), "{h:?}");
+        }
+        for h in ["192.0.2.1", "r1.example.net", "[2001:db8::1]", "fe80::1%eth0", "a_b-c.d"] {
+            assert!(clean_host(h).is_some(), "{h:?}");
+        }
+        assert!(clean_host(&"a".repeat(256)).is_none());
+        assert!(clean_host(&"a".repeat(255)).is_some());
+        for h in ["-oProxyCommand=sh", "a b", "h\u{7}ost"] {
+            let csv = format!("name,host\nx,\"{h}\"\n");
+            assert!(parse("csv", &csv).sessions.is_empty(), "csv {h:?}");
+            assert!(parse("openssh", &format!("Host x\n  HostName {h}\n")).sessions.is_empty(), "openssh {h:?}");
+            assert!(parse("putty", &reg("x", &format!("\"HostName\"=\"{h}\""))).sessions.is_empty(), "putty {h:?}");
+            assert!(parse("mobaxterm", &format!("[Bookmarks]\nx=#1#0%{h}%22%#m#0#\n")).sessions.is_empty(), "moba {h:?}");
+            let xml = format!("<key name=\"Sessions\"><key name=\"x\"><dword name=\"Is Session\">1</dword><string name=\"Protocol Name\">SSH2</string><string name=\"Hostname\">{h}</string></key></key>");
+            assert!(parse("securecrt", &xml).sessions.is_empty(), "securecrt {h:?}");
+        }
+    }
+
+    #[test]
+    fn finish_normalizes_and_strips_sensitive_fields() {
+        let mut w = Warn::default();
+        let mut s = Session::blank("  Core\t\n01\u{7} ".into(), SessionType::Ssh);
+        s.host = Some(" 192.0.2.1 ".into());
+        s.port = Some(0);
+        s.id = "id-ajeno".into();
+        s.created_at = "2020".into();
+        s.ssh_args = Some("-L 1:2:3".into());
+        s.on_connect = Some("reload".into());
+        s.legacy_ssh = Some(true);
+        s.platform = Some("vrp5".into());
+        s.highlight = Some("x".into());
+        s.tunnels = Some(vec![]);
+        s.folder = Some("A/../B\\C/".into());
+        s.identity_file = Some("\"~/.ssh/id\"".into());
+        let r = finish(s, &mut w).unwrap();
+        assert_eq!(r.name, "Core 01");
+        assert_eq!((r.host.as_deref(), r.port), (Some("192.0.2.1"), None));
+        assert!(r.id.is_empty() && r.created_at.is_empty());
+        assert!(r.ssh_args.is_none() && r.on_connect.is_none() && r.legacy_ssh.is_none() && r.platform.is_none());
+        assert!(r.highlight.is_none() && r.tunnels.is_none());
+        assert_eq!(r.folder.as_deref(), Some("A/../B/C"));
+        assert_eq!(r.identity_file.as_deref(), Some("~/.ssh/id"));
+        // Telnet/Raw no llevan usuario, llave ni jump host.
+        let mut t = Session::blank("t".into(), SessionType::Telnet);
+        t.host = Some("192.0.2.2".into());
+        t.username = Some("u".into());
+        t.identity_file = Some("k".into());
+        t.jump_host = Some("j".into());
+        let t = finish(t, &mut w).unwrap();
+        assert!(t.username.is_none() && t.identity_file.is_none() && t.jump_host.is_none());
+        // Raw sin puerto y Local se descartan.
+        let mut raw = Session::blank("raw".into(), SessionType::Raw);
+        raw.host = Some("192.0.2.3".into());
+        assert!(finish(raw, &mut w).is_none());
+        assert!(finish(Session::blank("l".into(), SessionType::Local), &mut w).is_none());
+        // Serial: rangos inválidos vuelven a los valores por defecto y se limpia el host.
+        let mut se = Session::blank("se".into(), SessionType::Serial);
+        se.serial_port = Some("COM1".into());
+        se.host = Some("x".into());
+        se.baud_rate = Some(7);
+        se.data_bits = Some(9);
+        se.stop_bits = Some(3);
+        let se = finish(se, &mut w).unwrap();
+        assert_eq!((se.baud_rate, se.data_bits, se.stop_bits, se.host), (Some(9600), Some(8), Some(1), None));
+    }
+
+    #[test]
+    fn clean_helpers_edge_cases() {
+        assert!(clean_user(&"u".repeat(65)).is_none());
+        assert!(clean_user("a b").is_none() && clean_user("a;b").is_none() && clean_user("").is_none());
+        assert_eq!(clean_user(" noc ").as_deref(), Some("noc"));
+        assert!(clean_path("-rf").is_none() && clean_path("a\nb").is_none() && clean_path("\"\"").is_none());
+        assert!(clean_serial("COM3").is_some() && clean_serial("/dev/tty.usbserial-1").is_some());
+        assert!(clean_serial("COM3; rm").is_none() && clean_serial("-x").is_none());
+        assert_eq!(clean_folder(["a"; 12]).unwrap().matches('/').count(), 7, "máx. 8 niveles");
+        assert!(clean_folder(["", " "]).is_none());
+        assert_eq!(clean_text("  a \t b\n c ", 3), "a b");
+        assert!(clean_jump("").is_none() && clean_jump("a,,b").is_none() && clean_jump("a@").is_none());
+        assert!(clean_jump(&"a".repeat(513)).is_none());
+        assert!(clean_jump("[::1]").is_some() && clean_jump("[::1]:22").is_some() && clean_jump("h:0").is_none());
+    }
 }

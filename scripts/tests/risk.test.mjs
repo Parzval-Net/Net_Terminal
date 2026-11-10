@@ -22,7 +22,7 @@ registerHooks({
 });
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const { computeRisk, textRisk } = await import("../../src/lib/packs.ts");
+const { computeRisk, textRisk, editedLine } = await import("../../src/lib/packs.ts");
 const { vendors } = await import("../../src/lib/commands.ts");
 
 const RANK = { read: 0, change: 1, disruptive: 2 };
@@ -172,6 +172,8 @@ for (const c of ["tcpdump -ni eth0 -c 100 host 192.0.2.1", "sudo tcpdump -D", "t
 is("ip route del 10.0.0.0/8", "disruptive");
 is("ip -6 route del 2001:db8::/32", "disruptive");
 is("ip route add 10.0.0.0/8 via 192.0.2.1", "change");
+for (const c of ["ip link s eth0 down", "sudo -H reboot", "ssh -tt admin@192.0.2.1 sudo reboot", "cat x | grep a|reboot", "Get-Process | Stop-Computer"]) is(c, "disruptive");
+for (const c of ["Get-Service | Format-List *", "show run | include hostname|reload", "ssh -vvv admin@192.0.2.1", "ip -s -s neigh"]) is(c, "read");
 for (const c of ["ip route show", "ip -s link", "ls -l /sys/class/net/", "lsof -nP -iTCP -sTCP:LISTEN", "lsns -t net", "lsblk", "hostname", "hostname -I", "date", "date -u", "cat /etc/hosts", "ss -tulpn", "netstat -rn"]) is(c, "read");
 // "ls" o "hostname" como prefijo no deben convertir en consulta otro comando.
 for (const c of ["hostnamectl set-hostname srv01", "date -s '2026-01-01 00:00'", "lsattr +i /etc/hosts"]) is(c, "change");
@@ -195,8 +197,27 @@ is("ethtool -s eth0 speed 100 duplex full", "disruptive");
 is("ethtool -S eth0", "read");
 is("iptables -F", "change");
 
+// ---------- Teclas de edición: misma semántica que split_commits (src-tauri/src/scripts.rs) ----------
+assert.equal(editedLine("show ver\x15rel\x7fload"), "reload");
+assert.equal(editedLine("show clock reload\x17"), "show clock ");
+assert.equal(editedLine("reload\x03"), "");
+assert.equal(editedLine("reloa\x08\x08\x08\x08\x08\x08\x08show"), "show");
+assert.equal(editedLine("a 😀\x7fb"), "a b");
+// Lo que verá el equipo y cada tramo por separado: gana el mayor riesgo.
+is("show ver\x15rel\x7fload", "disruptive");
+is("show clock reload\x17", "read");
+is("show version\x03", "read");
+// Esc, Ctrl-D, C1 y caracteres de dirección: no se sabe qué ejecuta, se confirma siempre.
+for (const c of ["show version\x1b[A", "show\x04", "show\u202ereload", "show\u200bversion", "show\x9bA"]) is(c, "disruptive");
+
 // ---------- Rendimiento: patrones lineales (sin retroceso catastrófico) ----------
-for (const cmd of ["fw ctl conntab " + "-sip=192.0.2.1 ".repeat(800), "show " + "a ".repeat(4000), "tcpdump " + "-n ".repeat(3000), "monitor traffic " + "interface ge-0/0/0 ".repeat(500)]) {
+for (const cmd of [
+  "fw ctl conntab " + "-sip=192.0.2.1 ".repeat(800), "show " + "a ".repeat(4000), "tcpdump " + "-n ".repeat(3000), "monitor traffic " + "interface ge-0/0/0 ".repeat(500),
+  "ip " + "-n -n ".repeat(1500) + "zz", "arp " + "-a ".repeat(3000) + "-zz", "curl " + "-k ".repeat(3000), "netsh " + "a ".repeat(3000) + "x",
+  "ssh " + "-o x ".repeat(2000), "firewall-cmd " + "--zone=a ".repeat(2000) + "x", "nmcli " + "-f a ".repeat(2000), "sysctl " + "-a ".repeat(3000) + "=",
+  "sudo " + "-u -u ".repeat(1500), "Get-X | " + "% { a } | ".repeat(500), "x\b".repeat(3000), "date " + "-x ".repeat(3000) + "1", "nc " + "-v ".repeat(3000),
+  "pfctl " + "-v ".repeat(3000) + "-F", "ls " + "2> ".repeat(3000),
+]) {
   fastEnough(`computeRisk con entrada larga (${cmd.slice(0, 20)}…)`, 50, () => computeRisk(cmd));
 }
 
