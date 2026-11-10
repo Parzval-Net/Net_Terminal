@@ -82,6 +82,11 @@ impl AutoFill {
             return;
         }
         let line = self.line.trim();
+        // Responde un pedido de login (contraseña del bastión, passphrase, OTP) o la pregunta de llave
+        // de host: no ejecuta un comando, el autocompletado del destino sigue armado.
+        if answers_login_request(line) {
+            return;
+        }
         if login_prompt_with_typed(line) && !self.user_sent {
             self.user_sent = true;
             return;
@@ -143,7 +148,12 @@ impl AutoFill {
             return None;
         }
         if line.ends_with("password:") || line.ends_with("contraseña:") {
-            if line.contains("passphrase") || NOT_LOGIN.iter().any(|w| line.contains(w)) {
+            if line.contains("passphrase") {
+                // Passphrase de la llave local: nunca recibe la contraseña guardada, pero si luego ssh
+                // cae al "Password:" del destino ese sí se responde.
+                return None;
+            }
+            if NOT_LOGIN.iter().any(|w| line.contains(w)) {
                 self.stop();
                 return None;
             }
@@ -225,6 +235,16 @@ fn names_host(line: &str, host: &str) -> bool {
     let line = line.trim_start();
     line.ends_with(&format!("@{host}'s password:"))
         || (line.starts_with('(') && line.ends_with("password:") && line.contains(&format!("@{host}) ")))
+}
+
+/// La línea pendiente es un pedido de contraseña, passphrase, código (OTP) o la pregunta de llave de
+/// host: el Enter del usuario lo está respondiendo (la clave no se ve en pantalla).
+fn answers_login_request(line: &str) -> bool {
+    if line.contains(HOSTKEY) {
+        return true;
+    }
+    line.ends_with(':')
+        && ["password", "passphrase", "contraseña", "verification code", "passcode", "otp", "token", "código"].iter().any(|k| line.contains(k))
 }
 
 /// La línea pendiente es un pedido de usuario seguido de lo tecleado a mano ("username: noc",
@@ -584,6 +604,49 @@ mod tests {
         // Una línea con espacios que no es un pedido de usuario ("Last login: ...") desarma.
         let (mut a, t) = af(Some("noc"));
         a.feed("Last login: Mon Jan 1", t);
+        a.user_enter();
+        assert!(a.done());
+    }
+
+    #[test]
+    fn enter_answering_a_login_request_keeps_the_autofill() {
+        // (1) Jump host: el bastión pide su contraseña, el usuario la teclea + Enter; el destino se autocompleta.
+        let t = Instant::now();
+        let mut a = AutoFill::new(Zeroizing::new("S3cret".into()), None, "\r", t).only_host(Some("10.0.0.1".into()));
+        assert_eq!(sent(a.feed("noc@bastion.example's password: ", t)), None);
+        a.user_enter();
+        assert!(!a.done());
+        assert_eq!(sent(a.feed("\r\nnoc@10.0.0.1's password: ", t)).as_deref(), Some("S3cret\r"));
+        // Código OTP del bastión + Enter.
+        let mut a = AutoFill::new(Zeroizing::new("S3cret".into()), None, "\r", t).only_host(Some("10.0.0.1".into()));
+        a.feed("Verification code: ", t);
+        a.user_enter();
+        assert!(!a.done());
+        assert_eq!(sent(a.feed("\r\nPassword: ", t)), None, "con jump host un pedido sin host no se responde");
+        assert_eq!(sent(a.feed("\r\nnoc@10.0.0.1's password: ", t)).as_deref(), Some("S3cret\r"));
+        // (2) Passphrase de llave + Enter, luego la contraseña del destino.
+        let (mut a, t) = af(None);
+        assert_eq!(sent(a.feed("Enter passphrase for key '/home/u/.ssh/id_ed25519': ", t)), None);
+        a.user_enter();
+        assert!(!a.done());
+        assert_eq!(sent(a.feed("\r\nnoc@10.0.0.1's password: ", t)).as_deref(), Some("S3cret\r"));
+        // (3) "yes" a la llave de host + Enter no desarma.
+        let (mut a, t) = af(None);
+        a.feed("Are you sure you want to continue connecting (yes/no/[fingerprint])? yes", t);
+        a.user_enter();
+        assert!(!a.done());
+        assert_eq!(sent(a.feed("\r\nWarning: Permanently added.\r\nPassword: ", t)).as_deref(), Some("S3cret\r"));
+        // (4) Entró con llave, ssh manual y el Password del vecino: no se autocompleta.
+        for shell in ["Welcome to srv01\r\n", "srv01 weird> ssh other"] {
+            let (mut a, t) = af(None);
+            a.feed(shell, t);
+            a.user_enter();
+            assert!(a.done(), "{shell:?}");
+            assert_eq!(sent(a.feed("\r\nPassword: ", t)), None);
+        }
+        // Un "password" en medio de otra línea (no es un pedido pendiente) no es excepción.
+        let (mut a, t) = af(None);
+        a.feed("srv01> echo password", t);
         a.user_enter();
         assert!(a.done());
     }
