@@ -183,7 +183,7 @@ pub struct Guard {
     on_idle: Box<dyn Fn() + Send + Sync>,
 }
 
-/// Marca una transferencia o conexión en curso mientras vive.
+/// Marca una operación válida en curso (transferencia, sesión FTP autenticada) mientras vive.
 pub struct Busy(Arc<Guard>);
 
 impl Drop for Busy {
@@ -215,15 +215,19 @@ impl Guard {
         self.t0.elapsed().as_millis() as u64
     }
 
+    /// Registra actividad válida (reinicia el plazo de inactividad). Solo la llaman los servidores
+    /// ante una operación que sirvió algo: transferencia TFTP iniciada, petición HTTP 2xx/3xx,
+    /// login FTP correcto y sus comandos, mensaje syslog aceptado.
     pub fn touch(&self) {
         self.last.store(self.now_ms(), Ordering::SeqCst);
     }
 
-    /// Decide si se atiende a `ip`. Lo permitido cuenta como actividad; lo rechazado se registra
-    /// (contador y último origen) sin reiniciar el plazo de inactividad.
+    /// Decide si se atiende a `ip` según la lista de clientes permitidos. No cuenta como
+    /// actividad ni siquiera si se permite: un escáner, una conexión sin credenciales o un login
+    /// fallido no deben mantener vivo el servidor. Lo rechazado se registra (contador y último
+    /// origen).
     pub fn admit(&self, ip: IpAddr) -> bool {
         if self.allow.allows(ip) {
-            self.touch();
             return true;
         }
         self.rejected.fetch_add(1, Ordering::SeqCst);
@@ -232,6 +236,9 @@ impl Guard {
         false
     }
 
+    /// Operación válida en curso: cuenta como actividad al empezar y al terminar, y mientras
+    /// viva el servidor no está inactivo. Se crea solo tras validar la operación (no al aceptar
+    /// la conexión o el datagrama).
     pub fn busy(self: &Arc<Self>) -> Busy {
         self.busy.fetch_add(1, Ordering::SeqCst);
         self.touch();
@@ -420,12 +427,35 @@ mod tests {
     }
 
     #[test]
+    fn allowed_but_unvalidated_traffic_does_not_keep_the_server_alive() {
+        // Un escáner desde una IP permitida (o sin filtro) que no completa nada útil.
+        let (g, _, _) = guard(&[], Some(120));
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(40));
+            assert!(g.admit(ip("203.0.113.7")), "se atiende, pero no cuenta como actividad");
+        }
+        assert!(g.idle_expired());
+        // Una operación válida sí reinicia el plazo.
+        g.touch();
+        assert!(!g.idle_expired());
+        std::thread::sleep(Duration::from_millis(130));
+        assert!(g.idle_expired());
+        // Y una operación en curso la sostiene.
+        let b = g.busy();
+        std::thread::sleep(Duration::from_millis(130));
+        assert!(!g.idle_expired());
+        drop(b);
+        assert!(!g.idle_expired());
+    }
+
+    #[test]
     fn idle_timeout_stops_and_notifies_once() {
         let (g, events, idled) = guard(&[], Some(150));
         let flag = AtomicBool::new(true);
         assert!(g.pulse(&flag) && flag.load(Ordering::SeqCst));
         std::thread::sleep(Duration::from_millis(100));
-        assert!(g.admit(ip("10.0.0.1")), "la actividad reinicia el plazo");
+        assert!(g.admit(ip("10.0.0.1")));
+        g.touch(); // actividad válida: reinicia el plazo
         std::thread::sleep(Duration::from_millis(100));
         assert!(g.pulse(&flag), "100 ms desde la última actividad: sigue activo");
         std::thread::sleep(Duration::from_millis(100));

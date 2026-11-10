@@ -5,7 +5,10 @@
 //! Seguridad:
 //! - Apagado por defecto. Solo escucha en 127.0.0.1.
 //! - Token bearer obligatorio, comparado en tiempo constante.
-//! - Rechaza peticiones con Origin de un navegador que no sea localhost (DNS rebinding).
+//! - Rechaza peticiones con Origin de un navegador que no sea localhost (DNS rebinding). El
+//!   origen se analiza de forma estricta: solo esquema, host loopback y puerto numérico.
+//! - Plazo para el cuerpo de la petición: un cliente lento no retiene un cupo de conexión
+//!   (tiny_http no permite plazos de socket; ver `read_body_timed`).
 //! - Enviar comandos o abrir sesiones requiere aprobación del usuario en la app
 //!   (siempre en terminales locales), y se puede dejar en solo lectura.
 
@@ -15,9 +18,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tiny_http::{Header, Method, Response, Server};
 
@@ -28,6 +32,8 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PENDING_APPROVALS: usize = 3;
 /// Peticiones atendidas a la vez; el resto recibe 503.
 const MAX_CONCURRENT: usize = 16;
+/// Plazo para recibir el cuerpo de una petición una vez validada la cabecera.
+const BODY_TIMEOUT: Duration = Duration::from_secs(15);
 /// Largo mínimo del token bearer.
 const MIN_TOKEN: usize = 24;
 
@@ -164,22 +170,46 @@ fn header<'a>(req: &'a tiny_http::Request, name: &str) -> Option<&'a str> {
         .map(|h| h.value.as_str())
 }
 
+/// Origen (cabecera Origin) o autoridad (cabecera Host, con "http://" delante) del propio
+/// equipo. Sin cabecera Origin se acepta (clientes que no son navegadores). Con ella el análisis
+/// es estricto: esquema http o https, host exactamente `localhost`, `127.0.0.1` o `[::1]` y,
+/// opcionalmente, un puerto numérico (1 a 65535). Cualquier otra cosa se rechaza: credenciales o
+/// "@" ("http://127.0.0.1:80@evil"), ruta, query, fragmento, barras invertidas, espacios o
+/// caracteres de control. Un Origin legítimo de navegador no lleva nada de eso.
 fn origin_allowed(origin: Option<&str>) -> bool {
     match origin {
         None => true,
-        Some(o) => {
-            let rest = o.split("://").nth(1).unwrap_or("");
-            // IPv6 entre corchetes: el host termina en "]" (sus ":" no separan el puerto). Solo
-            // se acepta el loopback exacto, sin nada más que un puerto numérico detrás.
-            if let Some(v6) = rest.strip_prefix('[') {
-                let Some((ip, tail)) = v6.split_once(']') else { return false };
-                let tail = tail.split(['/', '?', '#']).next().unwrap_or("");
-                let port_ok = tail.is_empty() || tail.strip_prefix(':').is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-                return ip == "::1" && port_ok;
-            }
-            let host = rest.split([':', '/']).next().unwrap_or("");
-            matches!(host, "127.0.0.1" | "localhost")
+        Some(o) => strict_loopback_origin(o),
+    }
+}
+
+fn strict_loopback_origin(o: &str) -> bool {
+    let strip = |scheme: &str| o.get(..scheme.len()).filter(|p| p.eq_ignore_ascii_case(scheme)).map(|_| &o[scheme.len()..]);
+    let Some(rest) = strip("http://").or_else(|| strip("https://")) else { return false };
+    if rest.bytes().any(|b| b <= b' ' || b == 0x7F || matches!(b, b'@' | b'/' | b'\\' | b'?' | b'#' | b'%')) {
+        return false;
+    }
+    // IPv6 entre corchetes: el host termina en "]" (sus ":" no separan el puerto).
+    let (host, port) = if let Some(v6) = rest.strip_prefix('[') {
+        let Some((ip, tail)) = v6.split_once(']') else { return false };
+        if ip != "::1" {
+            return false;
         }
+        ("[::1]", if tail.is_empty() { None } else { Some(tail.strip_prefix(':')) })
+    } else {
+        match rest.split_once(':') {
+            Some((h, p)) => (h, Some(Some(p))),
+            None => (rest, None),
+        }
+    };
+    if !(host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]") {
+        return false;
+    }
+    match port {
+        None => true,
+        // Algo pegado tras el corchete que no es ":puerto" ("[::1]evil") llega como Some(None).
+        Some(None) => false,
+        Some(Some(p)) => !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n)),
     }
 }
 
@@ -202,7 +232,11 @@ fn serve(app: AppHandle, req: tiny_http::Request) {
 }
 
 /// Validación HTTP y despacho JSON-RPC; `dispatch` atiende cada mensaje (inyectable en pruebas).
-fn serve_with(mut req: tiny_http::Request, cfg: &McpConfig, dispatch: impl Fn(&Value) -> Option<Value>) {
+fn serve_with(req: tiny_http::Request, cfg: &McpConfig, dispatch: impl Fn(&Value) -> Option<Value>) {
+    serve_timed(req, cfg, BODY_TIMEOUT, dispatch)
+}
+
+fn serve_timed(req: tiny_http::Request, cfg: &McpConfig, body_timeout: Duration, dispatch: impl Fn(&Value) -> Option<Value>) {
     if req.url().split('?').next() != Some("/mcp") {
         return reply(req, 404, None);
     }
@@ -221,10 +255,14 @@ fn serve_with(mut req: tiny_http::Request, cfg: &McpConfig, dispatch: impl Fn(&V
         return reply(req, 405, None);
     }
 
-    let mut body = String::new();
-    if req.as_reader().take(MAX_BODY).read_to_string(&mut body).is_err() {
-        return reply(req, 400, None);
-    }
+    // Lectura con plazo: un cliente con token que envía el cuerpo lento (o no lo termina) no
+    // retiene para siempre uno de los cupos de conexión.
+    let (req, body) = match read_body_timed(req, MAX_BODY, body_timeout) {
+        Body::Read(req, body) => (req, body),
+        Body::Invalid(req) => return reply(req, 400, None),
+        Body::Busy(req) => return reply(req, 503, None),
+        Body::TimedOut => return,
+    };
     let Ok(msg) = serde_json::from_str::<Value>(&body) else {
         return reply(req, 400, Some(rpc_error(Value::Null, -32700, "JSON inválido")));
     };
@@ -237,6 +275,88 @@ fn serve_with(mut req: tiny_http::Request, cfg: &McpConfig, dispatch: impl Fn(&V
         (_, 0) => reply(req, 202, None),
         (false, _) => reply(req, 200, responses.into_iter().next()),
         (true, _) => reply(req, 200, Some(Value::Array(responses))),
+    }
+}
+
+/// Lee hasta `max` bytes del cuerpo como texto UTF-8. Entre lecturas revisa el plazo total, así
+/// que un cliente que envía de a poco no lo alarga indefinidamente.
+fn read_body(r: &mut dyn Read, max: u64, timeout: Duration) -> Result<String, ()> {
+    let start = Instant::now();
+    let mut body = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut r = r.take(max);
+    loop {
+        if start.elapsed() > timeout {
+            return Err(());
+        }
+        match r.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(()),
+        }
+    }
+    String::from_utf8(body).map_err(|_| ())
+}
+
+/// Lectores de cuerpo que superaron el plazo y siguen bloqueados hasta que el cliente cierre o
+/// envíe algo. tiny_http no expone el socket para ponerle un plazo de lectura, así que la única
+/// forma de no retener el cupo de conexión es dejar la lectura en un hilo aparte y abandonarla.
+static ORPHANS: AtomicUsize = AtomicUsize::new(0);
+/// Con tantos lectores abandonados no se aceptan cuerpos nuevos (503): el costo en hilos tiene tope.
+const MAX_ORPHANS: usize = 16;
+
+/// Resultado de leer el cuerpo con plazo.
+enum Body {
+    /// Cuerpo completo (la petición vuelve para responderla).
+    Read(tiny_http::Request, String),
+    /// Cuerpo inválido (muy largo, no UTF-8 o error de lectura): responder 400.
+    Invalid(tiny_http::Request),
+    /// El cliente no terminó de enviarlo a tiempo: el hilo lector sigue con la conexión y ya no se
+    /// puede responder; el cupo de conexión queda libre.
+    TimedOut,
+    /// Demasiados lectores abandonados: la petición vuelve para responder 503.
+    Busy(tiny_http::Request),
+}
+
+fn read_body_timed(req: tiny_http::Request, max: u64, timeout: Duration) -> Body {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    if ORPHANS.load(Ordering::SeqCst) >= MAX_ORPHANS {
+        return Body::Busy(req);
+    }
+    // Estado compartido: 0 esperando, 1 abandonado por el plazo, 2 el lector ya entregó.
+    let state = Arc::new(AtomicU8::new(0));
+    let (tx, rx) = channel();
+    let st = state.clone();
+    std::thread::spawn(move || {
+        let mut req = req;
+        let res = read_body(req.as_reader(), max, timeout);
+        if st.compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            let _ = tx.send((req, res));
+        } else {
+            // Se abandonó mientras leía: la conexión se cierra al soltar `req`.
+            ORPHANS.fetch_sub(1, Ordering::SeqCst);
+        }
+    });
+    // `read_body` ya corta por su cuenta cuando llegan datos; este plazo cubre el bloqueo en una lectura.
+    match rx.recv_timeout(timeout + Duration::from_millis(250)) {
+        Ok((req, Ok(body))) => Body::Read(req, body),
+        Ok((req, Err(()))) => Body::Invalid(req),
+        Err(_) => {
+            // Se suma antes de abandonar: el lector resta solo si ve el estado "abandonado".
+            ORPHANS.fetch_add(1, Ordering::SeqCst);
+            if state.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                Body::TimedOut
+            } else {
+                ORPHANS.fetch_sub(1, Ordering::SeqCst);
+                // El lector terminó justo ahora: el resultado ya va en camino.
+                match rx.recv() {
+                    Ok((req, Ok(body))) => Body::Read(req, body),
+                    Ok((req, Err(()))) => Body::Invalid(req),
+                    Err(_) => Body::TimedOut,
+                }
+            }
+        }
     }
 }
 
@@ -652,7 +772,7 @@ mod tests {
     /// IPv6, una forma equivalente o algo pegado tras el corchete se rechaza.
     #[test]
     fn origin_allowed_accepts_ipv6_loopback() {
-        for ok in ["http://[::1]:8080", "http://[::1]", "https://[::1]/mcp", "http://[::1]:47821/x?y"] {
+        for ok in ["http://[::1]:8080", "http://[::1]", "https://[::1]:47821"] {
             assert!(origin_allowed(Some(ok)), "{ok}");
         }
         // Header Host de un cliente que se conecta por IPv6.
@@ -675,10 +795,52 @@ mod tests {
 
     #[test]
     fn origin_allowed_edge_cases() {
-        for ok in ["http://127.0.0.1:1/x", "https://localhost"] {
+        for ok in ["http://127.0.0.1:1", "https://localhost", "http://localhost:65535", "HTTP://LOCALHOST:3000", "http://127.0.0.1"] {
             assert!(origin_allowed(Some(ok)), "{ok}");
         }
         for bad in [
+            // Credenciales, "@", ruta, query o fragmento: el origen es solo esquema, host y puerto.
+            "http://127.0.0.1:80@evil",
+            "http://127.0.0.1:80@evil.example",
+            "http://localhost:pass@evil.example",
+            "http://user:pass@localhost",
+            "http://@localhost",
+            "http://localhost/",
+            "http://127.0.0.1:1/x",
+            "https://[::1]/mcp",
+            "http://[::1]:47821/x?y",
+            "http://localhost?x=1",
+            "http://localhost#frag",
+            "http://localhost:3000/#x",
+            "http://localhost\\@evil",
+            "http://localhost%2F@evil",
+            "http://localhost ",
+            " http://localhost",
+            "http://local\thost",
+            "http://localhost\r\nX: y",
+            // Esquema, puerto y host.
+            "ftp://localhost",
+            "file://localhost",
+            "//localhost",
+            "localhost",
+            "http:/localhost",
+            "http://",
+            "http://:80",
+            "http://localhost:",
+            "http://localhost:0",
+            "http://localhost:65536",
+            "http://localhost:99999",
+            "http://localhost:123456",
+            "http://localhost:80a",
+            "http://localhost:-1",
+            "http://localhost:80:80",
+            "http://localhost.",
+            "http://LOCALHOST.evil.example",
+            "http://127.1",
+            "http://2130706433",
+            "http://0x7f.0.0.1",
+            "http://127.0.0.1.",
+            "http://[::1]:80@evil.example",
             "http://127.0.0.2",
             "http://0.0.0.0",
             "http://localhost@evil.example",
@@ -689,6 +851,80 @@ mod tests {
         ] {
             assert!(!origin_allowed(Some(bad)), "{bad}");
         }
+    }
+
+    #[test]
+    fn read_body_has_a_total_deadline_and_a_size_cap() {
+        /// Entrega un byte por lectura, con una pausa: un cliente que envía de a poco.
+        struct Trickle(usize);
+        impl Read for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(20));
+                self.0 += 1;
+                buf[0] = b'a';
+                Ok(1)
+            }
+        }
+        let t = Instant::now();
+        assert!(read_body(&mut Trickle(0), MAX_BODY, Duration::from_millis(150)).is_err());
+        assert!(t.elapsed() < Duration::from_secs(2), "tardó {:?}", t.elapsed());
+        // Un error de lectura (plazo del socket) también corta.
+        struct Stalled;
+        impl Read for Stalled {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::WouldBlock.into())
+            }
+        }
+        assert!(read_body(&mut Stalled, MAX_BODY, BODY_TIMEOUT).is_err());
+        // Cuerpo normal, tope de tamaño y UTF-8 inválido.
+        assert_eq!(read_body(&mut &b"hola"[..], MAX_BODY, BODY_TIMEOUT).unwrap(), "hola");
+        assert_eq!(read_body(&mut &b"0123456789"[..], 4, BODY_TIMEOUT).unwrap(), "0123");
+        assert!(read_body(&mut &[0xff, 0xfe][..], MAX_BODY, BODY_TIMEOUT).is_err());
+    }
+
+    #[test]
+    fn a_client_that_never_finishes_the_body_does_not_hold_the_connection_slot() {
+        use std::io::Write;
+        use std::sync::atomic::Ordering;
+        let server = Server::http(("127.0.0.1", 0)).unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let before = ORPHANS.load(Ordering::SeqCst);
+        // Un cupo como el de `configure`: mientras la petición esté en `serve_timed`, ocupa un cupo.
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let active = active.clone();
+            std::thread::spawn(move || {
+                let req = server.recv_timeout(Duration::from_secs(5)).unwrap().expect("sin petición");
+                let t0 = Instant::now();
+                let r = crate::servers::spawn_limited(&active, MAX_CONCURRENT, req, move |req| {
+                    serve_timed(req, &cfg(), Duration::from_millis(300), |m| handle_with(&cfg(), m, fake_call));
+                    let _ = done_tx.send(t0.elapsed());
+                });
+                assert!(r.is_ok());
+            })
+        };
+        // Cabecera válida, Content-Length 5000 (tiny_http solo difiere la lectura del cuerpo sobre 1 KB), llegan 10 bytes y el cliente calla (sin cerrar).
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let head = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:47821\r\nAuthorization: {}\r\nContent-Length: 5000\r\n\r\n0123456789", bearer());
+        s.write_all(head.as_bytes()).unwrap();
+        worker.join().unwrap();
+        let took = done_rx.recv_timeout(Duration::from_secs(4)).expect("serve_timed no volvió: el cupo quedó retenido");
+        assert!(took < Duration::from_secs(2), "tardó {took:?}");
+        // El cupo de conexión queda libre aunque el cliente siga conectado.
+        let t = Instant::now();
+        while active.load(Ordering::SeqCst) > 0 && t.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 0, "cupo liberado");
+        assert_eq!(ORPHANS.load(Ordering::SeqCst), before + 1, "el lector abandonado se cuenta");
+        // Al cerrar el cliente, el lector abandonado termina y deja de contarse.
+        drop(s);
+        let t = Instant::now();
+        while ORPHANS.load(Ordering::SeqCst) > before && t.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(ORPHANS.load(Ordering::SeqCst), before);
     }
 
     #[test]

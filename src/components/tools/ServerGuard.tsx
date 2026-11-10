@@ -134,6 +134,11 @@ export function ServerGuardPanel({
             />
           </Label>
           {g.allowErrors.length > 0 && <p className="text-[11.5px] text-danger">{g.allowErrors[0]}. Corrígelo para poder iniciar.</p>}
+          {(kind === "tftp" || kind === "syslog") && (
+            <p className="text-[11.5px] text-muted">
+              En UDP el origen de un paquete se puede falsificar: el filtro por IP reduce el ruido, pero no autentica. Úsalo en una red de gestión aislada.
+            </p>
+          )}
           {g.stale && <p className="text-[11.5px] text-warn">La IP guardada ya no está en este equipo (cambió de red): se usa la de la ruta por defecto.</p>}
           {noFilter && g.bind === ALL && (
             <p className="flex items-start gap-1.5 text-[11.5px] text-warn">

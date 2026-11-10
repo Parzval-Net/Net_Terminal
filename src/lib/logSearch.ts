@@ -58,6 +58,8 @@ export interface Hit {
   text: string;
   /** Rangos [inicio, fin) de la coincidencia dentro de `text`, en caracteres (puntos de código). */
   ranges: [number, number][];
+  /** Coincidencias de la línea que no se resaltan (tope de 50 por línea o fuera del texto mostrado). */
+  extra?: number;
   before: string[];
   after: string[];
 }

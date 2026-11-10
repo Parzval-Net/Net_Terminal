@@ -111,6 +111,22 @@ pub fn mask_line_secrets(line: &str, found: &mut Vec<String>) -> String {
             _ => parts.push((ws, c.to_string())),
         }
     }
+    // Credenciales dentro de una URL (ftp://usuario:clave@host/…): se enmascara la clave.
+    let url_re = crate::logfile::url_cred_regex();
+    for (ws, s) in parts.iter_mut() {
+        if *ws || !s.contains("://") {
+            continue;
+        }
+        for c in url_re.captures_iter(s.as_bytes()) {
+            if let Some(pass) = c.get(3) {
+                found.push(String::from_utf8_lossy(pass.as_bytes()).into_owned());
+            }
+        }
+        let masked = url_re.replace_all(s.as_bytes(), &b"${1}${2}:****@"[..]);
+        if let std::borrow::Cow::Owned(v) = masked {
+            *s = String::from_utf8_lossy(&v).into_owned();
+        }
+    }
     let words: Vec<usize> = parts.iter().enumerate().filter(|(_, (w, _))| !w).map(|(i, _)| i).collect();
     if words.is_empty() {
         return line.to_string();
@@ -429,6 +445,21 @@ mod tests {
         ];
         for (input, want) in cases {
             assert_eq!(mask_line(input), want, "entrada: {input}");
+        }
+        // Credenciales dentro de una URL (copy ftp:// con la clave efímera del FTP integrado).
+        for (input, want) in [
+            ("copy running-config ftp://nt:k7h3m9x2qa@192.0.2.10/core.cfg", "copy running-config ftp://nt:****@192.0.2.10/core.cfg"),
+            ("archive path scp://ops:Cl4ve@[2001:db8::1]:22/bk", "archive path scp://ops:****@[2001:db8::1]:22/bk"),
+            ("kron policy-list x url \"https://u:p@h/x\";", "kron policy-list x url \"https://u:****@h/x\";"),
+        ] {
+            assert_eq!(mask_line(input), want, "entrada: {input}");
+        }
+        let mut found = Vec::new();
+        mask_line_secrets("boot ftp://nt:k7h3m9x2qa@192.0.2.10/fw.bin", &mut found);
+        assert_eq!(found, vec!["k7h3m9x2qa".to_string()], "la huella se calcula sobre la clave, no se guarda");
+        // Sin credenciales o con puerto/IPv6: sin cambios.
+        for keep in ["copy tftp://192.0.2.10/fw.bin flash:", "url http://host:8080/ruta@x", "url ftp://[2001:db8::1]:21/x", "url ftp://nt@192.0.2.10/fw.bin"] {
+            assert_eq!(mask_line(keep), keep);
         }
         // Líneas sin secretos quedan intactas.
         for keep in [

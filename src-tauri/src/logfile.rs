@@ -219,9 +219,35 @@ fn secret_regex() -> &'static Regex {
     })
 }
 
-/// Reemplaza por **** los valores secretos de una línea.
+/// Credenciales dentro de una URL (`ftp://usuario:clave@host/…`, como las arma "copy ftp:" de
+/// Cisco con la contraseña efímera del FTP integrado): grupos 1 = esquema, 2 = usuario,
+/// 3 = clave. El usuario no admite "[" ni "]" (una IPv6 entre corchetes no es usuario) y la clave
+/// no cruza un "/" (el puerto de "http://host:8080/ruta@x" no es una clave); si la clave
+/// trae un "@", se toma hasta el último antes de la ruta. Sin modo Unicode, tiempo lineal.
+pub(crate) fn url_cred_regex() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r#"(?i-u)\b((?:s?ftp|scp|https?|tftp)://)([^\s/:@\[\]]+):([^\s/]+)@"#).expect("regex de credenciales en URL"))
+}
+
+/// Reemplaza por **** los valores secretos de una línea: los de las configuraciones de equipos
+/// y la clave de las URL con credenciales.
 pub fn mask_line(line: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    secret_regex().replace_all(line, &b"${1}${2}${3}****"[..])
+    use std::borrow::Cow;
+    // Camino rápido: sin "://" no hay URL que revisar.
+    let line: Cow<[u8]> = if line.windows(3).any(|w| w == b"://") {
+        match url_cred_regex().replace_all(line, &b"${1}${2}:****@"[..]) {
+            Cow::Borrowed(_) => Cow::Borrowed(line),
+            Cow::Owned(v) => Cow::Owned(v),
+        }
+    } else {
+        Cow::Borrowed(line)
+    };
+    let secret = secret_regex();
+    if secret.is_match(&line) {
+        Cow::Owned(secret.replace_all(&line, &b"${1}${2}${3}****"[..]).into_owned())
+    } else {
+        line
+    }
 }
 
 /// Escritor del log: quita ANSI, agrega la hora, enmascara y rota.
@@ -592,6 +618,54 @@ mod tests {
         }
         // Bytes no UTF-8 (Latin-1) no rompen el enmascarado.
         assert_eq!(&*mask_line(b"secret 0 cl\xe1ve"), b"secret 0 ****");
+    }
+
+    #[test]
+    fn masks_credentials_inside_urls() {
+        let m = |s: &str| String::from_utf8(mask_line(s.as_bytes()).into_owned()).unwrap();
+        let cases = [
+            ("Router#copy ftp://nt:k7h3m9x2qa@192.0.2.10/fw.bin flash:fw.bin", "Router#copy ftp://nt:****@192.0.2.10/fw.bin flash:fw.bin"),
+            ("copy running-config ftp://nt:abc23@10.1.1.1/core.cfg", "copy running-config ftp://nt:****@10.1.1.1/core.cfg"),
+            ("copy SFTP://admin:P4ss@host/x", "copy SFTP://admin:****@host/x"),
+            ("scp://u:p@h:22/f http://a:b@c/d", "scp://u:****@h:22/f http://a:****@c/d"),
+            ("tftp://u:p@h/f https://u:p@h/f", "tftp://u:****@h/f https://u:****@h/f"),
+            // IPv6 entre corchetes con credenciales y la clave con "@".
+            ("ftp://nt:abc@[2001:db8::1]:21/x", "ftp://nt:****@[2001:db8::1]:21/x"),
+            ("ftp://nt:a@b@10.0.0.1/x", "ftp://nt:****@10.0.0.1/x"),
+            ("\"ftp://nt:abc@10.0.0.1/x\"", "\"ftp://nt:****@10.0.0.1/x\""),
+        ];
+        for (input, want) in cases {
+            assert_eq!(m(input), want, "{input}");
+        }
+        // URL sin credenciales, con puerto, IPv6 y arrobas en la ruta: no cambian.
+        for keep in [
+            "copy tftp://192.0.2.10/fw.bin flash:",
+            "http://192.0.2.10:8080/fw.bin",
+            "http://host:8080/ruta@x",
+            "ftp://[2001:db8::1]:21/x",
+            "ftp://[::1]/a:b@c",
+            "ftp://nt@192.0.2.10/fw.bin",
+            "mailto:ops@example.com y https://example.com/x",
+            "  ::// sin esquema:x@y",
+        ] {
+            assert_eq!(m(keep), keep);
+        }
+        // Convive con el enmascarado de secretos de la misma línea.
+        assert_eq!(m("enable secret 5 $1$a ftp://nt:zz@h/x"), "enable secret 5 **** ftp://nt:****@h/x");
+    }
+
+    #[test]
+    fn url_credentials_are_masked_in_the_written_log() {
+        let dir = tmp();
+        let o = LogOptions { pattern: "u".into(), timestamps: false, mask: true, ..Default::default() };
+        let mut w = LogWriter::create(&dir, o, vars()).unwrap();
+        w.write(b"Router#copy ftp://nt:k7h3m9x2qa@192.0.2.10/fw.bin flash:\r\nDestination filename? \r\n");
+        let p = w.path().to_path_buf();
+        drop(w);
+        let text = std::fs::read_to_string(p).unwrap();
+        assert!(text.contains("ftp://nt:****@192.0.2.10/fw.bin"), "{text}");
+        assert!(!text.contains("k7h3m9x2qa"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
