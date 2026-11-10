@@ -2585,7 +2585,7 @@
       "cmd": "execute backup config tftp {{archivo}} {{ip}}",
       "desc": "Respalda la configuración en un servidor TFTP.",
       "cat": "Configuración",
-      "risk": "read",
+      "risk": "change",
       "note": "TFTP viaja en claro; preferir SFTP o un canal seguro para equipos productivos. La contraseña final es opcional y protege el contenido del respaldo.",
       "source": "https://docs.fortinet.com/document/fortigate/7.4.8/cli-reference/229031989/execute-backup"
     },
@@ -2593,7 +2593,7 @@
       "cmd": "execute backup config usb {{archivo}}",
       "desc": "Respalda la configuración en un pendrive USB conectado al equipo.",
       "cat": "Configuración",
-      "risk": "read",
+      "risk": "change",
       "source": "https://docs.fortinet.com/document/fortigate/7.4.9/cli-reference/229031989"
     },
     {

@@ -950,7 +950,7 @@
       "cmd": "copy running-config tftp://{{ip}}/{{archivo}}",
       "desc": "Respalda la configuración en ejecución en un servidor TFTP.",
       "cat": "Configuración",
-      "risk": "read",
+      "risk": "change",
       "note": "Modo Privileged EXEC (Switch#).",
       "platforms": [
         "gwn-sw"

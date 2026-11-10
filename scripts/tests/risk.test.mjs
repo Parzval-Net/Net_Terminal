@@ -587,18 +587,7 @@ for (const v of vendors) for (const c of v.commands) {
 // Respaldos hacia un servidor o una memoria USB y conversiones que escriben un archivo: el catálogo los declara consulta,
 // pero sacan datos del equipo o escriben en disco. El motor los sube a cambio (la app los marca "ajustado") hasta que
 // se corrija la declaración del catálogo; la lista es exacta para que esa corrección se note.
-const TRANSFER_ESCALATED = [
-  'aruba.json: read -> change: "copy startup-config tftp {{ip}} {{archivo}}"',
-  'aruba.json: read -> change: "copy running-config tftp {{ip}} {{archivo}}"',
-  'fortinet.json: read -> change: "execute backup config tftp {{archivo}} {{ip}}"',
-  'fortinet.json: read -> change: "execute backup config usb {{archivo}}"',
-  'fortiswitch.json: read -> change: "execute backup config tftp {{archivo}} {{servidor_tftp}}"',
-  'grandstream.json: read -> change: "copy running-config tftp://{{ip}}/{{archivo}}"',
-  'windows.json: read -> change: "pktmon etl2pcap {{archivo}}.etl --out {{archivo}}.pcapng"',
-  'commands.ts cisco: read -> change: "copy running-config tftp://{{ip}}/{{archivo}}"',
-  'commands.ts huawei: read -> change: "tftp {{ip}} put vrpcfg.zip"',
-  'commands.ts fortinet: read -> change: "execute backup config tftp {{archivo}} {{ip}}"',
-];
+const TRANSFER_ESCALATED = [];
 assert.deepEqual(escalated.filter((e) => !TRANSFER_ESCALATED.includes(e)), [], "comandos del catálogo cuyo riesgo calculado supera al declarado");
 assert.deepEqual(TRANSFER_ESCALATED.filter((e) => !escalated.includes(e)), [], "transferencias que el catálogo ya declara cambio: quitarlas de TRANSFER_ESCALATED");
 assert.ok(total > 1700 && reads > 1000, `catálogo con ${total} comandos (${reads} consultas)`);

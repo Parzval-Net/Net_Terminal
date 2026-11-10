@@ -83,7 +83,11 @@ const req = (detail, over = {}) => ({ tool: "run_command", detail, connection: "
     assert.deepEqual(ok(cmd), { auto: false, reason: "change" }, cmd);
   }
   assert.equal(ok("show running-config").auto, true);
-  assert.equal(ok("ping 192.0.2.10").auto, true);
+  // Clientes de red: consulta para el motor, pero podrían sacar un dato en el destino; siempre con diálogo.
+  for (const c of ["ping 192.0.2.10", "ping secreto.example.test", "traceroute 192.0.2.10", "nslookup secreto.example.test", "curl http://192.0.2.10/?d=x",
+    "execute ping secreto.example.test", "do ping 192.0.2.10", "show clock | ping x", "ssh 192.0.2.10", "telnet 192.0.2.10 23", "/usr/bin/curl http://192.0.2.10/", "PING.EXE 192.0.2.10"])
+    assert.equal(ok(c).auto, false, c);
+  for (const c of ["show ip ssh", "show hosts", "show ping-stats", "show running-config", "get system status", "display ip routing-table"]) assert.equal(W.contactsHost(c), false, c);
   // La app decide con ese mismo motor, no con una copia: useMcp pasa el computeRisk de packs.ts a autoApprove.
   const hook = readFileSync(new URL("../../src/lib/useMcp.ts", import.meta.url), "utf8");
   assert.ok(/import \{[^}]*\bcomputeRisk\b[^}]*\} from "\.\/packs"/.test(hook), "useMcp.ts debe importar computeRisk de ./packs");

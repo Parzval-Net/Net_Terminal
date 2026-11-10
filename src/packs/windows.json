@@ -1351,7 +1351,7 @@
       "cmd": "pktmon etl2pcap {{archivo}}.etl --out {{archivo}}.pcapng",
       "desc": "Convierte la captura ETL a formato pcapng para abrirla en Wireshark.",
       "cat": "Diagnóstico",
-      "risk": "read",
+      "risk": "change",
       "note": "CMD o PowerShell. Requiere consola elevada (administrador). Pktmon viene incluido desde Windows 10 1809 y Server 2019; en Server 2016 verificar en tu versión. Disponible desde Windows 10 2004.",
       "source": "https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/pktmon-pcapng"
     },

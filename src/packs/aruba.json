@@ -2438,7 +2438,7 @@
       "cmd": "copy startup-config tftp {{ip}} {{archivo}}",
       "desc": "Respalda la startup-config en un servidor TFTP.",
       "cat": "Configuración",
-      "risk": "read",
+      "risk": "change",
       "note": "Variante: 'copy running-config tftp <ip> <archivo>'.",
       "platforms": [
         "aossw"
@@ -2449,7 +2449,7 @@
       "cmd": "copy running-config tftp {{ip}} {{archivo}}",
       "desc": "Respalda la running-config en un servidor TFTP.",
       "cat": "Configuración",
-      "risk": "read",
+      "risk": "change",
       "platforms": [
         "aossw"
       ],

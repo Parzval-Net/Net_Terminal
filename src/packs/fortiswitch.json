@@ -441,7 +441,7 @@
       "cmd": "execute backup config tftp {{archivo}} {{servidor_tftp}}",
       "desc": "Respalda la configuración del switch en un servidor TFTP.",
       "cat": "Configuración",
-      "risk": "read",
+      "risk": "change",
       "source": "https://docs.fortinet.com/document/fortiswitch/7.2.2/fortiswitchos-cli-reference/434023/execute"
     },
     {

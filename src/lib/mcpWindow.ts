@@ -75,9 +75,33 @@ export const revokeOne = (list: readonly ConsultWindow[], conn: string, clientKe
   revokeWhere(list, (w) => w.conn === conn && w.clientKey === clientKey);
 
 /**
+ * Comandos que contactan al destino que se les escribe (ping, traceroute, nslookup, curl, ssh…). Son
+ * consulta para el motor de riesgo, pero un agente podría sacar un dato ya visto poniéndolo en el nombre
+ * de destino o en la URL, así que nunca pasan por la ventana: siempre piden aprobación.
+ */
+const HOST_CLIENTS = new Set(
+  (
+    "ping ping6 traceroute traceroute6 tracert tracepath tracepath6 pathping mtr arping nping hping3 nslookup dnslookup dig host " +
+    "getent nc ncat curl wget openssl ssh telnet stelnet resolve-dnsname test-netconnection tnc test-connection packet-tracer"
+  ).split(" "),
+);
+const CMD_PREFIX = new Set(["do", "run", "execute", "exec", "exe", "sudo", "admin", "diagnose", "diag"]);
+export function contactsHost(cmd: string): boolean {
+  for (const seg of cmd.toLowerCase().split(/[|;&]+/)) {
+    const words = seg.trim().split(/\s+/);
+    let i = 0;
+    while (i < words.length - 1 && CMD_PREFIX.has(words[i])) i++;
+    // "execute ping-options", "ping6", "ping.exe" y rutas ("/usr/bin/curl") cuentan como el cliente base.
+    const w = (words[i] ?? "").replace(/^.*[\\/]/, "").replace(/\.exe$/, "").replace(/-options$/, "");
+    if (HOST_CLIENTS.has(w)) return true;
+  }
+  return false;
+}
+
+/**
  * ¿Se aprueba sin diálogo? Solo si hay una ventana vigente para ese agente y esa conexión, la
  * herramienta envía comandos, el comando es UNA línea sin caracteres de control, cabe en el tope y
- * `risk` (computeRisk) lo clasifica como `read`. La decisión depende solo del resultado de `risk`.
+ * `risk` (computeRisk) lo clasifica como `read` y no contacta a otro equipo (ver contactsHost).
  */
 export function autoApprove(
   list: readonly ConsultWindow[],
@@ -96,6 +120,7 @@ export function autoApprove(
   if ([...cmd].length > AUTO_MAX_CHARS) return { auto: false, reason: "largo" };
   const r = risk(cmd);
   if (r !== "read") return { auto: false, reason: r };
+  if (contactsHost(cmd)) return { auto: false, reason: "contacta a otro equipo" };
   return { auto: true, risk: r };
 }
 
