@@ -39,6 +39,9 @@ export interface TabBarProps {
   onJumpMark?: (id: string, dir: "prev" | "next") => void;
   onMarks?: (id: string) => void;
   onToggleReadOnly?: (id: string) => void;
+  /** Con "Sesiones visibles para agentes: solo las marcadas": marca o desmarca la sesión de la pestaña. */
+  onToggleAgent?: (id: string) => void;
+  agentMarked?: string[];
   /** Cerrar varias pestañas desde el menú contextual (con un solo aviso). */
   onCloseMany?: (scope: CloseScope, id: string) => void;
   onRename: (id: string, title: string | undefined) => void;

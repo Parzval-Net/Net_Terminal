@@ -38,6 +38,8 @@ interface Props {
   onReconnect: () => void;
   onDisconnect: () => void;
   aiEnabled: boolean;
+  /** Ventanas de consultas de agentes activas (se ven y revocan en Ajustes › Agentes IA). */
+  aiWindows?: number;
   onAi: () => void;
   /** Guarda la conexión rápida de la pestaña como sesión. */
   onSaveAs?: () => void;
@@ -65,6 +67,7 @@ export const StatusBar = memo(function StatusBar({
   onReconnect,
   onDisconnect,
   aiEnabled,
+  aiWindows = 0,
   onAi,
   onSaveAs,
   onFind,
@@ -75,10 +78,12 @@ export const StatusBar = memo(function StatusBar({
   onToggleReadOnly,
 }: Props) {
   const logHintId = useId();
+  const winText = aiWindows > 0 ? `. ${aiWindows} ${aiWindows === 1 ? "ventana de consultas activa" : "ventanas de consultas activas"} (clic para revisar o revocar)` : "";
   const ai = aiEnabled && (
-    <BarBtn onClick={onAi} title="Servidor MCP activo: los agentes de IA pueden conectarse" aria-label="Servidor MCP activo: agentes de IA" className="!text-accent">
+    <BarBtn onClick={onAi} title={`Servidor MCP activo: los agentes de IA pueden conectarse${winText}`} aria-label={`Servidor MCP activo: agentes de IA${winText}`} className="!text-accent">
       <Bot size={12} />
       <span className={LBL}>IA</span>
+      {aiWindows > 0 && <span className="rounded-full bg-accent text-accent-fg px-1 text-[10px] leading-[14px] font-medium tabular-nums">{aiWindows}</span>}
     </BarBtn>
   );
   if (!tab || !state)

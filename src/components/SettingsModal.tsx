@@ -6,6 +6,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import logo from "../assets/logo.svg";
 import type { ModuleId } from "../lib/settings";
 import { AiSettings } from "./AiSettings";
+import type { ConsultWindow } from "../lib/mcpWindow";
 import { useDragResize } from "../lib/useDragResize";
 import { useModal } from "../lib/useModal";
 import { Item, Segmented, Switch } from "./controls";
@@ -35,6 +36,10 @@ interface Props {
   onExportFile: () => void;
   initialSection?: Section;
   mcpStatus: string;
+  /** Ventanas de consultas de agentes vigentes (Agentes IA › revocar). */
+  mcpWindows?: ConsultWindow[];
+  onRevokeWindow?: (conn: string, clientKey: string) => void;
+  onRevokeWindows?: () => void;
   onChange: (patch: Partial<Settings>) => void;
   onClose: () => void;
 }
@@ -70,7 +75,7 @@ const sections: { id: Section; label: string; Icon: typeof Palette; group: strin
   { id: "sessions", label: "Importar y exportar", Icon: ArrowLeftRight, group: "Sesiones y datos", keywords: "sesiones importar exportar portapapeles json putty securecrt mobaxterm ssh config csv carpeta de datos portable archivo cifrado ntx respaldo" },
   { id: "modules", label: "Módulos", Icon: Blocks, group: "Herramientas", keywords: "módulos monitoreo diagnóstico topología subredes velocidad tftp http syslog plugins respaldos herramientas" },
   { id: "alerts", label: "Alertas", Icon: BellRing, group: "Herramientas", keywords: "alertas palabra clave reglas sonido aviso pestaña expresión regular" },
-  { id: "ai", label: "Agentes IA", Icon: Bot, group: "Integraciones", keywords: "agentes ia mcp claude gemini codex puerto token aprobación solo lectura servidor" },
+  { id: "ai", label: "Agentes IA", Icon: Bot, group: "Integraciones", keywords: "agentes ia mcp claude gemini codex puerto token aprobación solo lectura servidor sesiones visibles marcadas auditoría registro ventana consultas recursos prompts" },
   { id: "about", label: "Acerca de", Icon: Info, group: "Acerca de", keywords: "versión actualizaciones buscar ahora github repositorio autor" },
 ];
 
@@ -100,6 +105,9 @@ export function SettingsModal({
   onExportFile,
   initialSection,
   mcpStatus,
+  mcpWindows,
+  onRevokeWindow,
+  onRevokeWindows,
   onChange,
   onClose,
 }: Props) {
@@ -380,7 +388,17 @@ export function SettingsModal({
               </>
             )}
 
-            {section === "ai" && <AiSettings settings={s} status={mcpStatus} onChange={onChange} />}
+            {section === "ai" && (
+              <AiSettings
+                settings={s}
+                status={mcpStatus}
+                sessions={sessions}
+                windows={mcpWindows ?? []}
+                onRevoke={onRevokeWindow}
+                onRevokeAll={onRevokeWindows}
+                onChange={onChange}
+              />
+            )}
 
             {section === "terminal" && (
               <>

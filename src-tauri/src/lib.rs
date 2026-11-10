@@ -15,6 +15,8 @@ mod logfile;
 mod logsearch;
 mod updates;
 mod mcp;
+mod mcp_audit;
+mod mcp_tools;
 mod monitor;
 mod nettools;
 mod plugins;
@@ -537,6 +539,7 @@ fn open_dir(which: String, app: tauri::AppHandle, state: State<'_, AppState>) ->
         "plugins" => state.data_dir.join("plugins"),
         "syslog" => state.data_dir.join("syslog"),
         "backups" => backups::root(&state.data_dir),
+        "mcp-audit" => mcp_audit::dir(&state.data_dir),
         _ => state.data_dir.clone(),
     };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -730,24 +733,49 @@ fn stop_script(run: String, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn mcp_configure(
     enabled: bool,
     port: u16,
     token: String,
     require_approval: bool,
     read_only: bool,
+    visibility: Option<String>,
+    marked: Option<Vec<String>>,
+    scopes: Option<std::collections::HashMap<String, bool>>,
+    audit: Option<bool>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    // Sin los campos nuevos (interfaz anterior) se conserva el comportamiento de siempre.
+    let visibility = mcp::Visibility::parse(visibility.as_deref().unwrap_or("all"), &marked.unwrap_or_default());
+    let scope = |k: &str| scopes.as_ref().and_then(|m| m.get(k).copied()).unwrap_or(true);
+    let scopes = mcp::DataScopes { logs: scope("logs"), backups: scope("backups"), notes: scope("notes") };
     state.mcp.configure(
         app.clone(),
-        mcp::McpConfig { enabled, port, token, require_approval, read_only },
+        mcp::McpConfig { enabled, port, token, require_approval, read_only, visibility, scopes, audit: audit.unwrap_or(false) },
     )
 }
 
+/// Decisión sobre una solicitud de aprobación. `auto`: la tomó la ventana de consultas de la
+/// interfaz; `risk`: riesgo calculado por la interfaz (para la auditoría).
 #[tauri::command]
-fn mcp_decide(id: String, approved: bool, state: State<'_, AppState>) {
-    state.mcp.decide(&id, approved)
+fn mcp_decide(id: String, approved: bool, auto: Option<bool>, risk: Option<String>, state: State<'_, AppState>) {
+    state.mcp.decide(&id, approved, auto.unwrap_or(false), risk)
+}
+
+/// Respuesta de la interfaz a una consulta del servidor MCP (datos vivos, catálogo, diff).
+#[tauri::command]
+fn mcp_query_reply(id: String, data: serde_json::Value, state: State<'_, AppState>) {
+    if serde_json::to_string(&data).map(|s| s.len() <= mcp::MAX_QUERY_REPLY).unwrap_or(false) {
+        state.mcp.answer_query(&id, data)
+    }
+}
+
+/// Últimos eventos del registro de auditoría MCP.
+#[tauri::command(async)]
+fn mcp_audit_tail(limit: usize, state: State<'_, AppState>) -> Vec<serde_json::Value> {
+    mcp_audit::tail(&state.data_dir, limit)
 }
 
 // ---------- Herramientas de red ----------
@@ -1363,6 +1391,8 @@ pub fn run() {
             python_redetect,
             mcp_configure,
             mcp_decide,
+            mcp_query_reply,
+            mcp_audit_tail,
             monitor_start,
             monitor_stop,
             monitor_running,

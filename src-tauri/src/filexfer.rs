@@ -125,23 +125,74 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
             let _ = app.emit("tool-job", JobEvent { job: id.clone(), kind, text, data });
         };
         let conns = &app.state::<crate::AppState>().conns;
+        let r = run_core(conns, &conn, &command, deadline, answer, &emit);
+        if r.ran {
+            emit("result", String::new(), Some(json!({ "ok": r.ok, "output": r.output, "declined": r.declined })));
+        }
+        emit("done", String::new(), None);
+    });
+    Ok(job)
+}
+
+/// Resultado de un comando ejecutado con `run_core`.
+pub struct RunOutcome {
+    /// Todo lo recibido (eco, salida y prompt final).
+    pub output: String,
+    /// Sin errores reconocidos en la salida ni preguntas rechazadas.
+    pub ok: bool,
+    /// Pregunta del equipo respondida con "no" (solo con `answer = false`).
+    pub declined: Option<String>,
+    /// Por qué se cortó (plazo, sesión cerrada, tope de salida, solo lectura).
+    pub error: Option<String>,
+    /// El comando llegó a enviarse.
+    pub ran: bool,
+}
+
+impl RunOutcome {
+    fn failed(e: String) -> Self {
+        RunOutcome { output: String::new(), ok: false, declined: None, error: Some(e), ran: false }
+    }
+}
+
+/// Versión bloqueante de `run` (servidor MCP): misma cola por sesión, paginación, plazo y
+/// respuestas automáticas. Devuelve cuando vuelve el prompt, vence el plazo o la sesión se cierra.
+pub fn run_blocking(conns: &crate::connection::ConnectionManager, conn: &str, command: &str, timeout: Duration, answer: bool) -> Result<RunOutcome, String> {
+    if command.contains(['\r', '\n']) {
+        return Err("Un solo comando por operación".into());
+    }
+    conns.info(conn).ok_or("La sesión no está conectada")?;
+    if conns.is_read_only(conn) {
+        return Err(crate::connection::READ_ONLY.into());
+    }
+    Ok(run_core(conns, conn, command, timeout, answer, &|_, _, _| {}))
+}
+
+type Emit<'a> = &'a dyn Fn(&'static str, String, Option<serde_json::Value>);
+
+fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &str, deadline: Duration, answer: bool, emit: Emit) -> RunOutcome {
+    {
         let p = patterns();
-        let lock = session_lock(&conn);
+        let lock = session_lock(conn);
         // El plazo de espera del turno es el mismo del trabajo: un descubrimiento de 60 s no espera 2 h.
         let Some(_turn) = take_turn(&lock, deadline, || emit("wait", WAIT_TURN.into(), None)) else {
             emit("error", TURN_TIMEOUT.into(), None);
-            return emit("done", String::new(), None);
+            return RunOutcome::failed(TURN_TIMEOUT.into());
         };
         // La suscripción se toma recién al tocar el turno: antes acumularía la salida del trabajo anterior.
-        let Some(rx) = conns.tap(&conn) else {
+        let Some(rx) = conns.tap(conn) else {
             emit("error", "La sesión no está conectada".into(), None);
-            return emit("done", String::new(), None);
+            return RunOutcome::failed("La sesión no está conectada".into());
         };
         expect::drain(&rx);
-        if let Err(e) = conns.write(&conn, format!("{command}\r").as_bytes()) {
-            emit("error", e, None);
-            return emit("done", String::new(), None);
+        if let Err(e) = conns.write(conn, format!("{command}\r").as_bytes()) {
+            emit("error", e.clone(), None);
+            return RunOutcome::failed(e);
         }
+        let mut error: Option<String> = None;
+        let fail = |error: &mut Option<String>, e: String| {
+            emit("error", e.clone(), None);
+            *error = Some(e);
+        };
         let start = Instant::now();
         let mut output = String::new();
         let mut tail = String::new(); // texto desde la última respuesta automática
@@ -167,8 +218,8 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
         loop {
             if start.elapsed() > deadline {
                 flush(&mut partial, true);
-                leave_pager(conns, &conn, p, &tail);
-                emit("error", "Tiempo agotado esperando al equipo".into(), None);
+                leave_pager(conns, conn, p, &tail);
+                fail(&mut error, "Tiempo agotado esperando al equipo".into());
                 break;
             }
             let chunk = match rx.recv_timeout(Duration::from_millis(500)) {
@@ -181,14 +232,14 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
                 // bloqueaba los siguientes trabajos de la pestaña al reconectar.
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     flush(&mut partial, true);
-                    emit("error", "La sesión se cerró".into(), None);
+                    fail(&mut error, "La sesión se cerró".into());
                     break;
                 }
             };
             if output.len() + chunk.len() > MAX_OUTPUT {
                 flush(&mut partial, true);
-                leave_pager(conns, &conn, p, &tail);
-                emit("error", "La salida del equipo superó el máximo permitido; se detuvo la lectura".into(), None);
+                leave_pager(conns, conn, p, &tail);
+                fail(&mut error, "La salida del equipo superó el máximo permitido; se detuvo la lectura".into());
                 break;
             }
             output.push_str(&chunk);
@@ -227,14 +278,14 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
             if let Some(r) = reply {
                 answered += 1;
                 if answered > 200 {
-                    leave_pager(conns, &conn, p, &tail);
-                    emit("error", "Demasiadas confirmaciones; se detuvo por seguridad".into(), None);
+                    leave_pager(conns, conn, p, &tail);
+                    fail(&mut error, "Demasiadas confirmaciones; se detuvo por seguridad".into());
                     break;
                 }
                 // Si la pestaña pasó a solo lectura con el trabajo en curso, se detiene en esta escritura.
-                if let Err(e) = conns.write(&conn, r.as_bytes()) {
+                if let Err(e) = conns.write(conn, r.as_bytes()) {
                     flush(&mut partial, true);
-                    emit("error", format!("{e}. Se detuvo el trabajo"), None);
+                    fail(&mut error, format!("{e}. Se detuvo el trabajo"));
                     break;
                 }
                 tail.clear();
@@ -246,10 +297,13 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
         }
         flush(&mut partial, true);
         let failed = p.error.is_match(&output) || declined.is_some();
-        emit("result", String::new(), Some(json!({ "ok": !failed, "output": output, "declined": declined })));
-        emit("done", String::new(), None);
-    });
-    Ok(job)
+        RunOutcome { output, ok: !failed, declined, error, ran: true }
+    }
+}
+
+/// La línea es un prompt de equipo (misma lista que src/lib/cliText.ts).
+pub fn is_prompt(line: &str) -> bool {
+    patterns().prompt.is_match(line)
 }
 
 /// Si el trabajo se corta con el equipo esperando en "--More--", la sesión queda en el paginador y se
