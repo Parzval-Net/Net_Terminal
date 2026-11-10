@@ -8,6 +8,8 @@ import { Btn, CopyText, IpSelect, Label, Section, StatusPill, Toggle, fmtBytes }
 import { useLocalIp } from "./useLocalIp";
 import { FileManager, ScpRequest, TerminalRef } from "./FileManager";
 import { FtpClientSection, FtpServerSection, SftpSection } from "./FtpPanels";
+import { ServerGuardPanel, commandIp, useGuardPrefs, useGuardStats } from "./ServerGuard";
+import { GUARD_LABEL } from "../../lib/serverGuard";
 
 interface Transfer {
   id: string;
@@ -40,6 +42,9 @@ export function TransferTool({
   onScp: (req: ScpRequest) => void;
 }) {
   const { ips, ip: localIp, setIp } = useLocalIp();
+  const guardT = useGuardPrefs("tftp", s, onChange, ips);
+  const guardH = useGuardPrefs("http", s, onChange, ips);
+  const stats = useGuardStats(running);
   const [files, setFiles] = useState<[string, number][]>([]);
   const [selFile, setSelFile] = useState("");
   // Subidas TFTP: solo por esta sesión de la app, igual que en FTP (nunca quedan habilitadas
@@ -96,6 +101,8 @@ export function TransferTool({
 
   const toggle = async (kind: "tftp" | "http") => {
     setError("");
+    const g = kind === "tftp" ? guardT : guardH;
+    if (!running.includes(kind) && g.allowErrors.length) return setError(`${GUARD_LABEL[kind]}: ${g.allowErrors[0]}.`);
     try {
       if (running.includes(kind)) await invoke("server_stop", { kind });
       else
@@ -103,6 +110,7 @@ export function TransferTool({
           kind,
           port: kind === "tftp" ? s.tftpPort : s.httpPort,
           allowWrite: tftpWrite,
+          opts: g.opts(),
         });
     } catch (e) {
       setError(String(e));
@@ -122,8 +130,12 @@ export function TransferTool({
   };
 
   const ip = localIp || "IP_DE_ESTE_PC";
+  // En los comandos va la IP donde escucha cada servidor (si es una sola); con todas las interfaces, la elegida arriba.
+  const tftpIp = commandIp(guardT.bind, ip);
+  const httpIp = commandIp(guardH.bind, ip);
   // Los comandos usan el archivo elegido en "Archivos compartidos" (o el primero).
   const file = files.some(([n]) => n === selFile) ? selFile : (files[0]?.[0] ?? "firmware.bin");
+  const rejects = (["tftp", "http", "ftp"] as const).filter((k) => running.includes(k) && (stats[k]?.rejected ?? 0) > 0);
   const tftpOn = running.includes("tftp");
   const httpOn = running.includes("http");
 
@@ -147,8 +159,9 @@ export function TransferTool({
         <p className="flex-1 min-w-[260px] text-[12px] text-muted">
           Servidores: el gestor de archivos usa el que ya esté activo; si no hay uno, lo inicia para la operación y lo detiene al
           terminar. Las subidas que necesita una extracción se habilitan en caliente, sin reiniciar ni cambiar la contraseña FTP,
-          y se vuelven a quitar al final. Escuchan en la red solo mientras están activos; si el firewall del sistema pregunta,
-          permite el acceso solo en redes privadas.
+          y se vuelven a quitar al final. Escuchan en la red solo mientras están activos, en la interfaz que elijas en Acceso y
+          seguridad (por defecto, la de la ruta por defecto) y se detienen solos tras un rato sin uso; si el firewall del sistema
+          pregunta, permite el acceso solo en redes privadas.
         </p>
       </div>
       {error && <p className="text-[12px] text-danger">{error}</p>}
@@ -166,11 +179,12 @@ export function TransferTool({
               {tftpOn ? "Detener" : "Iniciar"}
             </Btn>
           </div>
+          <ServerGuardPanel kind="tftp" settings={s} onChange={onChange} ips={ips} running={tftpOn} stat={stats.tftp} />
           <p className="text-[11.5px] text-muted mb-1">Desde el equipo:</p>
           <div className="flex flex-col items-start gap-1">
-            <CopyText text={`copy tftp://${ip}/${file} flash:`} />
-            <CopyText text={`tftp ${ip} get ${file}`} />
-            {tftpWrite && <CopyText text={`copy running-config tftp://${ip}/respaldo.cfg`} />}
+            <CopyText text={`copy tftp://${tftpIp}/${file} flash:`} />
+            <CopyText text={`tftp ${tftpIp} get ${file}`} />
+            {tftpWrite && <CopyText text={`copy running-config tftp://${tftpIp}/respaldo.cfg`} />}
           </div>
           {s.tftpPort < 1024 && (
             <p className="mt-2 text-[11.5px] text-muted">
@@ -188,16 +202,17 @@ export function TransferTool({
               {httpOn ? "Detener" : "Iniciar"}
             </Btn>
           </div>
+          <ServerGuardPanel kind="http" settings={s} onChange={onChange} ips={ips} running={httpOn} stat={stats.http} />
           <p className="text-[11.5px] text-muted mb-1">Desde el equipo:</p>
           <div className="flex flex-col items-start gap-1">
-            <CopyText text={`copy http://${ip}:${s.httpPort}/${file} flash:`} />
-            <CopyText text={`http://${ip}:${s.httpPort}/`} />
+            <CopyText text={`copy http://${httpIp}:${s.httpPort}/${file} flash:`} />
+            <CopyText text={`http://${httpIp}:${s.httpPort}/`} />
           </div>
         </Section>
       </div>
 
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]">
-        <FtpServerSection settings={s} running={running} onChange={onChange} refreshRunning={refreshRunning} ip={ip} file={file} />
+        <FtpServerSection settings={s} running={running} onChange={onChange} refreshRunning={refreshRunning} ip={ip} ips={ips} stat={stats.ftp} file={file} />
         <SftpSection terminals={terminals} onScp={onScp} />
       </div>
 
@@ -241,9 +256,15 @@ export function TransferTool({
         )}
       </Section>
 
-      {transfers.length > 0 && (
+      {(transfers.length > 0 || rejects.length > 0) && (
         <Section title="Transferencias" right={<Btn kind="ghost" onClick={() => setTransfers([])}>Limpiar</Btn>}>
           <div className="space-y-2">
+            {rejects.map((k) => (
+              <p key={k} className="text-[12px] text-warn" role="status">
+                {GUARD_LABEL[k]} · {stats[k].rejected.toLocaleString("es-CL")} {stats[k].rejected === 1 ? "conexión rechazada" : "conexiones rechazadas"} por origen no permitido
+                {stats[k].last ? ` · último ${stats[k].last}` : ""}
+              </p>
+            ))}
             {transfers.map((t) => {
               const pct = t.total ? Math.min(100, (t.bytes / t.total) * 100) : t.done && !t.error ? 100 : null;
               return (

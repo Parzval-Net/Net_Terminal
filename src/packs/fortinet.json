@@ -660,7 +660,7 @@
       "cmd": "diagnose debug console timestamp enable\ndiagnose debug application fortilink 4\ndiagnose debug enable",
       "desc": "Debug en tiempo real de la comunicación FortiLink en el FortiGate, con marca de tiempo. Nivel 1 a 4, mayor nivel entrega más detalle.",
       "cat": "Diagnóstico",
-      "risk": "disruptive",
+      "risk": "change",
       "note": "Fuente comunitaria: Technical Tip de Fortinet Community. Genera mucha salida y puede afectar el rendimiento; usar en ventana. Detener con diagnose debug disable y diagnose debug reset.",
       "source": "https://community.fortinet.com/fortigate-3/technical-tip-debug-commands-to-analyze-fortilink-communication-186222"
     },

@@ -8,7 +8,7 @@ import type { TopoSnapshot, TopoSources, Topology } from "./topology";
 import type { SnmpProfile } from "./snmp";
 import { type GhostColor, type GhostStyle, type ListKey, SUGGEST_DEFAULT, migrateSuggest } from "./suggest";
 
-export type ModuleId = "monitor" | "diag" | "topology" | "subnet" | "perf" | "transfer" | "syslog" | "plugins" | "backup" | "snmp";
+export type ModuleId = "monitor" | "diag" | "topology" | "subnet" | "perf" | "transfer" | "syslog" | "plugins" | "backup" | "snmp" | "logsearch";
 
 export interface SpeedResult {
   ts: string;
@@ -120,6 +120,8 @@ export interface Settings {
   /** IP local del receptor de traps ("" = 127.0.0.1). */
   snmpTrapBind: string;
   ftpPort: number;
+  /** Acceso de los servidores integrados por tipo (tftp, http, ftp, syslog): interfaz, clientes permitidos e inactividad. Ver lib/serverGuard.ts. */
+  serverGuard: Record<string, { bind?: string; allow?: string; idle?: number }>;
 }
 
 export interface UpdateInfo {
@@ -177,7 +179,7 @@ export const defaultSettings: Settings = {
   mcpToken: "",
   mcpApproval: true,
   mcpReadOnly: false,
-  modules: { monitor: true, diag: true, topology: true, subnet: true, perf: true, transfer: true, syslog: true, plugins: true, backup: true, snmp: true },
+  modules: { monitor: true, diag: true, topology: true, subnet: true, perf: true, transfer: true, syslog: true, plugins: true, backup: true, snmp: true, logsearch: true },
   monitors: [],
   tftpPort: 69,
   httpPort: 8080,
@@ -201,6 +203,7 @@ export const defaultSettings: Settings = {
   snmpTrapPort: 162,
   snmpTrapBind: "",
   ftpPort: 21,
+  serverGuard: {},
 };
 
 /** Opciones de log que se pasan a set_logging. */

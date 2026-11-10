@@ -495,6 +495,20 @@ function emitTraps() {
 let recentTargets = ["ssh admin@192.0.2.50 22", "telnet 203.0.113.9 23"];
 const cmdHistory = { s0: [{ cmd: "show ip interface brief", ts: now - 60000 }, { cmd: "show version", ts: now - 3600000 }] };
 
+
+// Corpus ficticio de Buscar en logs (IPs de documentación, sin datos reales).
+const serverOpts = new Map();
+const guardStats = new Map();
+const searchJobs = new Map();
+const SEARCH_CORPUS = [
+  { kind: "logs", rel: "Sitio Central/Core/core-sw01_20261109-081500.log", day: "2026-11-09", modified: 1794212100, text: "08:15:02 core-sw01#show ip interface brief\n08:15:09 %LINK-3-UPDOWN: Interface GigabitEthernet1/0/3, changed state to down\n08:15:10 %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/3, changed state to down\n08:16:44 %LINK-3-UPDOWN: Interface GigabitEthernet1/0/3, changed state to up\n08:16:45 %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/3, changed state to up\n08:20:01 core-sw01#" },
+  { kind: "logs", rel: "Sitio Central/Core/core-sw02_20261108-173000.log", day: "2026-11-08", modified: 1794139800, text: "17:30:11 core-sw02#show logging\n17:30:12 %SPANTREE-2-ROOTGUARD_BLOCK: Root guard blocking port GigabitEthernet1/0/24 on VLAN0010.\n17:30:40 %LINK-3-UPDOWN: Interface GigabitEthernet1/0/24, changed state to down\n17:31:02 core-sw02#" },
+  { kind: "logs", rel: "Sucursales/Norte/mx-borde01_20261105-110000.log", day: "2026-11-05", modified: 1793876400, text: "11:00:03 user@mx-borde01> show interfaces terse\n11:00:04 ge-0/0/1.0 up up inet 203.0.113.1/30\n11:02:15 Nov  5 11:02:15 mx-borde01 mib2d[1812]: SNMP_TRAP_LINK_DOWN: ifIndex 513, ifAdminStatus up(1), ifOperStatus down(2), ifName ge-0/0/2" },
+  { kind: "backups", rel: "core-sw01/2026-10-30_101500.txt", day: "2026-10-30", modified: 1793355300, text: "hostname core-sw01\n!\ninterface GigabitEthernet1/0/3\n description UPLINK a dist-sw01\n switchport mode trunk\n!\nsnmp-server community **** RO\nlogging host 192.0.2.250\nend" },
+  { kind: "backups", rel: "fw-perimetro/2026-10-28_090000.txt", day: "2026-10-28", modified: 1793178000, text: "config system interface\n  edit \"wan1\"\n    set ip 198.51.100.10 255.255.255.248\n    set allowaccess ping https ssh\n  next\nend\nconfig system admin\n  edit \"admin\"\n    set password ENC ****\n  next\nend" },
+  { kind: "notes", rel: "ventana-cambio.txt", day: "2026-11-02", modified: 1793610000, text: "Ventana 02-11: cambiar uplink GigabitEthernet1/0/3\nValidar changed state to up en core-sw01\nAvisar a NOC" },
+];
+
 const handlers = {
   "plugin:event|listen": ({ event, handler }) => {
     listeners.set(event, [...(listeners.get(event) ?? []), handler]);
@@ -612,7 +626,72 @@ const handlers = {
     { name: "utun4", ip: "203.0.113.9", default: false },
   ],
   server_running: () => [...running],
-  server_start: ({ kind, allowWrite }) => (running.add(kind), writes.set(kind, !!allowWrite), `${kind} activo`),
+  // ---- Servidores: acceso (interfaz, clientes permitidos, inactividad) ----
+  server_start: ({ kind, allowWrite, opts }) => {
+    const bad = (opts?.allow ?? []).find((e) => !/^[\d.:a-f]+(\/\d+)?$/i.test(e));
+    if (bad) throw `Cliente permitido inválido: ${bad}`;
+    running.add(kind);
+    writes.set(kind, !!allowWrite);
+    serverOpts.set(kind, opts ?? {});
+    return `${kind} activo`;
+  },
+  server_guard: () => [...running].filter((k) => guardStats.has(k)).map((k) => ({ kind: k, ...guardStats.get(k) })),
+  // ---- Buscar en logs: corpus ficticio, búsqueda real en JS y resultados por lotes ----
+  logsearch_start: ({ params }) => {
+    const job = `job-${nextId++}`;
+    searchJobs.set(job, { cancelled: false });
+    let re;
+    try {
+      re = new RegExp(params.regex ? params.query : params.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), params.caseSensitive ? "gu" : "giu");
+    } catch (e) {
+      throw `Expresión regular inválida: ${e.message}`;
+    }
+    if (new RegExp(re.source, re.flags.replace("g", "")).test("")) throw "La expresión coincide con texto vacío: sería cada línea. Haz el patrón más específico";
+    const files = SEARCH_CORPUS.filter((f) => params.kinds.includes(f.kind) && (!params.scope || f.rel.toLowerCase().includes(params.scope.toLowerCase())) && (!params.from || f.day >= params.from) && (!params.to || f.day <= params.to));
+    const total = files.length + 36; // el resto de los archivos revisados no tiene coincidencias
+    let scanned = 0;
+    let matches = 0;
+    let withHits = 0;
+    let step = 0;
+    let truncated = false;
+    const tick = () => {
+      const st = searchJobs.get(job);
+      const cancelled = st.cancelled;
+      const batch = [];
+      for (let n = 0; n < 6 && !cancelled && step < total; n++, step++) {
+        scanned++;
+        const f = files[step];
+        if (!f) continue;
+        const lines = f.text.split("\n");
+        const hits = [];
+        lines.forEach((line, i) => {
+          const rs = [...line.matchAll(re)].map((m) => [[...line.slice(0, m.index)].length, [...line.slice(0, m.index + m[0].length)].length]);
+          if (!rs.length || matches >= params.maxResults) return;
+          matches++;
+          hits.push({ line: i + 1, text: line, ranges: rs, before: lines.slice(Math.max(0, i - params.context), i), after: lines.slice(i + 1, i + 1 + params.context) });
+        });
+        if (hits.length) {
+          withHits++;
+          batch.push({ kind: f.kind, rel: f.rel, size: f.text.length, modified: f.modified, partial: false, more: false, hits });
+        }
+      }
+      if (matches >= params.maxResults) truncated = true;
+      emit("tool-job", { job, kind: "line", text: "", data: { files: batch, progress: { scanned, total, matches } } });
+      if (cancelled || step >= total || truncated) {
+        emit("tool-job", { job, kind: "result", text: "", data: { scanned, total, matches, filesWithHits: withHits, truncated, walkTruncated: false, skippedBinary: 1, skippedErrors: 0, partial: 0, cancelled, ms: 640 } });
+        emit("tool-job", { job, kind: "done", text: "" });
+        searchJobs.delete(job);
+      } else setTimeout(tick, 350);
+    };
+    setTimeout(tick, 120);
+    return job;
+  },
+  logsearch_open: ({ kind, rel, reveal }) => ((window.__mock.lastOpen = { kind, rel, reveal }), null),
+  tool_stop: ({ job }) => {
+    const st = searchJobs.get(job);
+    if (st) st.cancelled = true;
+    return null;
+  },
   server_write: ({ kind }) => (running.has(kind) ? (writes.get(kind) ?? false) : null),
   server_set_write: ({ kind, allow }) => {
     if (!running.has(kind)) throw "El servidor no está activo";
@@ -620,7 +699,7 @@ const handlers = {
     writes.set(kind, allow);
     return before;
   },
-  server_stop: ({ kind }) => (running.delete(kind), writes.delete(kind), null),
+  server_stop: ({ kind }) => (running.delete(kind), writes.delete(kind), guardStats.delete(kind), null),
   snmp_request: ({ oids }) => oids.map((oid) => (SYS[oid] ? { oid, type: oid.endsWith(".2.0") ? "OID" : oid.endsWith(".3.0") ? "Timeticks" : "OCTET STRING", value: SYS[oid] } : { oid, type: "noSuchObject", value: "No existe el objeto en este agente" })),
   snmp_walk_many: ({ oids }) => oids.map((oid) => ({ oid, rows: snmpColumn(oid), truncated: false, error: null })),
   snmp_walk: ({ oid }) => {
@@ -642,7 +721,7 @@ const handlers = {
     return `Receptor de traps escuchando en ${bind}:${port} (UDP)`;
   },
   ftp_server_info: () => (running.has("ftp") ? { user: "nt", pass: "k7m2q9xh4p", port: 21, write: writes.get("ftp") ?? false } : null),
-  ftp_server_start: ({ port, allowWrite }) => (running.add("ftp"), writes.set("ftp", !!allowWrite), { user: "nt", pass: "k7m2q9xh4p", port, write: allowWrite }),
+  ftp_server_start: ({ port, allowWrite, opts }) => (running.add("ftp"), writes.set("ftp", !!allowWrite), serverOpts.set("ftp", opts ?? {}), { user: "nt", pass: "k7m2q9xh4p", port, write: allowWrite, bind: opts?.bind ?? "all" }),
   ftp_list: () => ({ cwd: "/firmware", tls: true, entries: [{ name: "cisco", size: 0, dir: true, date: "2026-10-01 09:00" }, { name: "c9300-universalk9.17.12.04.SPA.bin", size: 1_163_845_632, dir: false, date: "2026-09-12 18:20" }, { name: "AR6100-V300R022C10SPC100.cc", size: 168_820_736, dir: false, date: "2026-08-30 11:02" }] }),
   monitor_start: ({ cfg }) => startMonitor(cfg),
   monitor_stop: ({ id }) => (clearInterval(monitorTimers.get(id)), monitorTimers.delete(id), null),
@@ -1680,6 +1759,6 @@ Object.assign(scenes, {
 // Acceso para el script de QA (CDP): pasos adicionales sobre una escena.
 window.__demo = { click, open, wait, svgNode, emit, find, setVal };
 // Acceso para backends simulados que extienden este (scripts/video/plugins/mock-video.js).
-window.__mock = { handlers, emit, cbs, channels, connSessions, sessions, settings, notes, enc };
+window.__mock = { serverOpts, guardStats, handlers, emit, cbs, channels, connSessions, sessions, settings, notes, enc };
 const scene = new URLSearchParams(location.search).get("scene");
 if (scene && scenes[scene]) window.addEventListener("load", () => wait(600).then(scenes[scene]));

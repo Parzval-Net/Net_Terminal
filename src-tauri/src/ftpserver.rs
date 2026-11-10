@@ -7,6 +7,7 @@
 //! intentos y tamaño. FTP no cifra: usuario, contraseña y archivos viajan en claro.
 
 use crate::servers::{bind_error, inside_root, spawn_limited, Servers, TFTP_MAX_UPLOAD};
+use crate::srvguard::{Guard, ServerOpts};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs::{self, File};
@@ -37,6 +38,8 @@ pub struct FtpInfo {
     pub pass: String,
     pub port: u16,
     pub write: bool,
+    /// Dónde escucha ("all" o la IP elegida).
+    pub bind: String,
 }
 
 static INFO: Mutex<Option<FtpInfo>> = Mutex::new(None);
@@ -52,6 +55,8 @@ struct Config {
     write: Arc<AtomicBool>,
     flag: Arc<AtomicBool>,
     events: Events,
+    /// Clientes permitidos, rechazos e inactividad.
+    guard: Arc<Guard>,
 }
 
 fn random_text(n: usize) -> String {
@@ -67,14 +72,17 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl Servers {
-    pub fn start_ftp(&self, app: tauri::AppHandle, root: PathBuf, port: u16, write: bool) -> Result<FtpInfo, String> {
+    pub fn start_ftp(&self, app: tauri::AppHandle, root: PathBuf, port: u16, write: bool, opts: &ServerOpts) -> Result<FtpInfo, String> {
+        let r = opts.resolve()?;
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         self.stop("ftp");
-        let listener = bind_tcp(port).map_err(|e| bind_error("FTP", port, e))?;
+        let listener = bind_tcp(r.bind, port).map_err(|e| bind_error("FTP", port, e))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        let info = FtpInfo { user: "nt".into(), pass: random_text(10), port, write };
+        let bind = if r.bind.is_unspecified() { "all".to_string() } else { r.bind.to_string() };
+        let info = FtpInfo { user: "nt".into(), pass: random_text(10), port, write, bind };
         let flag = self.flag("ftp");
         let write = self.write_flag("ftp", write);
+        let guard = self.guard(&app, "ftp", &r, &flag);
         let cfg = Arc::new(Config {
             root,
             user: info.user.clone(),
@@ -84,6 +92,7 @@ impl Servers {
             events: Arc::new(move |v| {
                 let _ = app.emit("transfer", v);
             }),
+            guard,
         });
         *INFO.lock().unwrap() = Some(info.clone());
         std::thread::spawn(move || serve(listener, cfg));
@@ -92,10 +101,10 @@ impl Servers {
 }
 
 /// Al reiniciar, el hilo anterior suelta el puerto en hasta ~200 ms.
-fn bind_tcp(port: u16) -> std::io::Result<TcpListener> {
+fn bind_tcp(ip: IpAddr, port: u16) -> std::io::Result<TcpListener> {
     let mut last = None;
     for _ in 0..10 {
-        match TcpListener::bind(("0.0.0.0", port)) {
+        match TcpListener::bind((ip, port)) {
             Ok(l) => return Ok(l),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 last = Some(e);
@@ -109,12 +118,17 @@ fn bind_tcp(port: u16) -> std::io::Result<TcpListener> {
 
 fn serve(listener: TcpListener, cfg: Arc<Config>) {
     let active = Arc::new(AtomicUsize::new(0));
-    while cfg.flag.load(Ordering::SeqCst) {
+    while cfg.flag.load(Ordering::SeqCst) && cfg.guard.pulse(&cfg.flag) {
         match listener.accept() {
-            Ok((stream, peer)) => {
+            Ok((mut stream, peer)) => {
                 let _ = stream.set_nonblocking(false);
-                let c = cfg.clone();
-                if let Err(mut s) = spawn_limited(&active, MAX_CLIENTS, stream, move |s| session(s, peer, c)) {
+                if !cfg.guard.admit(peer.ip()) {
+                    let _ = stream.write_all(b"421 Origen no permitido\r\n");
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+                let (c, busy) = (cfg.clone(), cfg.guard.busy());
+                if let Err((mut s, _)) = spawn_limited(&active, MAX_CLIENTS, (stream, busy), move |(s, _busy)| session(s, peer, c)) {
                     let _ = s.write_all(b"421 Demasiados clientes, intenta luego\r\n");
                 }
             }
@@ -536,10 +550,10 @@ fn session(ctrl: TcpStream, peer: SocketAddr, cfg: Arc<Config>) {
 
 /// Inicia (o reinicia con credenciales nuevas) el servidor FTP de la carpeta compartida.
 #[tauri::command(async)]
-pub fn ftp_server_start(port: u16, allow_write: bool, app: tauri::AppHandle) -> Result<FtpInfo, String> {
+pub fn ftp_server_start(port: u16, allow_write: bool, opts: Option<ServerOpts>, app: tauri::AppHandle) -> Result<FtpInfo, String> {
     let state = app.state::<crate::AppState>();
     let root = state.data_dir.join("tftp");
-    state.servers.start_ftp(app.clone(), root, port, allow_write)
+    state.servers.start_ftp(app.clone(), root, port, allow_write, &opts.unwrap_or_default())
 }
 
 /// Credenciales del servidor en marcha (para armar los comandos copy ftp:).
@@ -604,6 +618,7 @@ mod tests {
             write: Arc::new(AtomicBool::new(write)),
             flag: flag.clone(),
             events: Arc::new(move |v| ev.lock().unwrap().push(v)),
+            guard: crate::srvguard::test_guard(&[], None),
         });
         std::thread::spawn(move || serve(listener, cfg));
         (addr, root, flag, events)
@@ -684,7 +699,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let flag = Arc::new(AtomicBool::new(true));
         let write = Arc::new(AtomicBool::new(false));
-        let cfg = Arc::new(Config { root: root.clone(), user: "nt".into(), pass: "clave".into(), write: write.clone(), flag: flag.clone(), events: Arc::new(|_| {}) });
+        let cfg = Arc::new(Config { root: root.clone(), user: "nt".into(), pass: "clave".into(), write: write.clone(), flag: flag.clone(), events: Arc::new(|_| {}), guard: crate::srvguard::test_guard(&[], None) });
         std::thread::spawn(move || serve(listener, cfg));
         let mut f = Ftp::connect(addr);
         f.cmd("USER nt");
@@ -746,7 +761,7 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let flag = Arc::new(AtomicBool::new(true));
-        let cfg = Arc::new(Config { root, user: "nt".into(), pass: "clave".into(), write: Arc::new(AtomicBool::new(true)), flag: flag.clone(), events: Arc::new(|_| {}) });
+        let cfg = Arc::new(Config { root, user: "nt".into(), pass: "clave".into(), write: Arc::new(AtomicBool::new(true)), flag: flag.clone(), events: Arc::new(|_| {}), guard: crate::srvguard::test_guard(&[], None) });
         std::thread::spawn(move || serve(listener, cfg));
         std::thread::sleep(Duration::from_secs(30));
         flag.store(false, Ordering::SeqCst);
@@ -836,6 +851,76 @@ mod tests {
             std::thread::sleep(Duration::from_millis(500));
         }
         assert!(t.elapsed() < LOGIN_WAIT + Duration::from_secs(3));
+        flag.store(false, Ordering::SeqCst);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn bare_server(allow: &[&str], idle_ms: Option<u64>) -> (SocketAddr, PathBuf, Arc<AtomicBool>, Arc<Guard>, std::thread::JoinHandle<()>) {
+        let root = std::env::temp_dir().join(format!("nt-ftp-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let flag = Arc::new(AtomicBool::new(true));
+        let guard = crate::srvguard::test_guard(allow, idle_ms);
+        let cfg = Arc::new(Config {
+            root: root.clone(),
+            user: "nt".into(),
+            pass: "clave".into(),
+            write: Arc::new(AtomicBool::new(false)),
+            flag: flag.clone(),
+            events: Arc::new(|_| {}),
+            guard: guard.clone(),
+        });
+        let t = std::thread::spawn(move || serve(listener, cfg));
+        (addr, root, flag, guard, t)
+    }
+
+    #[test]
+    fn ftp_rejects_clients_outside_the_allow_list_and_counts_them() {
+        // Solo 10.9.8.0/24: el cliente de la prueba (127.0.0.1) queda fuera.
+        let (addr, root, flag, guard, _) = bare_server(&["10.9.8.0/24"], None);
+        for _ in 0..2 {
+            let c = TcpStream::connect(addr).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut l = String::new();
+            BufReader::new(c).read_line(&mut l).unwrap();
+            assert!(l.starts_with("421"), "debía rechazar: {l}");
+        }
+        assert_eq!(guard.stats().rejected, 2);
+        assert_eq!(guard.stats().last.as_deref(), Some("127.0.0.1"));
+        flag.store(false, Ordering::SeqCst);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ftp_allows_listed_clients() {
+        let (addr, root, flag, guard, _) = bare_server(&["127.0.0.0/8"], None);
+        let mut f = Ftp::connect(addr);
+        assert!(f.cmd("USER nt").starts_with("331"));
+        assert!(f.cmd("PASS clave").starts_with("230"));
+        assert_eq!(guard.stats().rejected, 0);
+        flag.store(false, Ordering::SeqCst);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ftp_stops_itself_after_the_idle_period() {
+        let (addr, root, flag, _, t) = bare_server(&[], Some(300));
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(!flag.load(Ordering::SeqCst), "la bandera debía apagarse");
+        t.join().unwrap();
+        assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_err(), "el puerto debe quedar cerrado");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ftp_session_in_progress_keeps_the_server_alive() {
+        let (addr, root, flag, _, _) = bare_server(&[], Some(300));
+        let mut f = Ftp::connect(addr);
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(flag.load(Ordering::SeqCst), "con un cliente conectado no está inactivo");
+        assert!(f.cmd("NOOP").starts_with("200"));
         flag.store(false, Ordering::SeqCst);
         fs::remove_dir_all(root).unwrap();
     }

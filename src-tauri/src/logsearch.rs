@@ -1,0 +1,1120 @@
+//! Búsqueda global en los logs de sesión, los respaldos de configuración y (opcional) las notas
+//! sin protección. Todo bajo demanda: sin índice, sin hilos ni temporizadores en reposo. Cada
+//! búsqueda recorre los archivos uno por uno desde un hilo propio, lee en streaming (nunca el
+//! archivo completo en memoria), usa el motor `regex` de Rust (tiempo lineal, sin retroceso) con
+//! límites de tamaño de programa, y se puede cancelar en cualquier momento.
+//!
+//! Seguridad: solo se lee dentro de la carpeta de logs en uso, `backups/` y `notes/`. No se siguen
+//! enlaces simbólicos (ni de carpetas ni de archivos), no se leen archivos ocultos (la llave de
+//! los respaldos y las huellas de secretos son ocultos), de los respaldos solo los archivos con el
+//! nombre que crea la app, de las notas solo `.txt` sin nota protegida del mismo nombre (nunca
+//! `.ntenc`) y la bóveda de contraseñas queda fuera por construcción (no está en esas carpetas ni
+//! tiene esas extensiones). Se busca el contenido tal como está en disco: no se desenmascara
+//! nada y los logs ya traen sus secretos enmascarados.
+
+use regex::{Regex, RegexBuilder};
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Largo máximo del texto buscado.
+const MAX_QUERY: usize = 500;
+/// Archivos máximos que se consideran en una búsqueda (tope del recorrido de carpetas).
+const MAX_FILES: usize = 50_000;
+const MAX_DEPTH: usize = 8;
+const DEFAULT_MAX_RESULTS: usize = 500;
+const MAX_RESULTS: usize = 5000;
+/// Coincidencias máximas que se muestran por archivo.
+const PER_FILE_HITS: usize = 200;
+const DEFAULT_FILE_MB: u64 = 64;
+const MAX_FILE_MB: u64 = 1024;
+/// Línea más larga que se examina: el resto de una línea gigante (sin saltos) se descarta.
+const MAX_LINE: usize = 64 * 1024;
+/// Caracteres visibles de una coincidencia y de una línea de contexto.
+const SHOW_CHARS: usize = 600;
+const SHOW_CONTEXT_CHARS: usize = 300;
+const MAX_CONTEXT: usize = 5;
+/// Cada cuánto se informan avances y resultados nuevos a la interfaz.
+const EMIT_EVERY: Duration = Duration::from_millis(150);
+
+// ---------- Parámetros ----------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Logs,
+    Backups,
+    Notes,
+}
+
+impl Kind {
+    pub fn parse(s: &str) -> Result<Kind, String> {
+        match s {
+            "logs" => Ok(Kind::Logs),
+            "backups" => Ok(Kind::Backups),
+            "notes" => Ok(Kind::Notes),
+            _ => Err("Tipo de archivo desconocido".into()),
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchParams {
+    pub query: String,
+    /// true: `query` es una expresión regular; false: texto literal.
+    #[serde(default)]
+    pub regex: bool,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    /// "logs", "backups" y/o "notes".
+    pub kinds: Vec<String>,
+    /// Fechas locales AAAA-MM-DD (inclusive) sobre la fecha del archivo.
+    pub from: Option<String>,
+    pub to: Option<String>,
+    /// Texto que debe contener la ruta (sesión o equipo), sin distinguir mayúsculas.
+    pub scope: Option<String>,
+    /// Líneas de contexto antes y después (0 a 5).
+    pub context: Option<usize>,
+    pub max_results: Option<usize>,
+    /// Tamaño máximo que se lee de cada archivo, en MB.
+    pub max_file_mb: Option<u64>,
+}
+
+pub struct Prepared {
+    re: Regex,
+    kinds: Vec<Kind>,
+    range: (u64, u64),
+    scope: Option<String>,
+    context: usize,
+    max_results: usize,
+    max_file_bytes: u64,
+    /// Intervalo entre avances (las pruebas lo ponen en cero).
+    emit_every: Duration,
+}
+
+fn local_midnight(d: chrono::NaiveDate) -> Option<u64> {
+    let t = d.and_hms_opt(0, 0, 0)?.and_local_timezone(chrono::Local).earliest()?;
+    u64::try_from(t.timestamp()).ok()
+}
+
+fn parse_day(label: &str, s: &str) -> Result<chrono::NaiveDate, String> {
+    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map_err(|_| format!("Fecha {label} inválida (usa AAAA-MM-DD)"))
+}
+
+impl SearchParams {
+    pub fn prepare(&self) -> Result<Prepared, String> {
+        if self.query.is_empty() || self.query.trim().is_empty() {
+            return Err("Escribe un texto para buscar".into());
+        }
+        if self.query.chars().count() > MAX_QUERY {
+            return Err(format!("El texto es demasiado largo (máximo {MAX_QUERY} caracteres)"));
+        }
+        let pattern = if self.regex { self.query.clone() } else { regex::escape(&self.query) };
+        // Límites de tamaño del programa compilado: una expresión enorme no consume memoria sin tope.
+        let re = RegexBuilder::new(&pattern)
+            .case_insensitive(!self.case_sensitive)
+            .size_limit(2 << 20)
+            .dfa_size_limit(8 << 20)
+            .nest_limit(50)
+            .build()
+            .map_err(|e| {
+                let t = e.to_string();
+                let t: String = t.lines().last().unwrap_or("").trim().chars().take(200).collect();
+                format!("Expresión regular inválida: {t}")
+            })?;
+        if re.is_match("") {
+            return Err("La expresión coincide con texto vacío: sería cada línea. Haz el patrón más específico".into());
+        }
+        let mut kinds = Vec::new();
+        for k in &self.kinds {
+            let k = Kind::parse(k)?;
+            if !kinds.contains(&k) {
+                kinds.push(k);
+            }
+        }
+        if kinds.is_empty() {
+            return Err("Elige dónde buscar (logs, respaldos o notas)".into());
+        }
+        let from = match self.from.as_deref().filter(|s| !s.trim().is_empty()) {
+            Some(s) => local_midnight(parse_day("inicial", s)?).ok_or("Fecha inicial fuera de rango")?,
+            None => 0,
+        };
+        let to = match self.to.as_deref().filter(|s| !s.trim().is_empty()) {
+            Some(s) => local_midnight(parse_day("final", s)?.succ_opt().ok_or("Fecha final fuera de rango")?).ok_or("Fecha final fuera de rango")?,
+            None => u64::MAX,
+        };
+        if from >= to {
+            return Err("El rango de fechas está invertido".into());
+        }
+        Ok(Prepared {
+            re,
+            kinds,
+            range: (from, to),
+            scope: self.scope.as_deref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()),
+            context: self.context.unwrap_or(2).min(MAX_CONTEXT),
+            max_results: self.max_results.unwrap_or(DEFAULT_MAX_RESULTS).clamp(1, MAX_RESULTS),
+            max_file_bytes: self.max_file_mb.unwrap_or(DEFAULT_FILE_MB).clamp(1, MAX_FILE_MB) * 1024 * 1024,
+            emit_every: EMIT_EVERY,
+        })
+    }
+}
+
+// ---------- Carpetas y archivos elegibles ----------
+
+pub struct Roots {
+    pub logs: PathBuf,
+    pub backups: PathBuf,
+    pub notes: PathBuf,
+}
+
+impl Roots {
+    fn of(&self, k: Kind) -> &Path {
+        match k {
+            Kind::Logs => &self.logs,
+            Kind::Backups => &self.backups,
+            Kind::Notes => &self.notes,
+        }
+    }
+}
+
+fn hidden(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// ¿Se puede entrar a esta carpeta? Respaldos: solo la de cada equipo (nombre saneado) en el
+/// primer nivel; notas: ninguna.
+fn dir_ok(kind: Kind, depth: usize, name: &str) -> bool {
+    !hidden(name)
+        && match kind {
+            Kind::Logs => true,
+            Kind::Backups => depth == 0 && crate::backups::sanitize_device(name).map(|d| d == name).unwrap_or(false),
+            Kind::Notes => false,
+        }
+}
+
+/// ¿Este archivo se puede buscar? `rel` son los componentes de su ruta dentro de la carpeta.
+fn file_ok(kind: Kind, rel: &[String], full: &Path) -> bool {
+    let Some(name) = rel.last() else { return false };
+    if rel.iter().any(|c| hidden(c)) {
+        return false;
+    }
+    let ext = Path::new(name).extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+    match kind {
+        Kind::Logs => matches!(ext.as_deref(), Some("log" | "txt")),
+        Kind::Backups => rel.len() == 2 && crate::backups::file_re().is_match(name) && crate::backups::sanitize_device(&rel[0]).map(|d| d == rel[0]).unwrap_or(false),
+        // Un .txt con su .ntenc al lado es el resto de una nota que se protegió: no se lee.
+        Kind::Notes => rel.len() == 1 && ext.as_deref() == Some("txt") && !full.with_extension("ntenc").exists(),
+    }
+}
+
+struct Cand {
+    kind: Kind,
+    rel: String,
+    path: PathBuf,
+    size: u64,
+    time: u64,
+}
+
+fn secs(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Fecha del respaldo según su nombre (AAAA-MM-DD_HHMMSS), si no, la de modificación.
+fn backup_time(name: &str, fallback: u64) -> u64 {
+    chrono::NaiveDateTime::parse_from_str(name.get(..17).unwrap_or(""), "%Y-%m-%d_%H%M%S")
+        .ok()
+        .and_then(|d| d.and_local_timezone(chrono::Local).earliest())
+        .and_then(|t| u64::try_from(t.timestamp()).ok())
+        .unwrap_or(fallback)
+}
+
+struct Walk<'a> {
+    kind: Kind,
+    /// Carpetas de otros tipos que la de logs no debe recorrer si las contiene.
+    skip: Vec<PathBuf>,
+    q: &'a Prepared,
+    out: Vec<Cand>,
+    truncated: bool,
+}
+
+impl Walk<'_> {
+    fn dir(&mut self, dir: &Path, rel: &mut Vec<String>, cancel: &AtomicBool) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            if cancel.load(Ordering::SeqCst) {
+                return;
+            }
+            if self.out.len() >= MAX_FILES {
+                self.truncated = true;
+                return;
+            }
+            // file_type no sigue enlaces: los simbólicos (y las uniones de Windows) se saltan.
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            if ft.is_dir() {
+                if rel.len() >= MAX_DEPTH || !dir_ok(self.kind, rel.len(), &name) {
+                    continue;
+                }
+                if self.kind == Kind::Logs && path.canonicalize().map(|c| self.skip.contains(&c)).unwrap_or(true) {
+                    continue;
+                }
+                rel.push(name);
+                self.dir(&path, rel, cancel);
+                rel.pop();
+            } else if ft.is_file() {
+                rel.push(name.clone());
+                if file_ok(self.kind, rel, &path) {
+                    if let Ok(meta) = e.metadata() {
+                        let mtime = meta.modified().map(secs).unwrap_or(0);
+                        let time = if self.kind == Kind::Backups { backup_time(&name, mtime) } else { mtime };
+                        let rel_s = rel.join("/");
+                        let in_range = time >= self.q.range.0 && time < self.q.range.1;
+                        let in_scope = self.q.scope.as_ref().is_none_or(|s| rel_s.to_lowercase().contains(s));
+                        if in_range && in_scope {
+                            self.out.push(Cand { kind: self.kind, rel: rel_s, path, size: meta.len(), time });
+                        }
+                    }
+                }
+                rel.pop();
+            }
+        }
+    }
+}
+
+fn collect(roots: &Roots, q: &Prepared, cancel: &AtomicBool) -> (Vec<Cand>, bool) {
+    let canon = |p: &Path| p.canonicalize().ok();
+    let skip: Vec<PathBuf> = [canon(&roots.backups), canon(&roots.notes)].into_iter().flatten().collect();
+    let mut all = Vec::new();
+    let mut truncated = false;
+    for &kind in &q.kinds {
+        let Some(root) = canon(roots.of(kind)) else { continue };
+        if !root.is_dir() {
+            continue;
+        }
+        let mut w = Walk { kind, skip: skip.clone(), q, out: Vec::new(), truncated: false };
+        w.dir(&root, &mut Vec::new(), cancel);
+        truncated |= w.truncated;
+        all.append(&mut w.out);
+        if all.len() >= MAX_FILES {
+            truncated = true;
+            break;
+        }
+    }
+    // Lo más reciente primero: si el tope corta resultados, se pierde lo más antiguo.
+    all.sort_by(|a, b| b.time.cmp(&a.time).then_with(|| a.rel.cmp(&b.rel)));
+    (all, truncated)
+}
+
+/// Ruta real de un archivo elegible de `kind`, validada contra recorridos fuera de la carpeta
+/// (".." o rutas absolutas en `rel`), enlaces simbólicos y archivos que la búsqueda no lee.
+pub fn resolve_file(roots: &Roots, kind: Kind, rel: &str) -> Result<PathBuf, String> {
+    let comps: Vec<String> = Path::new(rel)
+        .components()
+        .map(|c| match c {
+            Component::Normal(n) => Ok(n.to_string_lossy().into_owned()),
+            _ => Err("Ruta no permitida".to_string()),
+        })
+        .collect::<Result<_, _>>()?;
+    if comps.is_empty() {
+        return Err("Ruta no permitida".into());
+    }
+    let root = roots.of(kind).canonicalize().map_err(|_| "La carpeta no existe".to_string())?;
+    let path = comps.iter().fold(root.clone(), |p, c| p.join(c));
+    let meta = fs::symlink_metadata(&path).map_err(|_| "El archivo ya no existe".to_string())?;
+    if !meta.is_file() {
+        return Err("Ruta no permitida".into());
+    }
+    let real = path.canonicalize().map_err(|e| e.to_string())?;
+    if !real.starts_with(&root) || !file_ok(kind, &comps, &real) {
+        return Err("Ruta no permitida".into());
+    }
+    Ok(real)
+}
+
+// ---------- Resultados ----------
+
+#[derive(Serialize, Debug, Clone)]
+pub struct Hit {
+    pub line: usize,
+    pub text: String,
+    /// Rangos de la coincidencia dentro de `text`, en caracteres (inicio, fin).
+    pub ranges: Vec<[usize; 2]>,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+    #[serde(skip)]
+    need_after: usize,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHits {
+    pub kind: Kind,
+    /// Ruta dentro de la carpeta del tipo, con "/".
+    pub rel: String,
+    pub size: u64,
+    pub modified: u64,
+    /// Solo se leyó el principio (el archivo supera el tope por archivo).
+    pub partial: bool,
+    /// Hay más coincidencias que las mostradas.
+    pub more: bool,
+    pub hits: Vec<Hit>,
+}
+
+#[derive(Serialize, Debug, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Summary {
+    pub scanned: usize,
+    pub total: usize,
+    pub matches: usize,
+    pub files_with_hits: usize,
+    /// Se alcanzó el tope de resultados.
+    pub truncated: bool,
+    /// Había más archivos que el tope del recorrido.
+    pub walk_truncated: bool,
+    pub skipped_binary: usize,
+    pub skipped_errors: usize,
+    pub partial: usize,
+    pub cancelled: bool,
+    pub ms: u64,
+}
+
+/// Avance que se envía a la interfaz.
+pub struct Update {
+    pub files: Vec<FileHits>,
+    pub scanned: usize,
+    pub total: usize,
+    pub matches: usize,
+}
+
+// ---------- Texto visible ----------
+
+/// Texto acotado a `max` caracteres y los rangos de coincidencia (en bytes de `text`) pasados
+/// a caracteres del texto mostrado. Si la coincidencia está lejos del inicio, se muestra la zona.
+fn display(text: &str, ranges: &[(usize, usize)], max: usize) -> (String, Vec<[usize; 2]>) {
+    let total = text.chars().count();
+    let to_char = |b: usize| text[..b].chars().count();
+    if total <= max {
+        return (text.to_string(), ranges.iter().map(|&(s, e)| [to_char(s), to_char(e)]).collect());
+    }
+    let first = ranges.first().map(|&(s, _)| to_char(s)).unwrap_or(0);
+    let start = first.saturating_sub(max / 4).min(total - max);
+    let end = start + max;
+    let body: String = text.chars().skip(start).take(max).collect();
+    let (pre, post) = (start > 0, end < total);
+    let mut out = String::new();
+    if pre {
+        out.push('…');
+    }
+    out.push_str(&body);
+    if post {
+        out.push('…');
+    }
+    let shown = out.chars().count();
+    let shift = usize::from(pre);
+    let mapped = ranges
+        .iter()
+        .filter_map(|&(s, e)| {
+            let (s, e) = (to_char(s), to_char(e));
+            (e > start && s < end).then(|| [s.max(start) - start + shift, (e.min(end) - start + shift).min(shown)])
+        })
+        .collect();
+    (out, mapped)
+}
+
+fn trim_eol(buf: &mut Vec<u8>) {
+    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+        buf.pop();
+    }
+}
+
+/// Lee una línea guardando como mucho `MAX_LINE` bytes; el resto de una línea más larga se
+/// descarta sin acumularlo. false al llegar al final del archivo.
+fn read_line_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>) -> std::io::Result<bool> {
+    buf.clear();
+    let mut got = false;
+    loop {
+        let chunk = r.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(got);
+        }
+        got = true;
+        let (used, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        let room = MAX_LINE.saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..used.min(room)]);
+        r.consume(used);
+        if done {
+            return Ok(true);
+        }
+    }
+}
+
+enum Skip {
+    Binary,
+    Error,
+}
+
+/// Busca en un archivo. Devuelve las coincidencias (posiblemente ninguna) o el motivo de omisión.
+fn search_file(c: &Cand, root: &Path, q: &Prepared, budget: &mut usize, cancel: &AtomicBool) -> Result<FileHits, Skip> {
+    // El archivo debe seguir dentro de la carpeta (un enlace creado después del recorrido no lo saca).
+    let real = c.path.canonicalize().map_err(|_| Skip::Error)?;
+    if !real.starts_with(root) {
+        return Err(Skip::Error);
+    }
+    let file = File::open(&real).map_err(|_| Skip::Error)?;
+    let meta = file.metadata().map_err(|_| Skip::Error)?;
+    if !meta.is_file() {
+        return Err(Skip::Error);
+    }
+    let partial = meta.len() > q.max_file_bytes;
+    let mut r = BufReader::with_capacity(64 * 1024, file.take(q.max_file_bytes));
+    // Un NUL en el primer bloque: archivo binario (también UTF-16), no se lee como texto.
+    match r.fill_buf() {
+        Ok(head) if head.iter().take(8192).any(|&b| b == 0) => return Err(Skip::Binary),
+        Ok(_) => {}
+        Err(_) => return Err(Skip::Error),
+    }
+    let ctx = q.context;
+    let cap = PER_FILE_HITS.min(q.max_results);
+    let mut hits: Vec<Hit> = Vec::new();
+    let mut more = false;
+    // Líneas previas (sin decodificar) y coincidencias que aún esperan líneas posteriores.
+    let mut ring: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut open: Vec<usize> = Vec::new();
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    let mut line_no = 0usize;
+    loop {
+        // Con el tope de coincidencias alcanzado solo se termina de completar el contexto pendiente.
+        if (more || *budget == 0) && open.is_empty() {
+            break;
+        }
+        match read_line_capped(&mut r, &mut buf) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(_) => break,
+        }
+        line_no += 1;
+        if line_no.is_multiple_of(4096) && cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        trim_eol(&mut buf);
+        let text = String::from_utf8_lossy(&buf);
+        // Contexto posterior de coincidencias anteriores.
+        if !open.is_empty() {
+            let (shown, _) = display(&text, &[], SHOW_CONTEXT_CHARS);
+            open.retain(|&i| {
+                hits[i].after.push(shown.clone());
+                hits[i].need_after -= 1;
+                hits[i].need_after > 0
+            });
+        }
+        if !more && *budget > 0 {
+            let ranges: Vec<(usize, usize)> = q.re.find_iter(&text).filter(|m| m.end() > m.start()).map(|m| (m.start(), m.end())).collect();
+            if !ranges.is_empty() {
+                if hits.len() >= cap {
+                    more = true;
+                } else {
+                    let (shown, mapped) = display(&text, &ranges, SHOW_CHARS);
+                    let before = ring.iter().map(|b| display(&String::from_utf8_lossy(b), &[], SHOW_CONTEXT_CHARS).0).collect();
+                    hits.push(Hit { line: line_no, text: shown, ranges: mapped, before, after: Vec::new(), need_after: ctx });
+                    if ctx > 0 {
+                        open.push(hits.len() - 1);
+                    }
+                    *budget -= 1;
+                }
+            }
+        }
+        drop(text);
+        if ctx > 0 {
+            // La línea pasa al anillo de contexto previo; el buffer más antiguo se reutiliza.
+            let recycled = if ring.len() >= ctx { ring.pop_front() } else { None };
+            ring.push_back(std::mem::replace(&mut buf, recycled.unwrap_or_else(|| Vec::with_capacity(256))));
+        }
+    }
+    Ok(FileHits { kind: c.kind, rel: c.rel.clone(), size: c.size, modified: c.time, partial, more, hits })
+}
+
+// ---------- Búsqueda ----------
+
+/// Recorre y busca. `sink` recibe los avances (como máximo uno cada 150 ms y al final). No lanza
+/// hilos: quien llama decide dónde ejecutarla.
+pub fn search(roots: &Roots, q: &Prepared, cancel: &AtomicBool, sink: &mut dyn FnMut(Update)) -> Summary {
+    let t0 = Instant::now();
+    let (cands, walk_truncated) = collect(roots, q, cancel);
+    let mut sum = Summary { total: cands.len(), walk_truncated, ..Default::default() };
+    let canon: Vec<(Kind, PathBuf)> = q.kinds.iter().filter_map(|&k| roots.of(k).canonicalize().ok().map(|p| (k, p))).collect();
+    let mut budget = q.max_results;
+    let mut pending: Vec<FileHits> = Vec::new();
+    let mut last = Instant::now();
+    let flush = |pending: &mut Vec<FileHits>, sum: &Summary, sink: &mut dyn FnMut(Update)| {
+        sink(Update { files: std::mem::take(pending), scanned: sum.scanned, total: sum.total, matches: sum.matches });
+    };
+    for c in &cands {
+        if cancel.load(Ordering::SeqCst) {
+            sum.cancelled = true;
+            break;
+        }
+        if budget == 0 {
+            sum.truncated = true;
+            break;
+        }
+        let Some((_, root)) = canon.iter().find(|(k, _)| *k == c.kind) else { continue };
+        let before = budget;
+        match search_file(c, root, q, &mut budget, cancel) {
+            Ok(f) => {
+                sum.partial += usize::from(f.partial);
+                if f.more {
+                    sum.truncated = true;
+                }
+                if !f.hits.is_empty() {
+                    sum.matches += before - budget;
+                    sum.files_with_hits += 1;
+                    pending.push(f);
+                }
+            }
+            Err(Skip::Binary) => sum.skipped_binary += 1,
+            Err(Skip::Error) => sum.skipped_errors += 1,
+        }
+        sum.scanned += 1;
+        if last.elapsed() >= q.emit_every {
+            flush(&mut pending, &sum, sink);
+            last = Instant::now();
+        }
+    }
+    if cancel.load(Ordering::SeqCst) {
+        sum.cancelled = true;
+    }
+    if budget == 0 {
+        sum.truncated = true;
+    }
+    flush(&mut pending, &sum, sink);
+    sum.ms = t0.elapsed().as_millis() as u64;
+    sum
+}
+
+// ---------- Comandos ----------
+
+/// Una sola búsqueda a la vez: otra mientras corre sería leer los mismos archivos en paralelo.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct Slot;
+
+impl Slot {
+    fn take() -> Option<Slot> {
+        RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok().map(|_| Slot)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn roots_of(state: &crate::AppState) -> Roots {
+    Roots { logs: state.logs_dir(), backups: crate::backups::root(&state.data_dir), notes: state.notes_dir() }
+}
+
+/// Inicia la búsqueda y devuelve el id de la tarea (se cancela con `tool_stop`). Los resultados
+/// llegan por el evento "tool-job": "line" con `files` (coincidencias nuevas) y `progress`,
+/// "result" con el resumen y "done" al terminar.
+#[tauri::command(async)]
+pub fn logsearch_start(params: SearchParams, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<String, String> {
+    use crate::nettools::emit;
+    let q = params.prepare()?;
+    let slot = Slot::take().ok_or("Ya hay una búsqueda en curso")?;
+    let roots = roots_of(&state);
+    let (job, cancel, finish) = state.jobs.cancelable();
+    let id = job.clone();
+    std::thread::spawn(move || {
+        let _slot = slot;
+        let sum = search(&roots, &q, &cancel, &mut |u| {
+            if u.files.is_empty() && u.scanned == 0 {
+                return;
+            }
+            emit(
+                &app,
+                &id,
+                "line",
+                String::new(),
+                Some(serde_json::json!({ "files": u.files, "progress": { "scanned": u.scanned, "total": u.total, "matches": u.matches } })),
+            );
+        });
+        emit(&app, &id, "result", String::new(), serde_json::to_value(&sum).ok());
+        finish();
+        emit(&app, &id, "done", String::new(), None);
+    });
+    Ok(job)
+}
+
+/// Abre un archivo encontrado con la aplicación del sistema, o lo muestra en su carpeta.
+/// Solo acepta archivos que la búsqueda puede leer, dentro de las carpetas de datos.
+#[tauri::command(async)]
+pub fn logsearch_open(kind: String, rel: String, reveal: bool, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = resolve_file(&roots_of(&state), Kind::parse(&kind)?, &rel)?;
+    if reveal {
+        tauri_plugin_opener::reveal_item_in_dir(&path).map_err(|e| e.to_string())
+    } else {
+        app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    struct Fx {
+        dir: PathBuf,
+        roots: Roots,
+    }
+
+    impl Fx {
+        fn new() -> Fx {
+            let dir = std::env::temp_dir().join(format!("nt-logsearch-{}", uuid::Uuid::new_v4()));
+            let roots = Roots { logs: dir.join("logs"), backups: dir.join("backups"), notes: dir.join("notes") };
+            for r in [&roots.logs, &roots.backups, &roots.notes] {
+                fs::create_dir_all(r).unwrap();
+            }
+            Fx { dir, roots }
+        }
+        fn put(&self, rel: &str, content: &[u8]) -> PathBuf {
+            let p = self.dir.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, content).unwrap();
+            p
+        }
+    }
+
+    impl Drop for Fx {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn params(query: &str) -> SearchParams {
+        SearchParams { query: query.into(), kinds: vec!["logs".into(), "backups".into()], ..Default::default() }
+    }
+
+    fn run(fx: &Fx, p: &SearchParams) -> (Vec<FileHits>, Summary) {
+        run_cancel(fx, p, &AtomicBool::new(false))
+    }
+
+    fn run_cancel(fx: &Fx, p: &SearchParams, cancel: &AtomicBool) -> (Vec<FileHits>, Summary) {
+        let q = p.prepare().unwrap();
+        let mut files = Vec::new();
+        let sum = search(&fx.roots, &q, cancel, &mut |u| files.extend(u.files));
+        (files, sum)
+    }
+
+    #[test]
+    fn finds_literal_text_with_context_and_ranges() {
+        let fx = Fx::new();
+        fx.put("logs/core1.log", b"uno\ndos\nInterface Gi0/1 down\ncuatro\ncinco\nseis\n");
+        let (files, sum) = run(&fx, &params("gi0/1"));
+        assert_eq!((files.len(), sum.matches, sum.scanned, sum.total), (1, 1, 1, 1));
+        let h = &files[0].hits[0];
+        assert_eq!((h.line, h.text.as_str()), (3, "Interface Gi0/1 down"));
+        assert_eq!(h.ranges, vec![[10, 15]], "sin distinguir mayúsculas por defecto");
+        assert_eq!(h.before, vec!["uno", "dos"]);
+        assert_eq!(h.after, vec!["cuatro", "cinco"]);
+        assert_eq!(files[0].rel, "core1.log");
+    }
+
+    #[test]
+    fn literal_text_is_not_a_regex_and_case_option_works() {
+        let fx = Fx::new();
+        fx.put("logs/a.log", b"valor a.b\nvalor aXb\nVALOR a.b\n");
+        let (f, _) = run(&fx, &params("a.b"));
+        assert_eq!(f[0].hits.len(), 2, "el punto es literal: a.b y VALOR a.b");
+        let mut p = params("valor");
+        p.case_sensitive = true;
+        let (f, _) = run(&fx, &p);
+        assert_eq!(f[0].hits.iter().map(|h| h.line).collect::<Vec<_>>(), vec![1, 2]);
+        let mut p = params(r"a\.b$");
+        p.regex = true;
+        let (f, _) = run(&fx, &p);
+        assert_eq!(f[0].hits.iter().map(|h| h.line).collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    #[test]
+    fn rejects_bad_queries() {
+        let mut p = params("(");
+        p.regex = true;
+        assert!(p.prepare().err().unwrap().starts_with("Expresión regular inválida"));
+        p.query = "a*".into();
+        assert!(p.prepare().err().unwrap().contains("vacío"));
+        assert!(params("   ").prepare().is_err());
+        assert!(params(&"x".repeat(501)).prepare().is_err());
+        let mut p = params("x");
+        p.kinds = vec![];
+        assert!(p.prepare().is_err());
+        p.kinds = vec!["otro".into()];
+        assert!(p.prepare().is_err());
+        let mut p = params("x");
+        p.from = Some("2026-13-01".into());
+        assert!(p.prepare().err().unwrap().contains("inicial"));
+        p.from = Some("2026-02-01".into());
+        p.to = Some("2026-01-01".into());
+        assert!(p.prepare().err().unwrap().contains("invertido"));
+        // Un patrón enorme excede el límite de tamaño en vez de consumir memoria.
+        let mut p = params(r"(\w{100}){100}");
+        p.regex = true;
+        assert!(p.prepare().is_err());
+    }
+
+    #[test]
+    fn regex_engine_is_linear_on_pathological_patterns() {
+        let fx = Fx::new();
+        fx.put("logs/a.log", format!("{}b\n", "a".repeat(50_000)).as_bytes());
+        let mut p = params(r"(a+)+$");
+        p.regex = true;
+        let t = Instant::now();
+        let (_, sum) = run(&fx, &p);
+        assert!(t.elapsed() < Duration::from_secs(5), "tiempo lineal: no hay retroceso catastrófico");
+        assert_eq!(sum.scanned, 1);
+    }
+
+    #[test]
+    fn context_does_not_cross_file_boundaries_and_overlaps_are_kept() {
+        let fx = Fx::new();
+        fx.put("logs/a.log", b"x1\nerror uno\nerror dos\nx4\n");
+        fx.put("logs/b.log", b"error al inicio\nsolo una\n");
+        let mut p = params("error");
+        p.context = Some(1);
+        let (files, _) = run(&fx, &p);
+        let a = files.iter().find(|f| f.rel == "a.log").unwrap();
+        assert_eq!(a.hits.len(), 2);
+        assert_eq!((a.hits[0].before.clone(), a.hits[0].after.clone()), (vec!["x1".to_string()], vec!["error dos".to_string()]));
+        assert_eq!((a.hits[1].before.clone(), a.hits[1].after.clone()), (vec!["error uno".to_string()], vec!["x4".to_string()]));
+        let b = files.iter().find(|f| f.rel == "b.log").unwrap();
+        assert!(b.hits[0].before.is_empty(), "el contexto no viene de otro archivo");
+        assert_eq!(b.hits[0].after, vec!["solo una"]);
+        // Sin contexto.
+        p.context = Some(0);
+        let (files, _) = run(&fx, &p);
+        assert!(files.iter().all(|f| f.hits.iter().all(|h| h.before.is_empty() && h.after.is_empty())));
+    }
+
+    #[test]
+    fn total_results_cap_stops_the_search() {
+        let fx = Fx::new();
+        let body: String = (0..50).map(|i| format!("evento {i}\n")).collect();
+        for n in 0..5 {
+            fx.put(&format!("logs/s{n}.log"), body.as_bytes());
+        }
+        let mut p = params("evento");
+        p.max_results = Some(60);
+        let (files, sum) = run(&fx, &p);
+        assert_eq!(files.iter().map(|f| f.hits.len()).sum::<usize>(), 60);
+        assert_eq!(sum.matches, 60);
+        assert!(sum.truncated);
+    }
+
+    #[test]
+    fn per_file_cap_marks_the_file_as_having_more() {
+        let fx = Fx::new();
+        let body = "x match\n".repeat(PER_FILE_HITS + 50);
+        fx.put("logs/a.log", body.as_bytes());
+        fx.put("logs/b.log", b"un match\n");
+        let (files, sum) = run(&fx, &params("match"));
+        let a = files.iter().find(|f| f.rel == "a.log").unwrap();
+        assert_eq!(a.hits.len(), PER_FILE_HITS);
+        assert!(a.more && sum.truncated);
+        assert!(files.iter().any(|f| f.rel == "b.log"), "un archivo ruidoso no tapa a los demás");
+    }
+
+    #[test]
+    fn big_file_is_read_only_up_to_the_cap() {
+        let fx = Fx::new();
+        let p = fx.put("logs/grande.log", b"");
+        let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+        let line = "linea de relleno sin nada especial para el log grande\n";
+        // ~1.2 MB de relleno y la coincidencia pasado el tope de 1 MB.
+        for _ in 0..(1_300_000 / line.len()) {
+            f.write_all(line.as_bytes()).unwrap();
+        }
+        f.write_all(b"AQUI-ESTA-LA-CLAVE\n").unwrap();
+        drop(f);
+        let mut params_ = params("AQUI-ESTA");
+        params_.max_file_mb = Some(1);
+        let (files, sum) = run(&fx, &params_);
+        assert!(files.is_empty(), "la coincidencia está más allá del tope");
+        assert_eq!(sum.partial, 1, "el archivo se informa como leído solo en parte");
+        params_.max_file_mb = Some(2);
+        let (files, sum) = run(&fx, &params_);
+        assert_eq!((files.len(), sum.partial), (1, 0));
+    }
+
+    #[test]
+    fn large_log_streams_with_bounded_memory_and_a_giant_line() {
+        let fx = Fx::new();
+        let p = fx.put("logs/enorme.log", b"");
+        let mut f = std::io::BufWriter::new(fs::OpenOptions::new().append(true).open(&p).unwrap());
+        for i in 0..400_000 {
+            writeln!(f, "2026-01-01 10:00:{:02} sw1 %LINK-3-UPDOWN: evento {i}", i % 60).unwrap();
+        }
+        // Una línea de 3 MB sin saltos: se examina solo hasta el tope por línea.
+        f.write_all(&vec![b'z'; 3 * 1024 * 1024]).unwrap();
+        f.write_all(b"\nfinal NEEDLE ok\n").unwrap();
+        drop(f);
+        assert!(fs::metadata(&p).unwrap().len() > 20_000_000);
+        let t = Instant::now();
+        let (files, sum) = run(&fx, &params("needle"));
+        assert!(t.elapsed() < Duration::from_secs(20), "tardó {:?}", t.elapsed());
+        assert_eq!(files[0].hits[0].text, "final NEEDLE ok");
+        assert_eq!(files[0].hits[0].line, 400_002);
+        assert_eq!(sum.matches, 1);
+        let mut q = params("evento 399999");
+        q.context = Some(0);
+        assert_eq!(run(&fx, &q).0[0].hits[0].line, 400_000);
+    }
+
+    #[test]
+    fn long_matching_lines_are_shortened_around_the_match() {
+        let fx = Fx::new();
+        let line = format!("{}AGUJA{}", "a".repeat(5000), "b".repeat(5000));
+        fx.put("logs/a.log", line.as_bytes());
+        let (files, _) = run(&fx, &params("aguja"));
+        let h = &files[0].hits[0];
+        let chars: Vec<char> = h.text.chars().collect();
+        assert!(chars.len() <= SHOW_CHARS + 2 && chars[0] == '…' && *chars.last().unwrap() == '…');
+        let [s, e] = h.ranges[0];
+        assert_eq!(chars[s..e].iter().collect::<String>(), "AGUJA");
+    }
+
+    #[test]
+    fn cancellation_stops_between_files() {
+        let fx = Fx::new();
+        for n in 0..30 {
+            fx.put(&format!("logs/s{n:02}.log"), b"hay un match aqui\n");
+        }
+        let q = params("match").prepare().unwrap();
+        let cancel = AtomicBool::new(true);
+        let sum = search(&fx.roots, &q, &cancel, &mut |_| {});
+        assert!(sum.cancelled);
+        assert_eq!(sum.scanned, 0);
+
+        // Cancelada a mitad de camino: el aviso de avance la dispara.
+        let cancel = AtomicBool::new(false);
+        let mut q = q;
+        q.emit_every = Duration::ZERO;
+        let sum = search(&fx.roots, &q, &cancel, &mut |_| cancel.store(true, Ordering::SeqCst));
+        assert!(sum.cancelled);
+        assert!(sum.scanned >= 1 && sum.scanned < 30, "se detuvo a mitad: {}", sum.scanned);
+    }
+
+    #[test]
+    fn cancellation_interrupts_a_huge_single_file() {
+        let fx = Fx::new();
+        let p = fx.put("logs/a.log", b"");
+        let mut f = std::io::BufWriter::new(fs::OpenOptions::new().append(true).open(&p).unwrap());
+        for _ in 0..2_000_000 {
+            f.write_all(b"relleno\n").unwrap();
+        }
+        drop(f);
+        let q = params("no-existe").prepare().unwrap();
+        let cancel = AtomicBool::new(true);
+        let t = Instant::now();
+        // La marca se revisa cada 4096 líneas, no solo entre archivos (collect ya la respeta).
+        let cands = Cand { kind: Kind::Logs, rel: "a.log".into(), path: p.clone(), size: 0, time: 0 };
+        let mut budget = 10;
+        let root = fx.roots.logs.canonicalize().unwrap();
+        let r = search_file(&cands, &root, &q, &mut budget, &cancel).ok().unwrap();
+        assert!(r.hits.is_empty() && t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn binary_and_non_utf8_files() {
+        let fx = Fx::new();
+        fx.put("logs/bin.log", b"cabecera\0\0\0 token-secreto\n");
+        // Latin-1: "configuración" con 0xF3 inválido en UTF-8.
+        fx.put("logs/latin1.log", b"l1 configuraci\xf3n activa\nl2 token-ok\n");
+        fx.put("logs/utf16.log", &"token-ok\n".encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
+        let (files, sum) = run(&fx, &params("token"));
+        assert_eq!(files.len(), 1, "solo el texto Latin-1");
+        assert_eq!(files[0].rel, "latin1.log");
+        assert_eq!(sum.skipped_binary, 2);
+        let (files, _) = run(&fx, &params("configuraci"));
+        assert!(files[0].hits[0].text.contains('\u{fffd}'), "bytes inválidos se muestran como �, sin fallar");
+    }
+
+    #[test]
+    fn only_eligible_files_are_read() {
+        let fx = Fx::new();
+        fx.put("logs/ok.log", b"clave-buscada\n");
+        fx.put("logs/ok.txt", b"clave-buscada\n");
+        fx.put("logs/datos.json", b"clave-buscada\n");
+        fx.put("logs/.oculto.log", b"clave-buscada\n");
+        fx.put("logs/.dir/oculto.log", b"clave-buscada\n");
+        fx.put("logs/equipo/sub/profundo.log", b"clave-buscada\n");
+        fx.put("backups/core_sw/2026-01-02_101010.txt", b"clave-buscada\n");
+        fx.put("backups/core_sw/.secret-key", b"clave-buscada\n");
+        fx.put("backups/core_sw/.2026-01-02_101010.txt.secrets.json", b"clave-buscada\n");
+        fx.put("backups/core_sw/otro.txt", b"clave-buscada\n");
+        fx.put("backups/suelto.txt", b"clave-buscada\n");
+        fx.put("backups/core sw/2026-01-02_101010.txt", b"clave-buscada\n");
+        fx.put("notes/abierta.txt", b"clave-buscada\n");
+        fx.put("notes/secreta.ntenc", b"clave-buscada\n");
+        fx.put("notes/protegida.txt", b"clave-buscada\n");
+        fx.put("notes/protegida.ntenc", b"cifrado");
+        let mut p = params("clave-buscada");
+        p.kinds = vec!["logs".into(), "backups".into(), "notes".into()];
+        let (files, _) = run(&fx, &p);
+        let mut got: Vec<String> = files.iter().map(|f| format!("{:?}:{}", f.kind, f.rel)).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["Backups:core_sw/2026-01-02_101010.txt", "Logs:equipo/sub/profundo.log", "Logs:ok.log", "Logs:ok.txt", "Notes:abierta.txt"]
+        );
+        // Sin elegir notas, no se leen aunque estén sin protección.
+        let (files, _) = run(&fx, &params("clave-buscada"));
+        assert!(files.iter().all(|f| f.kind != Kind::Notes));
+    }
+
+    #[test]
+    fn kinds_scope_and_date_filters() {
+        let fx = Fx::new();
+        fx.put("logs/core1_20260101.log", b"hit\n");
+        fx.put("logs/edge2_20260101.log", b"hit\n");
+        fx.put("backups/core1/2026-01-05_120000.txt", b"hit\n");
+        fx.put("backups/core1/2026-03-05_120000.txt", b"hit\n");
+        let mut p = params("hit");
+        p.kinds = vec!["backups".into()];
+        let (f, _) = run(&fx, &p);
+        assert_eq!(f.len(), 2);
+        p.from = Some("2026-02-01".into());
+        let (f, _) = run(&fx, &p);
+        assert_eq!(f.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), vec!["core1/2026-03-05_120000.txt"]);
+        p.from = Some("2026-01-05".into());
+        p.to = Some("2026-01-05".into());
+        let (f, _) = run(&fx, &p);
+        assert_eq!(f.len(), 1, "los límites son inclusivos");
+        assert_eq!(f[0].rel, "core1/2026-01-05_120000.txt");
+        // Por equipo o sesión.
+        let mut p = params("hit");
+        p.scope = Some("EDGE".into());
+        let (f, _) = run(&fx, &p);
+        assert_eq!(f.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), vec!["edge2_20260101.log"]);
+        // El rango de fechas de un log usa su fecha de modificación (hoy): fuera de un rango pasado.
+        let mut p = params("hit");
+        p.kinds = vec!["logs".into()];
+        p.to = Some("2020-01-01".into());
+        assert!(run(&fx, &p).0.is_empty());
+    }
+
+    #[test]
+    fn results_are_newest_first() {
+        let fx = Fx::new();
+        fx.put("backups/sw/2025-01-01_000000.txt", b"hit\n");
+        fx.put("backups/sw/2026-06-01_000000.txt", b"hit\n");
+        fx.put("backups/sw/2025-12-01_000000.txt", b"hit\n");
+        let mut p = params("hit");
+        p.kinds = vec!["backups".into()];
+        let (f, _) = run(&fx, &p);
+        let names: Vec<&str> = f.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(names, vec!["sw/2026-06-01_000000.txt", "sw/2025-12-01_000000.txt", "sw/2025-01-01_000000.txt"]);
+    }
+
+    #[test]
+    fn resolve_file_rejects_paths_outside_the_folders() {
+        let fx = Fx::new();
+        fx.put("logs/ok.log", b"x");
+        fx.put("secreto.log", b"fuera de la carpeta");
+        fx.put("backups/sw/2026-01-02_101010.txt", b"x");
+        fx.put("backups/sw/.secret-key", b"x");
+        assert!(resolve_file(&fx.roots, Kind::Logs, "ok.log").is_ok());
+        for bad in ["../secreto.log", "/etc/passwd", "..", "", "a/../../secreto.log", "ok.log/..", "./../secreto.log"] {
+            assert!(resolve_file(&fx.roots, Kind::Logs, bad).is_err(), "{bad:?} debía rechazarse");
+        }
+        assert!(resolve_file(&fx.roots, Kind::Backups, "sw/2026-01-02_101010.txt").is_ok());
+        assert!(resolve_file(&fx.roots, Kind::Backups, "sw/.secret-key").is_err(), "la llave no se abre");
+        assert!(resolve_file(&fx.roots, Kind::Logs, "../backups/sw/.secret-key").is_err());
+        assert!(resolve_file(&fx.roots, Kind::Notes, "abierta.exe").is_err());
+        assert!(resolve_file(&fx.roots, Kind::Logs, "no-existe.log").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_never_followed() {
+        use std::os::unix::fs::symlink;
+        let fx = Fx::new();
+        let outside = fx.put("fuera/secreto.log", b"clave-buscada\n");
+        let outside_dir = outside.parent().unwrap().to_path_buf();
+        fx.put("logs/real.log", b"clave-buscada\n");
+        symlink(&outside, fx.dir.join("logs/enlace.log")).unwrap();
+        symlink(&outside_dir, fx.dir.join("logs/carpeta")).unwrap();
+        symlink(&outside, fx.dir.join("notes/nota.txt")).unwrap();
+        let mut p = params("clave-buscada");
+        p.kinds = vec!["logs".into(), "notes".into()];
+        let (files, sum) = run(&fx, &p);
+        assert_eq!(files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), vec!["real.log"]);
+        assert_eq!(sum.total, 1);
+        assert!(resolve_file(&fx.roots, Kind::Logs, "enlace.log").is_err());
+        assert!(resolve_file(&fx.roots, Kind::Logs, "carpeta/secreto.log").is_err());
+        // Un enlace creado entre el recorrido y la lectura tampoco saca el archivo de la carpeta.
+        let q = params("clave-buscada").prepare().unwrap();
+        let root = fx.roots.logs.canonicalize().unwrap();
+        let cand = Cand { kind: Kind::Logs, rel: "enlace.log".into(), path: fx.dir.join("logs/enlace.log"), size: 0, time: 0 };
+        let mut budget = 5;
+        assert!(matches!(search_file(&cand, &root, &q, &mut budget, &AtomicBool::new(false)), Err(Skip::Error)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_logs_folder_that_contains_the_data_folder_does_not_leak_notes_or_backups() {
+        let fx = Fx::new();
+        fx.put("notes/privada.txt", b"clave-buscada\n");
+        fx.put("backups/sw/2026-01-02_101010.txt", b"clave-buscada\n");
+        fx.put("otros/app.log", b"clave-buscada\n");
+        // Carpeta de logs elegida por el usuario: la raíz que contiene notas y respaldos.
+        let roots = Roots { logs: fx.dir.clone(), backups: fx.roots.backups.clone(), notes: fx.roots.notes.clone() };
+        let q = params("clave-buscada").prepare().unwrap();
+        let mut files = Vec::new();
+        search(&roots, &q, &AtomicBool::new(false), &mut |u| files.extend(u.files));
+        let got: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+        assert!(got.contains(&"otros/app.log"));
+        assert!(!got.iter().any(|r| r.starts_with("notes/") || r.starts_with("backups/")), "{got:?}");
+    }
+
+    #[test]
+    fn progress_is_reported_incrementally() {
+        let fx = Fx::new();
+        for n in 0..3 {
+            fx.put(&format!("logs/s{n}.log"), b"match\n");
+        }
+        let q = params("match").prepare().unwrap();
+        let mut last = (0, 0, 0);
+        let sum = search(&fx.roots, &q, &AtomicBool::new(false), &mut |u| last = (u.scanned, u.total, u.matches));
+        assert_eq!(last, (3, 3, 3));
+        assert_eq!((sum.files_with_hits, sum.matches), (3, 3));
+    }
+
+    #[test]
+    fn display_maps_ranges_with_multibyte_text() {
+        let s = "ñandú está aquí: ñu";
+        let b = s.rfind("ñu").unwrap();
+        let (t, r) = display(s, &[(b, b + "ñu".len())], 100);
+        assert_eq!(t.chars().skip(r[0][0]).take(r[0][1] - r[0][0]).collect::<String>(), "ñu");
+    }
+
+    #[test]
+    fn only_one_search_runs_at_a_time() {
+        let a = Slot::take().expect("libre");
+        assert!(Slot::take().is_none());
+        drop(a);
+        assert!(Slot::take().is_some());
+    }
+}

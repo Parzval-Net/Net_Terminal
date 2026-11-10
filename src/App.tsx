@@ -1419,6 +1419,7 @@ function Workspace({
                 tabs={tabBriefs}
                 onFocusTab={focusTab}
                 onReconnectTab={reconnectTab}
+                onToast={toast}
                 sessions={sessions}
                 onScp={h.scp}
                 terminals={terminals}

@@ -1492,12 +1492,12 @@
       "cmd": "clear statistics {{puertos}}",
       "desc": "Pone en cero los contadores de los puertos indicados para medir errores desde un punto conocido.",
       "cat": "Interfaces",
-      "risk": "disruptive",
+      "risk": "change",
       "note": "Usar 'clear statistics global' para todos los puertos. Pierde el historial de contadores.",
       "platforms": [
         "aossw"
       ],
-      "source": "https://support.hpe.com/hpesc/public/docDisplay?docId=a00061573en_us"
+      "source": "https://arubanetworking.hpe.com/techdocs/AOS-S/16.11/MCG/KB/content/kb/cle-sta.htm"
     },
     {
       "cmd": "interface {{puertos}} disable",

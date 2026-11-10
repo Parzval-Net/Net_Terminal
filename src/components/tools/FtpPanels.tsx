@@ -5,6 +5,8 @@ import { AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Folder, FileText, Lock
 import type { Settings } from "../../lib/settings";
 import { Btn, CopyText, Label, Section, StatusPill, Toggle, fmtBytes } from "./ui";
 import type { ScpRequest, TerminalRef } from "./FileManager";
+import { GuardStat, ServerGuardPanel, commandIp, useGuardPrefs } from "./ServerGuard";
+import type { LocalIf } from "../../lib/serverGuard";
 import { SCP_EXIT_EVENT, type ScpExit, scpOutcome } from "../../lib/scpVerify";
 
 interface FtpInfo {
@@ -20,7 +22,9 @@ export function FtpServerSection({
   running,
   onChange,
   refreshRunning,
-  ip,
+  ip: chosenIp,
+  ips,
+  stat,
   file,
 }: {
   settings: Settings;
@@ -28,9 +32,13 @@ export function FtpServerSection({
   onChange: (p: Partial<Settings>) => void;
   refreshRunning: () => void;
   ip: string;
+  ips: LocalIf[];
+  stat?: GuardStat;
   file: string;
 }) {
   const on = running.includes("ftp");
+  const guard = useGuardPrefs("ftp", s, onChange, ips);
+  const ip = commandIp(guard.bind, chosenIp);
   const [info, setInfo] = useState<FtpInfo | null>(null);
   // Subidas: solo por esta sesión de la app, nunca quedan habilitadas al reiniciar.
   const [write, setWrite] = useState(false);
@@ -69,11 +77,12 @@ export function FtpServerSection({
 
   const toggle = async () => {
     setError("");
+    if (!on && guard.allowErrors.length) return setError(`FTP: ${guard.allowErrors[0]}.`);
     try {
       if (on) {
         await invoke("server_stop", { kind: "ftp" });
         setInfo(null);
-      } else setInfo(await invoke<FtpInfo>("ftp_server_start", { port: s.ftpPort, allowWrite: write }));
+      } else setInfo(await invoke<FtpInfo>("ftp_server_start", { port: s.ftpPort, allowWrite: write, opts: guard.opts() }));
     } catch (e) {
       setError(String(e));
     }
@@ -101,6 +110,7 @@ export function FtpServerSection({
       <p className="flex items-start gap-1.5 text-[11.5px] text-warn mb-2">
         <AlertTriangle size={13} className="mt-0.5 shrink-0" /> FTP no cifra: usuario, contraseña y archivos viajan en claro. Prefiere SCP/SFTP o HTTP si el equipo lo soporta.
       </p>
+      <ServerGuardPanel kind="ftp" settings={s} onChange={onChange} ips={ips} running={on} stat={stat} />
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
       {on && info && (
         <div className="mb-2 flex items-center gap-2 text-[12px]">

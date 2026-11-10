@@ -5,6 +5,7 @@ import { FolderOpen, Pause, Play } from "lucide-react";
 import { Settings } from "../../lib/settings";
 import { Btn, CopyText, IpSelect, Label, Section, StatusPill, Toggle } from "./ui";
 import { useLocalIp } from "./useLocalIp";
+import { ServerGuardPanel, commandIp, useGuardPrefs, useGuardStats } from "./ServerGuard";
 import { loghostCommands } from "../../lib/devicefs";
 
 interface Msg {
@@ -36,6 +37,8 @@ export function SyslogTool({
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState("");
   const { ips, ip: localIp, setIp } = useLocalIp();
+  const guard = useGuardPrefs("syslog", s, onChange, ips);
+  const stats = useGuardStats(running);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
   const on = running.includes("syslog");
@@ -52,9 +55,10 @@ export function SyslogTool({
 
   const toggle = async () => {
     setError("");
+    if (!on && guard.allowErrors.length) return setError(`Syslog: ${guard.allowErrors[0]}.`);
     try {
       if (on) await invoke("server_stop", { kind: "syslog" });
-      else await invoke("server_start", { kind: "syslog", port: s.syslogPort, save: s.syslogSave });
+      else await invoke("server_start", { kind: "syslog", port: s.syslogPort, save: s.syslogSave, opts: guard.opts() });
     } catch (e) {
       setError(String(e));
     }
@@ -66,7 +70,7 @@ export function SyslogTool({
     return msgs.filter((m) => m.severity <= minSev && (!q || m.msg.toLowerCase().includes(q) || m.src.includes(q)));
   }, [msgs, filter, minSev]);
 
-  const ip = localIp || "IP_DE_ESTE_PC";
+  const ip = commandIp(guard.bind, localIp || "IP_DE_ESTE_PC");
   const cmds = loghostCommands(ip, s.syslogPort);
 
   return (
@@ -91,7 +95,10 @@ export function SyslogTool({
           </Btn>
         </div>
         {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
-        <div className="mt-3 flex flex-wrap items-end gap-3">
+        <div className="mt-3">
+          <ServerGuardPanel kind="syslog" settings={s} onChange={onChange} ips={ips} running={on} stat={stats.syslog} />
+        </div>
+        <div className="flex flex-wrap items-end gap-3">
           <IpSelect ips={ips} ip={localIp} onChange={setIp} className="w-72" />
           <div className="flex flex-wrap items-center gap-1.5 pb-1 text-[11.5px] text-muted">
             Configura el equipo: Cisco <CopyText text={cmds.cisco} /> Huawei <CopyText text={cmds.huawei} />
