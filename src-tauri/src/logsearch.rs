@@ -221,7 +221,9 @@ fn file_ok(kind: Kind, rel: &[String], full: &Path) -> bool {
 struct Cand {
     kind: Kind,
     rel: String,
+    /// Ruta en disco (con `.nte` si está cifrado).
     path: PathBuf,
+    enc: bool,
     size: u64,
     time: u64,
 }
@@ -241,6 +243,8 @@ fn backup_time(name: &str, fallback: u64) -> u64 {
 
 struct Walk<'a> {
     kind: Kind,
+    /// La carpeta está cifrada: solo se leen los `.nte` (un claro no se lee en silencio).
+    enc: bool,
     /// Carpetas de otros tipos que la de logs no debe recorrer si las contiene.
     skip: Vec<PathBuf>,
     q: &'a Prepared,
@@ -264,8 +268,14 @@ impl Walk<'_> {
             if ft.is_symlink() {
                 continue;
             }
-            let name = e.file_name().to_string_lossy().into_owned();
+            let raw = e.file_name().to_string_lossy().into_owned();
             let path = e.path();
+            // En una carpeta cifrada el nombre lógico es el del archivo sin `.nte`.
+            let name = match (self.enc && ft.is_file(), raw.strip_suffix(".nte")) {
+                (true, Some(base)) => base.to_string(),
+                (true, None) => continue,
+                _ => raw,
+            };
             if ft.is_dir() {
                 if rel.len() >= MAX_DEPTH || !dir_ok(self.kind, rel.len(), &name) {
                     continue;
@@ -278,7 +288,7 @@ impl Walk<'_> {
                 rel.pop();
             } else if ft.is_file() {
                 rel.push(name.clone());
-                if file_ok(self.kind, rel, &path) {
+                if file_ok(self.kind, rel, &logical(&path)) {
                     if let Ok(meta) = e.metadata() {
                         let mtime = meta.modified().map(secs).unwrap_or(0);
                         let time = if self.kind == Kind::Backups { backup_time(&name, mtime) } else { mtime };
@@ -286,7 +296,7 @@ impl Walk<'_> {
                         let in_range = time >= self.q.range.0 && time < self.q.range.1;
                         let in_scope = self.q.scope.as_ref().is_none_or(|s| rel_s.to_lowercase().contains(s));
                         if in_range && in_scope {
-                            self.out.push(Cand { kind: self.kind, rel: rel_s, path, size: meta.len(), time });
+                            self.out.push(Cand { kind: self.kind, rel: rel_s, path, enc: self.enc, size: meta.len(), time });
                         }
                     }
                 }
@@ -306,7 +316,8 @@ fn collect(roots: &Roots, q: &Prepared, cancel: &AtomicBool) -> (Vec<Cand>, bool
         if !root.is_dir() {
             continue;
         }
-        let mut w = Walk { kind, skip: skip.clone(), q, out: Vec::new(), truncated: false };
+        let enc = crate::datacrypt::shared_for(&root).is_some();
+        let mut w = Walk { kind, enc, skip: skip.clone(), q, out: Vec::new(), truncated: false };
         w.dir(&root, &mut Vec::new(), cancel);
         truncated |= w.truncated;
         all.append(&mut w.out);
@@ -352,14 +363,17 @@ pub fn resolve_file(roots: &Roots, kind: Kind, rel: &str) -> Result<PathBuf, Str
         return Err("Ruta no permitida".into());
     }
     let root = roots.of(kind).canonicalize().map_err(|_| "La carpeta no existe".to_string())?;
-    let path = comps.iter().fold(root.clone(), |p, c| p.join(c));
+    let mut path = comps.iter().fold(root.clone(), |p, c| p.join(c));
+    if crate::datacrypt::shared_for(&root).is_some() {
+        path = crate::datacrypt::physical(&path);
+    }
     let meta = fs::symlink_metadata(&path).map_err(|_| "El archivo ya no existe".to_string())?;
     if !meta.is_file() {
         return Err("Ruta no permitida".into());
     }
     let excluded = excluded_for(roots, kind);
     let (_file, real) = open_checked(&path, &root, &excluded)?;
-    if !file_ok(kind, &comps, &real) {
+    if !file_ok(kind, &comps, &logical(&real)) {
         return Err("Ruta no permitida".into());
     }
     Ok(real)
@@ -607,12 +621,19 @@ fn search_file(c: &Cand, scope: &Scope, q: &Prepared, budget: &mut usize, cancel
     // o un cambio posterior al recorrido no lo saca de ahí ni cuelga la búsqueda).
     let (file, real) = open_checked(&c.path, scope.root, scope.excluded).map_err(|_| Skip::Error)?;
     let comps: Vec<String> = c.rel.split('/').map(str::to_string).collect();
-    if !file_ok(c.kind, &comps, &real) {
+    if !file_ok(c.kind, &comps, &logical(&real)) {
         return Err(Skip::Error);
     }
     let meta = file.metadata().map_err(|_| Skip::Error)?;
     let partial = meta.len() > q.max_file_bytes;
-    let mut r = BufReader::with_capacity(64 * 1024, file.take(q.max_file_bytes));
+    // Cifrado: se descifra en memoria bloque a bloque (cada bloque se verifica); nada en claro a disco.
+    let source: Box<dyn Read> = if c.enc {
+        let dk = crate::datacrypt::key_for(scope.root).ok().flatten().ok_or(Skip::Error)?;
+        Box::new(crate::datacrypt::wrap_reader(file, &dk).map_err(|_| Skip::Error)?)
+    } else {
+        Box::new(file)
+    };
+    let mut r = BufReader::with_capacity(64 * 1024, source.take(q.max_file_bytes));
     // Un NUL en el primer bloque: archivo binario (también UTF-16), no se lee como texto.
     match r.fill_buf() {
         Ok(head) if head.iter().take(8192).any(|&b| b == 0) => return Err(Skip::Binary),
@@ -849,11 +870,15 @@ impl Drop for JobEnd {
 }
 
 /// Abre un archivo encontrado con la aplicación del sistema, o lo muestra en su carpeta.
-/// Solo acepta archivos que la búsqueda puede leer, dentro de las carpetas de datos.
+/// Solo acepta archivos que la búsqueda puede leer, dentro de las carpetas de datos. Un archivo
+/// cifrado no se abre afuera (habría que escribirlo en claro): se ve en la app o se exporta.
 #[tauri::command(async)]
 pub fn logsearch_open(kind: String, rel: String, reveal: bool, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     let path = resolve_file(&roots_of(&state), Kind::parse(&kind)?, &rel)?;
+    if !reveal && path.extension().is_some_and(|e| e == crate::datacrypt::EXT) {
+        return Err("El archivo está cifrado: usa «Ver» o «Exportar descifrado…»".into());
+    }
     if reveal {
         tauri_plugin_opener::reveal_item_in_dir(&path).map_err(|e| e.to_string())
     } else {
@@ -861,6 +886,110 @@ pub fn logsearch_open(kind: String, rel: String, reveal: bool, app: tauri::AppHa
     }
 }
 
+
+/// Ruta lógica de un archivo en disco (sin `.nte`), para las reglas de elegibilidad.
+fn logical(real: &Path) -> PathBuf {
+    match real.to_str().and_then(|s| s.strip_suffix(".nte")) {
+        Some(s) => PathBuf::from(s),
+        None => real.to_path_buf(),
+    }
+}
+
+/// Tope del visor dentro de la app.
+pub const VIEW_MAX: u64 = 4 * 1024 * 1024;
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileText {
+    pub text: String,
+    /// Solo se muestra el principio (el archivo supera el tope del visor).
+    pub truncated: bool,
+    /// Archivo cifrado sin bloque de cierre: grabación en curso o cortada.
+    pub incomplete: bool,
+    pub encrypted: bool,
+}
+
+/// Archivo elegible abierto para leer: en claro o descifrándose en flujo.
+enum Source {
+    Plain(File),
+    Enc(crate::datacrypt::EncReader<File>),
+}
+
+impl Read for Source {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Source::Plain(f) => f.read(buf),
+            Source::Enc(r) => r.read(buf),
+        }
+    }
+}
+
+/// Abre un archivo elegible con las mismas validaciones que la búsqueda. Devuelve el lector y el
+/// nombre lógico (sin `.nte`).
+fn open_logical(roots: &Roots, kind: Kind, rel: &str) -> Result<(Source, String), String> {
+    let path = resolve_file(roots, kind, rel)?;
+    let root = roots.of(kind).canonicalize().map_err(|_| "La carpeta no existe".to_string())?;
+    let (file, _) = open_checked(&path, &root, &excluded_for(roots, kind))?;
+    let name = logical(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if path.extension().is_some_and(|e| e == crate::datacrypt::EXT) {
+        let dk = crate::datacrypt::key_for(&root).map_err(|e| e.to_string())?.ok_or("La carpeta no está cifrada")?;
+        let r = crate::datacrypt::wrap_reader(file, &dk).map_err(|e| e.to_string())?;
+        return Ok((Source::Enc(r), name));
+    }
+    Ok((Source::Plain(file), name))
+}
+
+/// Texto de un archivo para el visor de la app (hasta `VIEW_MAX`), sin pasar por el disco en claro.
+pub fn read_text(roots: &Roots, kind: Kind, rel: &str) -> Result<FileText, String> {
+    let (mut src, _) = open_logical(roots, kind, rel)?;
+    let mut buf = Vec::new();
+    (&mut src).take(VIEW_MAX + 1).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let truncated = buf.len() as u64 > VIEW_MAX;
+    buf.truncate(VIEW_MAX as usize);
+    let (encrypted, incomplete) = match &src {
+        Source::Plain(_) => (false, false),
+        // Sin cortar, el lector llegó al final y sabe si faltaba el bloque de cierre.
+        Source::Enc(r) => (true, !truncated && r.incomplete()),
+    };
+    Ok(FileText { text: String::from_utf8_lossy(&buf).into_owned(), truncated, incomplete, encrypted })
+}
+
+/// Copia un archivo (descifrado si corresponde) a `dest`, elegido por el usuario fuera de la carpeta
+/// de datos. Escritura atómica con permisos 600. Devuelve los bytes escritos.
+pub fn export_plain(roots: &Roots, kind: Kind, rel: &str, dest: &Path) -> Result<u64, String> {
+    let (mut r, _) = open_logical(roots, kind, rel)?;
+    let mut buf = Vec::new();
+    r.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    crate::seal::write_atomic(dest, &buf)?;
+    let n = buf.len() as u64;
+    use zeroize::Zeroize;
+    buf.zeroize();
+    Ok(n)
+}
+
+/// Texto de un archivo encontrado para el visor de la app (también cifrado).
+#[tauri::command(async)]
+pub fn logsearch_view(kind: String, rel: String, state: tauri::State<'_, crate::AppState>) -> Result<FileText, String> {
+    read_text(&roots_of(&state), Kind::parse(&kind)?, &rel)
+}
+
+/// "Exportar descifrado": el destino lo elige el usuario en el diálogo nativo que abre el backend
+/// (nunca dentro de la carpeta de datos, que sirven TFTP, HTTP y FTP). Ok(None) si canceló.
+#[tauri::command(async)]
+pub fn logsearch_export(kind: String, rel: String, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let roots = roots_of(&state);
+    let kind = Kind::parse(&kind)?;
+    // Valida antes de abrir el diálogo.
+    let (_, name) = open_logical(&roots, kind, &rel)?;
+    let Some(file) = app.dialog().file().set_title("Exportar descifrado").set_file_name(&name).blocking_save_file() else {
+        return Ok(None);
+    };
+    let dest = file.into_path().map_err(|e| e.to_string())?;
+    crate::bundle::check_export_dest(&dest, &state.data_dir)?;
+    export_plain(&roots, kind, &rel, &dest)?;
+    Ok(Some(dest.to_string_lossy().into_owned()))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,7 +1248,7 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let t = Instant::now();
         // La marca se revisa por bytes leídos y por tiempo, no solo entre archivos.
-        let cands = Cand { kind: Kind::Logs, rel: "a.log".into(), path: p.clone(), size: 0, time: 0 };
+        let cands = Cand { kind: Kind::Logs, rel: "a.log".into(), path: p.clone(), enc: false, size: 0, time: 0 };
         let mut budget = 10;
         let root = fx.roots.logs.canonicalize().unwrap();
         let r = search_file(&cands, &Scope { root: &root, excluded: &[] }, &q, &mut budget, &cancel).ok().unwrap();
@@ -1141,7 +1270,7 @@ mod tests {
         drop(f);
         let q = params("aguja").prepare().unwrap();
         let root = fx.roots.logs.canonicalize().unwrap();
-        let cand = Cand { kind: Kind::Logs, rel: "a.log".into(), path: p, size: 0, time: 0 };
+        let cand = Cand { kind: Kind::Logs, rel: "a.log".into(), path: p, enc: false, size: 0, time: 0 };
         let scope = Scope { root: &root, excluded: &[] };
         let mut budget = 10;
         assert_eq!(search_file(&cand, &scope, &q, &mut budget, &AtomicBool::new(false)).ok().unwrap().hits.len(), 1, "sin cancelar se llega al final");
@@ -1333,7 +1462,7 @@ mod tests {
         // Un enlace creado entre el recorrido y la lectura tampoco saca el archivo de la carpeta.
         let q = params("clave-buscada").prepare().unwrap();
         let root = fx.roots.logs.canonicalize().unwrap();
-        let cand = Cand { kind: Kind::Logs, rel: "enlace.log".into(), path: fx.dir.join("logs/enlace.log"), size: 0, time: 0 };
+        let cand = Cand { kind: Kind::Logs, rel: "enlace.log".into(), path: fx.dir.join("logs/enlace.log"), enc: false, size: 0, time: 0 };
         let mut budget = 5;
         let scope = Scope { root: &root, excluded: &[] };
         assert!(matches!(search_file(&cand, &scope, &q, &mut budget, &AtomicBool::new(false)), Err(Skip::Error)));
@@ -1348,7 +1477,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
         let root = fx.roots.logs.canonicalize().unwrap();
         let t = Instant::now();
-        let cand = Cand { kind: Kind::Logs, rel: "cola.log".into(), path: fifo, size: 0, time: 0 };
+        let cand = Cand { kind: Kind::Logs, rel: "cola.log".into(), path: fifo, enc: false, size: 0, time: 0 };
         let q = params("x").prepare().unwrap();
         let mut budget = 5;
         let scope = Scope { root: &root, excluded: &[] };

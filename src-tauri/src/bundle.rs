@@ -1117,6 +1117,24 @@ pub fn check_dest(path: &Path, data_dir: &Path) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+/// Destino de una exportación en claro (log o respaldo descifrado, elegido en el diálogo nativo):
+/// ruta absoluta, no una carpeta, fuera de la carpeta de datos (la sirven TFTP, HTTP y FTP) y fuera
+/// de cualquier carpeta cifrada (ahí un archivo en claro sería un "claro encontrado").
+pub fn check_export_dest(path: &Path, data_dir: &Path) -> Result<(), String> {
+    if !path.is_absolute() || path.is_dir() {
+        return Err("Elige un archivo de destino".into());
+    }
+    let real = real_path(path).ok_or("La carpeta de destino no existe")?;
+    let data = data_dir.canonicalize().unwrap_or_else(|_| data_dir.to_path_buf());
+    if real.starts_with(&data) || path.starts_with(data_dir) || crate::datacrypt::shared_for(&real).is_some() {
+        return Err(format!(
+            "No se puede guardar en la carpeta de datos de NetTerminal ({}) ni en una carpeta cifrada: elige otra carpeta.",
+            data_dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Texto de la confirmación nativa de una exportación con contraseñas.
 pub fn confirm_text(p: &PasswordCounts, path: &Path, master: bool) -> String {
     let total = p.sessions + p.hops + p.snmp;

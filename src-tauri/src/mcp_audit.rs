@@ -9,6 +9,7 @@
 //! serializada con un mutex del proceso; al superar `MAX_BYTES` el archivo rota a `audit.1.jsonl`
 //! (se conservan `KEEP` archivos anteriores). Carpeta 700 y archivos 600 en Unix.
 
+use crate::datacrypt as dfs;
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -121,14 +122,14 @@ fn open_append(path: &Path) -> std::io::Result<fs::File> {
 /// Rota si el archivo actual supera el tope: audit.jsonl → audit.1.jsonl → … → audit.KEEP.jsonl.
 fn rotate_if_needed(dir: &Path, max: u64) {
     let cur = dir.join(FILE);
-    if fs::symlink_metadata(&cur).map(|m| m.len() < max).unwrap_or(true) {
+    if fs::symlink_metadata(dfs::physical(&cur)).map(|m| m.len() < max).unwrap_or(true) {
         return;
     }
-    let _ = fs::remove_file(rotated(dir, KEEP));
+    let _ = dfs::remove_file(&rotated(dir, KEEP));
     for n in (1..KEEP).rev() {
-        let _ = fs::rename(rotated(dir, n), rotated(dir, n + 1));
+        let _ = dfs::rename(&rotated(dir, n), &rotated(dir, n + 1));
     }
-    let _ = fs::rename(&cur, rotated(dir, 1));
+    let _ = dfs::rename(&cur, &rotated(dir, 1));
 }
 
 /// Agrega un evento. Los errores se devuelven, pero quien llama no debe fallar por ellos.
@@ -143,7 +144,13 @@ fn append_with(dir: &Path, ev: &Value, max: u64) -> Result<(), String> {
     rotate_if_needed(dir, max);
     let mut line = serde_json::to_vec(ev).map_err(|e| e.to_string())?;
     line.push(b'\n');
-    let mut f = open_append(&dir.join(FILE)).map_err(|e| e.to_string())?;
+    let path = dir.join(FILE);
+    // Carpeta cifrada: un bloque cifrado por evento, anexado sin reescribir el archivo.
+    if let Some(dk) = dfs::key_for(dir).map_err(|e| e.to_string())? {
+        let (a, _) = dfs::open_append(&dfs::physical(&path), Some(&dk), dfs::OpenMode::Append).map_err(|e| e.to_string())?;
+        return a.append(&line).map_err(|e| e.to_string());
+    }
+    let mut f = open_append(&path).map_err(|e| e.to_string())?;
     // Una sola escritura por línea: con O_APPEND no se intercala con otra escritura.
     f.write_all(&line).map_err(|e| e.to_string())
 }
@@ -168,6 +175,15 @@ pub fn tail(data_dir: &Path, n: usize) -> Vec<Value> {
 }
 
 fn read_lines(path: &Path) -> Vec<Value> {
+    if dfs::is_encrypted(path) {
+        // Descifrado en memoria (tolerante: un archivo que la app no alcanzó a cerrar se lee igual).
+        let mut buf = Vec::new();
+        if dfs::open_read(path).and_then(|mut r| r.read_to_end(&mut buf)).is_err() {
+            return Vec::new();
+        }
+        let start = buf.len().saturating_sub((MAX_BYTES * 2) as usize);
+        return parse_lines(&buf[start..], start > 0);
+    }
     let Ok(mut f) = fs::File::open(path) else { return Vec::new() };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let start = len.saturating_sub(MAX_BYTES * 2);
@@ -178,10 +194,14 @@ fn read_lines(path: &Path) -> Vec<Value> {
     if f.take(MAX_BYTES * 2).read_to_end(&mut buf).is_err() {
         return Vec::new();
     }
-    let text = String::from_utf8_lossy(&buf);
+    parse_lines(&buf, start > 0)
+}
+
+fn parse_lines(buf: &[u8], cut: bool) -> Vec<Value> {
+    let text = String::from_utf8_lossy(buf);
     let mut lines: Vec<&str> = text.lines().collect();
     // Se empezó a leer en medio de una línea: se descarta la primera.
-    if start > 0 && !lines.is_empty() {
+    if cut && !lines.is_empty() {
         lines.remove(0);
     }
     lines.into_iter().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v.is_object()).collect()

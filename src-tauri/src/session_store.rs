@@ -1,3 +1,4 @@
+use crate::datacrypt as dfs;
 use crate::models::{Session, SessionType};
 use chrono::Utc;
 use std::fs;
@@ -7,17 +8,25 @@ use uuid::Uuid;
 
 pub struct SessionStore {
     file_path: PathBuf,
-    sessions: Mutex<Vec<Session>>,
-    /// sessions.json existe pero no se pudo leer (permisos, error de disco): no se escribe
-    /// encima para no reemplazar las sesiones del usuario por las de ejemplo.
-    load_error: Option<String>,
+    inner: Mutex<StoreInner>,
     /// Qué pasó al abrir sessions.json (restaurado desde el respaldo, entradas descartadas); se
     /// entrega una sola vez a la interfaz con `take_notice`.
     notice: Mutex<Option<crate::datafiles::FileNotice>>,
+}
+
+#[derive(Default)]
+struct StoreInner {
+    sessions: Vec<Session>,
+    /// sessions.json existe pero no se pudo leer (permisos, error de disco): no se escribe
+    /// encima para no reemplazar las sesiones del usuario por las de ejemplo.
+    load_error: Option<String>,
     /// sessions.json se leyó completo y sano en este arranque (sin error, sin restaurar desde un
     /// respaldo, sin entradas descartadas y sin partir de las sesiones de ejemplo). Si no, la lista de
     /// sesiones no sirve para decidir qué contraseñas de la bóveda quedaron huérfanas.
     trusted: bool,
+    /// Ya se leyó sessions.json. En una carpeta cifrada se lee recién al desbloquear: antes no hay
+    /// lista y nada se escribe (una lista vacía nunca reemplaza las sesiones guardadas).
+    loaded: bool,
 }
 
 /// Carpeta "visible" donde vive la app, para el modo portable:
@@ -76,16 +85,41 @@ pub fn resolve_data_dir(os_config_dir: PathBuf) -> PathBuf {
 
 impl SessionStore {
     pub fn new(data_dir: &Path) -> Self {
+        let store = Self::deferred(data_dir);
+        store.load();
+        store
+    }
+
+    /// Sin leer sessions.json (carpeta cifrada y bloqueada): se lee con `load` al desbloquear.
+    pub fn deferred(data_dir: &Path) -> Self {
         let _ = fs::create_dir_all(data_dir);
         restrict(data_dir);
-        let file_path = data_dir.join("sessions.json");
+        Self { file_path: data_dir.join("sessions.json"), inner: Mutex::default(), notice: Mutex::new(None) }
+    }
 
+    pub fn loaded(&self) -> bool {
+        self.lock().loaded
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, StoreInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Lee sessions.json (una sola vez). No hace nada si la carpeta cifrada sigue bloqueada.
+    pub fn load(&self) {
+        let mut inner = self.lock();
+        if inner.loaded || dfs::unavailable(&self.file_path).is_some() {
+            return;
+        }
+        let file_path = &self.file_path;
         // Migración desde la ubicación de la versión anterior (~/.netterminal)
-        if !file_path.exists() {
+        if !dfs::exists(file_path) {
             if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
                 let legacy = PathBuf::from(home).join(".netterminal").join("sessions.json");
                 if legacy.exists() {
-                    let _ = fs::copy(&legacy, &file_path);
+                    if let Ok(b) = fs::read(&legacy) {
+                        let _ = dfs::write_atomic(file_path, &b);
+                    }
                 }
             }
         }
@@ -96,21 +130,23 @@ impl SessionStore {
         let mut rewrite = false;
         let mut notice = crate::datafiles::FileNotice::default();
         let mut fresh = false;
-        let sessions = match fs::read(&file_path) {
+        let sessions = match dfs::read(file_path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 rewrite = true;
                 fresh = true;
                 Self::default_sessions()
             }
-            Err(e) => {
-                backup_corrupt(&file_path);
+            Err(e) if e.kind() != std::io::ErrorKind::InvalidData && e.kind() != std::io::ErrorKind::UnexpectedEof => {
+                backup_corrupt(file_path);
                 load_error = Some(format!(
                     "No se pudo leer {}: {e}. Revisa sus permisos y reinicia la app; mientras tanto no se guardan cambios de sesiones.",
                     file_path.display()
                 ));
                 Self::default_sessions()
             }
-            Ok(bytes) => {
+            read => {
+                // Un archivo cifrado alterado se trata como un JSON ilegible.
+                let bytes = read.unwrap_or_default();
                 // Bytes que no son UTF-8 (archivo editado con otra codificación): se recupera lo
                 // legible y se respalda el original, en vez de descartar todas las sesiones.
                 let utf8 = String::from_utf8(bytes).map_err(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
@@ -165,17 +201,14 @@ impl SessionStore {
         };
 
         let degraded = notice.corrupt || notice.restored_from.is_some() || !notice.dropped.is_empty();
-        let store = Self {
-            file_path,
-            sessions: Mutex::new(sessions),
-            trusted: load_error.is_none() && !degraded && !fresh,
-            load_error,
-            notice: Mutex::new(degraded.then_some(notice)),
-        };
+        inner.sessions = sessions;
+        inner.trusted = load_error.is_none() && !degraded && !fresh;
+        inner.load_error = load_error;
+        inner.loaded = true;
+        *self.notice.lock().unwrap_or_else(|e| e.into_inner()) = degraded.then_some(notice);
         if rewrite {
-            let _ = store.persist(&store.sessions.lock().unwrap());
+            let _ = self.persist(&inner);
         }
-        store
     }
 
     fn default_sessions() -> Vec<Session> {
@@ -215,7 +248,7 @@ impl SessionStore {
     /// La lista de sesiones vino de un sessions.json sano (ver `trusted`): solo entonces se pueden
     /// limpiar de la bóveda las contraseñas de sesiones que ya no existen.
     pub fn trusted(&self) -> bool {
-        self.trusted
+        self.lock().trusted
     }
 
     /// Aviso de la apertura de sessions.json (una sola vez); None si no hubo nada que informar.
@@ -224,22 +257,24 @@ impl SessionStore {
     }
 
     pub fn list(&self) -> Vec<Session> {
-        self.sessions.lock().unwrap().clone()
+        self.lock().sessions.clone()
     }
 
     pub fn get(&self, id: &str) -> Option<Session> {
-        self.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned()
+        self.lock().sessions.iter().find(|s| s.id == id).cloned()
     }
 
     pub fn ids(&self) -> Vec<String> {
-        self.sessions.lock().unwrap().iter().map(|s| s.id.clone()).collect()
+        self.lock().sessions.iter().map(|s| s.id.clone()).collect()
     }
 
     pub fn save(&self, mut session: Session) -> Result<Session, String> {
         if crate::credentials::reserved_id(&session.id) {
             return Err("Id de sesión inválido".into());
         }
-        let mut list = self.sessions.lock().unwrap();
+        let mut inner = self.lock();
+        Self::writable(&inner)?;
+        let list = &mut inner.sessions;
         if session.id.is_empty() {
             session.id = Uuid::new_v4().to_string();
             session.created_at = Utc::now().to_rfc3339();
@@ -249,13 +284,15 @@ impl SessionStore {
         } else {
             list.push(session.clone());
         }
-        self.persist(&list)?;
+        self.persist(&inner)?;
         Ok(session)
     }
 
     /// Agrega varias sesiones nuevas en una sola escritura (importaciones grandes).
     pub fn add_many(&self, new: Vec<Session>) -> Result<Vec<Session>, String> {
-        let mut list = self.sessions.lock().unwrap();
+        let mut inner = self.lock();
+        Self::writable(&inner)?;
+        let list = &mut inner.sessions;
         let now = Utc::now().to_rfc3339();
         for mut s in new {
             s.id = Uuid::new_v4().to_string();
@@ -264,13 +301,15 @@ impl SessionStore {
             s.created_at = now.clone();
             list.push(s);
         }
-        self.persist(&list)?;
-        Ok(list.clone())
+        self.persist(&inner)?;
+        Ok(inner.sessions.clone())
     }
 
     /// Actualiza varias sesiones existentes en una sola escritura (mover/renombrar carpetas).
     pub fn update_many(&self, changed: Vec<Session>) -> Result<Vec<Session>, String> {
-        let mut list = self.sessions.lock().unwrap();
+        let mut inner = self.lock();
+        Self::writable(&inner)?;
+        let list = &mut inner.sessions;
         for s in changed {
             if crate::credentials::reserved_id(&s.id) {
                 continue;
@@ -279,23 +318,33 @@ impl SessionStore {
                 list[idx] = s;
             }
         }
-        self.persist(&list)?;
-        Ok(list.clone())
+        self.persist(&inner)?;
+        Ok(inner.sessions.clone())
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
-        let mut list = self.sessions.lock().unwrap();
-        list.retain(|s| s.id != id);
-        self.persist(&list)
+        let mut inner = self.lock();
+        Self::writable(&inner)?;
+        inner.sessions.retain(|s| s.id != id);
+        self.persist(&inner)
     }
 
     /// Escritura atómica (temporal único, fsync y rename) para no corromper el JSON.
-    fn persist(&self, list: &[Session]) -> Result<(), String> {
-        if let Some(e) = &self.load_error {
+    fn persist(&self, inner: &StoreInner) -> Result<(), String> {
+        if let Some(e) = &inner.load_error {
             return Err(e.clone());
         }
-        let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-        crate::seal::write_atomic(&self.file_path, json.as_bytes())
+        let json = serde_json::to_string_pretty(&inner.sessions).map_err(|e| e.to_string())?;
+        dfs::write_atomic(&self.file_path, json.as_bytes())
+    }
+
+    /// Sin leer sessions.json (carpeta cifrada bloqueada) no se guarda nada.
+    fn writable(inner: &StoreInner) -> Result<(), String> {
+        if inner.loaded {
+            Ok(())
+        } else {
+            Err(dfs::LOCKED.into())
+        }
     }
 }
 
@@ -315,18 +364,19 @@ fn corrupt_dest(path: &Path) -> PathBuf {
 /// Se conservan las últimas `KEEP_CORRUPT` copias por archivo y no se copia lo que pasa del
 /// tope de tamaño (ese se aparta con `set_aside`).
 pub fn backup_corrupt(path: &Path) {
-    if fs::metadata(path).is_ok_and(|m| m.len() > crate::datafiles::MAX_TOPOLOGY_BYTES as u64) {
+    if dfs::metadata(path).is_ok_and(|m| m.len() > crate::datafiles::MAX_TOPOLOGY_BYTES as u64) {
         return set_aside(path);
     }
     let dest = corrupt_dest(path);
-    // settings.json: la copia va sin el token del API local (ni otros secretos de los ajustes).
-    let copied = if crate::datafiles::is_settings(path) {
-        fs::read(path).is_ok_and(|b| crate::seal::write_atomic(&dest, &crate::datafiles::backup_bytes(path, b)).is_ok())
-    } else {
-        fs::copy(path, &dest).is_ok()
+    // settings.json: la copia va sin el token del API local (ni otros secretos de los ajustes). Un
+    // archivo cifrado que no se puede descifrar se copia cifrado tal cual (nada se pierde).
+    let plain = if crate::datafiles::is_settings(path) { dfs::read(path).ok() } else { None };
+    let copied = match plain {
+        Some(b) => dfs::write_atomic(&dest, &crate::datafiles::backup_bytes(path, b)).is_ok(),
+        None => dfs::copy(path, &dest).is_ok(),
     };
     if copied {
-        restrict(&dest);
+        dfs::restrict(&dest);
     }
     prune_corrupt(path);
 }
@@ -336,12 +386,12 @@ pub fn backup_corrupt(path: &Path) {
 /// (sin secretos de los ajustes en la copia).
 pub fn set_aside(path: &Path) {
     let dest = corrupt_dest(path);
-    if fs::rename(path, &dest).is_ok() {
+    if dfs::rename(path, &dest).is_ok() {
         if crate::datafiles::is_settings(path) {
-            if let Some(clean) = fs::read(&dest).ok().and_then(|b| crate::datafiles::redact_settings_bytes(&b)) {
-                let _ = crate::seal::write_atomic(&dest, &clean);
+            if let Some(clean) = dfs::read(&dest).ok().and_then(|b| crate::datafiles::redact_settings_bytes(&b)) {
+                let _ = dfs::write_atomic(&dest, &clean);
             }
-            restrict(&dest);
+            dfs::restrict(&dest);
         }
         prune_corrupt(path);
     }
@@ -352,18 +402,17 @@ fn prune_corrupt(path: &Path) {
     let Some(dir) = path.parent() else { return };
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("datos");
     let prefix = format!("{stem}.corrupt-");
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = dfs::read_dir(dir) else { return };
     let mut copies: Vec<(u64, PathBuf)> = entries
-        .flatten()
+        .into_iter()
         .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let ts = name.strip_prefix(&prefix)?.strip_suffix(".json")?.parse::<u64>().ok()?;
-            Some((ts, e.path()))
+            let ts = e.name.strip_prefix(&prefix)?.strip_suffix(".json")?.parse::<u64>().ok()?;
+            Some((ts, e.path))
         })
         .collect();
     copies.sort_by_key(|c| std::cmp::Reverse(c.0));
     for (_, old) in copies.into_iter().skip(crate::datafiles::KEEP_CORRUPT) {
-        let _ = fs::remove_file(old);
+        let _ = dfs::remove_file(&old);
     }
 }
 

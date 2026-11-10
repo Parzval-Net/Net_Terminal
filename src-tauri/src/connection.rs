@@ -815,7 +815,9 @@ fn newline_of(session: &Session) -> &'static str {
 fn resumable_log(dir: &Path, path: &Path) -> Option<PathBuf> {
     let dir = dir.canonicalize().ok()?;
     let path = path.canonicalize().ok()?;
-    (path.starts_with(&dir) && path.extension().is_some_and(|e| e == "log") && path.is_file()).then_some(path)
+    // `.log` o, en una carpeta cifrada, `.log.nte`.
+    let ext_ok = path.extension().is_some_and(|e| e == "log") || path.to_string_lossy().ends_with(".log.nte");
+    (path.starts_with(&dir) && ext_ok && path.is_file()).then_some(path)
 }
 
 

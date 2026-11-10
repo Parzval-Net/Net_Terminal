@@ -1,6 +1,7 @@
 //! Respaldos de configuración en `<datos>/backups/<equipo>/<AAAA-MM-DD_HHMMSS>.txt`.
 //! Nombres saneados (nunca salen de la carpeta), carpetas 700 y archivos 600.
 
+use crate::datacrypt as dfs;
 use regex::Regex;
 use serde::Serialize;
 use std::fs;
@@ -224,7 +225,7 @@ pub fn save(data_dir: &Path, device: &str, content: &str, masked: bool) -> Resul
     let stamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string();
     let mut name = format!("{stamp}.txt");
     let mut n = 2;
-    while dir.join(&name).exists() {
+    while dfs::exists(&dir.join(&name)) {
         if n > 999 {
             return Err("Demasiados respaldos en el mismo segundo".into());
         }
@@ -233,10 +234,8 @@ pub fn save(data_dir: &Path, device: &str, content: &str, masked: bool) -> Resul
     }
     let body = if masked { mask(content) } else { content.to_string() };
     let path = dir.join(&name);
-    let tmp = dir.join(format!(".{name}.tmp"));
-    fs::write(&tmp, body).map_err(|e| e.to_string())?;
-    crate::session_store::restrict(&tmp);
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    // Atómico, con permisos 600 desde la creación (cifrado en una carpeta cifrada).
+    dfs::write_atomic(&path, body.as_bytes())?;
     // Huellas de los secretos enmascarados: la comparación avisa "secreto cambiado" sin
     // guardar ni mostrar el secreto. Si falla, el respaldo igual queda guardado.
     if masked {
@@ -244,9 +243,7 @@ pub fn save(data_dir: &Path, device: &str, content: &str, masked: bool) -> Resul
             let marks = secret_marks(&key, content);
             if !marks.is_empty() {
                 let sidecar = dir.join(secrets_name(&name));
-                if fs::write(&sidecar, serde_json::to_vec(&marks).unwrap_or_default()).is_ok() {
-                    crate::session_store::restrict(&sidecar);
-                }
+                let _ = dfs::write_atomic(&sidecar, &serde_json::to_vec(&marks).unwrap_or_default());
             }
         }
     }
@@ -262,15 +259,14 @@ fn secrets_name(file: &str) -> String {
 /// equipo se pueden comparar, pero no sirven fuera de esta carpeta ni entre equipos.
 fn device_key(dir: &Path) -> Result<Vec<u8>, String> {
     let path = dir.join(".secret-key");
-    if let Ok(k) = fs::read(&path) {
+    if let Ok(k) = dfs::read(&path) {
         if k.len() == 32 {
             return Ok(k);
         }
     }
     let mut k = vec![0u8; 32];
     crate::seal::fill_random(&mut k);
-    fs::write(&path, &k).map_err(|e| e.to_string())?;
-    crate::session_store::restrict(&path);
+    dfs::write_atomic(&path, &k)?;
     Ok(k)
 }
 
@@ -305,26 +301,24 @@ pub fn secret_marks(key: &[u8], content: &str) -> std::collections::BTreeMap<usi
 pub fn read_secrets(data_dir: &Path, device: &str, file: &str) -> Result<std::collections::BTreeMap<usize, Vec<String>>, String> {
     let path = file_path(data_dir, device, file)?;
     let side = path.with_file_name(secrets_name(file));
-    Ok(fs::read(side).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default())
+    Ok(dfs::read(&side).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default())
 }
 
 pub fn list(data_dir: &Path) -> Vec<DeviceBackups> {
-    let mut out: Vec<DeviceBackups> = fs::read_dir(root(data_dir))
+    let mut out: Vec<DeviceBackups> = dfs::read_dir(&root(data_dir))
         .into_iter()
         .flatten()
-        .flatten()
-        .filter(|e| e.path().is_dir())
+        .filter(|e| e.is_dir())
         .filter_map(|e| {
-            let device = e.file_name().to_string_lossy().into_owned();
+            let device = e.name.clone();
             if sanitize_device(&device).ok()? != device {
                 return None;
             }
-            let mut files: Vec<BackupFile> = fs::read_dir(e.path())
+            let mut files: Vec<BackupFile> = dfs::read_dir(&e.path)
                 .into_iter()
                 .flatten()
-                .flatten()
                 .filter_map(|f| {
-                    let name = f.file_name().to_string_lossy().into_owned();
+                    let name = f.name.clone();
                     if !file_re().is_match(&name) {
                         return None;
                     }
@@ -348,7 +342,7 @@ pub fn list(data_dir: &Path) -> Vec<DeviceBackups> {
 }
 
 pub fn read(data_dir: &Path, device: &str, file: &str) -> Result<String, String> {
-    let bytes = fs::read(file_path(data_dir, device, file)?).map_err(|e| e.to_string())?;
+    let bytes = dfs::read(&file_path(data_dir, device, file)?).map_err(|e| e.to_string())?;
     Ok(String::from_utf8(bytes).unwrap_or_else(|e| e.into_bytes().iter().map(|&b| b as char).collect()))
 }
 

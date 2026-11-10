@@ -5,6 +5,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::datacrypt as dfs;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
@@ -41,10 +42,10 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
-    if fs::metadata(path).map(|m| m.len() > MAX_FILE).unwrap_or(true) {
+    if dfs::metadata(path).map(|m| m.len() > MAX_FILE).unwrap_or(true) {
         return T::default();
     }
-    fs::read_to_string(path)
+    dfs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
@@ -55,7 +56,7 @@ fn store<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     // Atómico (temporal único, fsync y rename) y con permisos restringidos: mismo mecanismo que el resto.
-    crate::seal::write_atomic(path, serde_json::to_string(value).map_err(|e| e.to_string())?.as_bytes())
+    dfs::write_atomic(path, serde_json::to_string(value).map_err(|e| e.to_string())?.as_bytes())
 }
 
 fn clean(value: &str, max: usize) -> Option<String> {
@@ -88,7 +89,7 @@ pub fn recent_add(dir: &Path, target: &str) -> Result<Vec<String>, String> {
 
 pub fn recent_clear(dir: &Path) -> Result<(), String> {
     let _g = lock();
-    match fs::remove_file(dir.join(RECENT_FILE)) {
+    match dfs::remove_file(&dir.join(RECENT_FILE)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
     }
@@ -164,7 +165,7 @@ pub fn cmd_clear(dir: &Path, key: Option<&str>) -> Result<(), String> {
             }
             Ok(())
         }
-        None => match fs::remove_file(&path) {
+        None => match dfs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
             _ => Ok(()),
         },
