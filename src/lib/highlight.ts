@@ -5,6 +5,7 @@
  */
 import type { ITheme } from "@xterm/xterm";
 import { baseColor, themedColor } from "./hlPalette";
+import { redosRisk } from "./regexSafety";
 
 export const COLOR_NAMES = [
   "red",
@@ -88,13 +89,19 @@ export interface HlScheme {
 }
 
 let ruleSeq = 0;
-const r = (name: string, pattern: string, style: HlStyle, opts: Partial<HlRule> = {}): HlRule => ({
-  id: `b${++ruleSeq}`,
-  name,
-  pattern,
-  style,
-  ...opts,
-});
+/**
+ * Reglas integradas (auditadas, con pruebas de tiempo): se reconocen por identidad del objeto, nunca por
+ * el id ni por otro dato que pueda venir de un archivo importado. Una copia ({ ...regla }) ya no es
+ * integrada y se valida como cualquier regla del usuario.
+ */
+const BUILTIN = new WeakSet<HlRule>();
+const r = (name: string, pattern: string, style: HlStyle, opts: Partial<HlRule> = {}): HlRule => {
+  const rule = { id: `b${++ruleSeq}`, name, pattern, style, ...opts };
+  BUILTIN.add(rule);
+  return rule;
+};
+/** La regla es una de las integradas de la app (no una copia ni una importada). */
+export const isBuiltinRule = (rule: HlRule) => BUILTIN.has(rule);
 
 const IF_STATE_BAD = String.raw`\b(?:administratively down|err-?disabled|notconnect|not connected|sfp-config-mismatch|suspended|faulty|down|disabled|failed|failure|error|denied|deny|unreachable|timed? ?out|critical|alarm|inactive|discard(?:ed)?|rejected?|invalid)\b`;
 // "up" en prosa ("up to the cursor", "up a line") no es un estado.
@@ -160,13 +167,13 @@ export const schemes: HlScheme[] = [
     name: "Huawei / H3C",
     description: "VRP y Comware: undo, display, interfaces GE/XGE/Eth-Trunk, Vlanif, Bridge-Aggregation",
     rules: [
-      r("Prompt", String.raw`^[<\[][~*]?[\w.\-~]+(?:-[\w\-\/.:]+)?[>\]]`, { bold: true }),
+      r("Prompt", String.raw`^[<\[][~*]?[\w.\-~][\w.\-~\/:]*[>\]]`, { bold: true }),
       r("Separador", String.raw`(?<=^\s*)#\s*$`, { color: "gray" }),
       r("Error de comando", String.raw`(?<=^\s*)(?:Error:|%\s).*$`, { color: "red", bold: true }),
       // Huawei "%%01IFNET/4/LINK_STATE"; H3C "IFNET/3/PHY_UPDOWN:" (sin %% y seguido de ":").
-      r("Syslog crítico", String.raw`%%\d+[A-Z0-9_]+\/[0-3]\/[A-Z0-9_]+|\b[A-Z][A-Z0-9_]*\/[0-3]\/[A-Z0-9_]+(?=:)`, { color: "red", bold: true }),
-      r("Syslog warning", String.raw`%%\d+[A-Z0-9_]+\/4\/[A-Z0-9_]+|\b[A-Z][A-Z0-9_]*\/4\/[A-Z0-9_]+(?=:)`, { color: "yellow", bold: true }),
-      r("Syslog info", String.raw`%%\d+[A-Z0-9_]+\/[5-7]\/[A-Z0-9_]+|\b[A-Z][A-Z0-9_]*\/[5-7]\/[A-Z0-9_]+(?=:)`, { color: "cyan" }),
+      r("Syslog crítico", String.raw`%%\d+[A-Z_][A-Z0-9_]*\/[0-3]\/[A-Z0-9_]+|\b[A-Z][A-Z0-9_]*\/[0-3]\/[A-Z0-9_]+(?=:)`, { color: "red", bold: true }),
+      r("Syslog warning", String.raw`%%\d+[A-Z_][A-Z0-9_]*\/4\/[A-Z0-9_]+|\b[A-Z][A-Z0-9_]*\/4\/[A-Z0-9_]+(?=:)`, { color: "yellow", bold: true }),
+      r("Syslog info", String.raw`%%\d+[A-Z_][A-Z0-9_]*\/[5-7]\/[A-Z0-9_]+|\b[A-Z][A-Z0-9_]*\/[5-7]\/[A-Z0-9_]+(?=:)`, { color: "cyan" }),
       r("Descripción", String.raw`\bdescription\s+(.+)$`, { color: "brightYellow", italic: true }, { group: 1 }),
       r("undo shutdown", String.raw`\bundo shutdown\b`, { color: "green" }),
       r("shutdown", String.raw`(?<=^\s*)shutdown\b`, { color: "red", bold: true }),
@@ -310,6 +317,16 @@ export interface Compiled {
   group: number;
   on: string;
   off: string;
+  /** Regla del usuario o importada (no integrada): tope de línea propio y presupuesto de tiempo. */
+  user?: boolean;
+  /** Nombre para el aviso si se desactiva por lenta. */
+  name?: string;
+  /** Identidad del patrón (opciones + texto) para recordar en la sesión que se desactivó. */
+  key?: string;
+  /** Excesos de tiempo seguidos. */
+  strikes?: number;
+  /** Desactivada por lenta en esta sesión. */
+  dead?: boolean;
 }
 
 function sgrColor(value: string, bg: boolean): string | null {
@@ -334,26 +351,25 @@ function sgr(style: HlStyle, theme?: ITheme): { on: string; off: string } {
   return { on: `\x1b[${on.join(";")}m`, off: `\x1b[${off.join(";")}m` };
 }
 
-/**
- * Grupo que termina en cuantificador y además se repite, p. ej. (a+)+ o (\\w*)*: patrón
- * clásico de backtracking catastrófico (ReDoS) que congelaría la interfaz. Se aplica a
- * reglas propias o importadas; las incluidas en la app ya están probadas.
- */
-const NESTED_QUANTIFIER = /\((?:[^()\\]|\\.)*[+*]\)(?:[+*]|\{\d+,\d*\})/;
+/** Largo máximo de un patrón propio o importado. */
+export const MAX_PATTERN = 500;
 
-export function riskyRegex(pattern: string): string | null {
-  if (pattern.length > 500) return "Patrón demasiado largo (máx. 500 caracteres)";
-  const re = new RegExp(NESTED_QUANTIFIER.source, "g");
-  for (const m of pattern.matchAll(re)) {
-    // Si el grupo parte con un elemento obligatorio (p. ej. un separador como [/.:]),
-    // cada repetición queda delimitada y no hay backtracking explosivo.
-    const inner = m[0].replace(/^\((?:\?:)?/, "");
-    const atom = /^(\[(?:[^\]\\]|\\.)*\]|\\.|[^\\[(])/.exec(inner)?.[0] ?? "";
-    const next = inner.charAt(atom.length);
-    const mandatory = atom !== "" && !"?*+{".includes(next) && !/^\\[wWsSdD.]$|^\.$/.test(atom);
-    if (!mandatory) return "Cuantificadores anidados como (a+)+ pueden congelar la app. Simplifica el patrón.";
+/**
+ * Patrón que puede congelar la interfaz por retroceso catastrófico (ReDoS): repeticiones anidadas o
+ * alternativas solapadas dentro de un grupo repetido ((a+)+, (a|aa)+), repeticiones sin tope seguidas
+ * que pueden tomar el mismo texto (a*a*b, .*a.*b, (.*a){3}b) y referencias dentro de una repetición.
+ * Ver regexSafety.ts. Se aplica a toda regla propia o importada; las integradas ya están auditadas.
+ * `ignoreCase`: la regla no distingue mayúsculas (sin el dato, se asume que sí: es lo conservador).
+ * Devuelve el mensaje para el usuario o null.
+ */
+export function riskyRegex(pattern: string, ignoreCase = true): string | null {
+  if (pattern.length > MAX_PATTERN) return `Patrón demasiado largo (máx. ${MAX_PATTERN} caracteres)`;
+  try {
+    new RegExp(pattern, "gmd");
+  } catch {
+    return null; // regexError lo informa
   }
-  return null;
+  return redosRisk(pattern, ignoreCase);
 }
 
 /** Valida un patrón; devuelve el mensaje de error o null. */
@@ -367,21 +383,78 @@ export function regexError(pattern: string): string | null {
   }
 }
 
+// ---------- Presupuesto de tiempo de las reglas del usuario ----------
+
+/**
+ * Largo máximo de línea que examinan las reglas del usuario (las integradas, auditadas, usan MAX_LINE).
+ * Con 400 caracteres, un patrón polinomial de grado 2 que escapara al validador tarda ~20 ms por línea.
+ */
+export const USER_MAX_LINE = 400;
+/** Tiempo de una regla del usuario en una línea que la desactiva de inmediato. */
+export const SLOW_LINE_MS = 20;
+/** Exceso menor: tres seguidos también la desactivan. */
+export const SLOW_STRIKE_MS = 5;
+export const SLOW_STRIKES = 3;
+
+/** Patrones desactivados por lentos en esta sesión de la app (clave → nombre). */
+const slowRules = new Map<string, string>();
+const slowListeners = new Set<(name: string) => void>();
+
+/** Avisa cuando una regla o un resaltado se desactiva por lento. Devuelve la función para dejar de escuchar. */
+export function onSlowRule(fn: (name: string) => void): () => void {
+  slowListeners.add(fn);
+  return () => slowListeners.delete(fn);
+}
+
+/** Marca un patrón como lento para el resto de la sesión y avisa (una vez por patrón). */
+export function disableSlowRule(key: string, name: string) {
+  if (slowRules.has(key)) return;
+  slowRules.set(key, name);
+  for (const fn of slowListeners) {
+    try {
+      fn(name);
+    } catch {
+      /* un oyente con error no corta a los demás */
+    }
+  }
+}
+
+export const isSlowRule = (key: string) => slowRules.has(key);
+
+/** Opciones con que se compila una regla y su clave de sesión (la que usa isSlowRule). */
+const ruleFlags = (rule: HlRule) => `gm${rule.group ? "d" : ""}${rule.ignoreCase ? "i" : ""}`;
+export const ruleKey = (rule: HlRule) => `${ruleFlags(rule)}/${rule.pattern}`;
+
+/** Tiempo de una ejecución de regla del usuario: la desactiva si se pasó del presupuesto. */
+function chargeTime(rule: Compiled, ms: number) {
+  if (ms > SLOW_LINE_MS) rule.strikes = SLOW_STRIKES;
+  else if (ms > SLOW_STRIKE_MS) rule.strikes = (rule.strikes ?? 0) + 1;
+  else rule.strikes = 0;
+  if (rule.strikes >= SLOW_STRIKES) {
+    rule.dead = true;
+    disableSlowRule(rule.key ?? rule.re.source, rule.name ?? rule.re.source);
+  }
+}
+
 /** `theme`: tema de terminal activo; sin él los colores con nombre salen como ANSI y el terminal los resuelve. */
 export function compile(rules: HlRule[], theme?: ITheme): Compiled[] {
   const out: Compiled[] = [];
   for (const rule of rules) {
-    if (rule.enabled === false || regexError(rule.pattern)) continue;
-    if (!rule.id.startsWith("b") && riskyRegex(rule.pattern)) continue;
-    const { on, off } = sgr(rule.style, theme);
+    if (rule.enabled === false || typeof rule.pattern !== "string" || regexError(rule.pattern)) continue;
+    const user = !BUILTIN.has(rule);
+    const flags = ruleFlags(rule);
+    const key = ruleKey(rule);
+    if (user && (riskyRegex(rule.pattern, !!rule.ignoreCase) || slowRules.has(key))) continue;
+    const { on, off } = sgr(rule.style ?? {}, theme);
     if (on === "\x1b[m") continue;
     out.push({
       // El flag "d" (índices de grupos) es caro en V8: solo para reglas que pintan un grupo.
-      re: new RegExp(rule.pattern, `gm${rule.group ? "d" : ""}${rule.ignoreCase ? "i" : ""}`),
+      re: new RegExp(rule.pattern, flags),
       style: rule.style,
       group: rule.group ?? 0,
       on,
       off,
+      ...(user ? { user, name: rule.name || rule.pattern, key, strikes: 0 } : {}),
     });
   }
   return out;
@@ -389,24 +462,35 @@ export function compile(rules: HlRule[], theme?: ITheme): Compiled[] {
 
 /**
  * Asigna a cada carácter la primera regla que lo cubre (las reglas anteriores tienen
- * prioridad) y devuelve tramos [inicio, fin, índiceRegla].
+ * prioridad) y devuelve tramos [inicio, fin, índiceRegla]. Las reglas del usuario solo miran
+ * líneas de hasta USER_MAX_LINE caracteres y se cronometran: la que se pasa del presupuesto
+ * deja de evaluarse en esa línea y, si es reiterado, en el resto de la sesión (con aviso).
  */
 export function runs(line: string, rules: Compiled[]): [number, number, number][] {
   if (!line || !rules.length) return [];
   const owner = new Int16Array(line.length).fill(-1);
   rules.forEach((rule, i) => {
+    if (rule.user) {
+      if (rule.dead || line.length > USER_MAX_LINE) return;
+      if (rule.key && slowRules.has(rule.key)) {
+        rule.dead = true;
+        return;
+      }
+    }
+    const t0 = rule.user ? performance.now() : 0;
     rule.re.lastIndex = 0;
     let m: RegExpExecArray | null;
     let guard = 0;
     while ((m = rule.re.exec(line)) && guard++ < 1000) {
       if (m[0] === "") {
         rule.re.lastIndex++;
-        continue;
+      } else {
+        const span = rule.group ? m.indices?.[rule.group] : [m.index, m.index + m[0].length];
+        if (span) for (let k = span[0]; k < span[1]; k++) if (owner[k] === -1) owner[k] = i;
       }
-      const span = rule.group ? m.indices?.[rule.group] : [m.index, m.index + m[0].length];
-      if (!span) continue;
-      for (let k = span[0]; k < span[1]; k++) if (owner[k] === -1) owner[k] = i;
+      if (rule.user && performance.now() - t0 > SLOW_LINE_MS) break;
     }
+    if (rule.user) chargeTime(rule, performance.now() - t0);
   });
   const out: [number, number, number][] = [];
   let start = 0;

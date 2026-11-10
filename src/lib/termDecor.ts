@@ -5,7 +5,8 @@
  * al quitar el último). El camino de la salida (StreamHighlighter) no se toca.
  */
 import type { IDecoration, IDisposable, IMarker, Terminal } from "@xterm/xterm";
-import { type RowText, type TermHl, buildRegex, colorOf, findSpans, isNarrow, rowText, segmentsOf } from "./termHl";
+import { type RowText, type TermHl, MAX_SCAN_TEXT, buildRegex, colorOf, findSpans, isNarrow, rowText, segmentsOf } from "./termHl";
+import { SLOW_LINE_MS, disableSlowRule, isSlowRule } from "./highlight";
 import { MAX_AUTO, MAX_MANUAL, jumpFrom, markAction, markLabel, markTarget } from "./termMarks";
 
 /** Tope de decoraciones de resaltado por pestaña (protege la memoria con un patrón muy frecuente). */
@@ -16,6 +17,8 @@ const BUDGET_MS = 8;
 interface Item {
   hl: TermHl;
   re: RegExp;
+  /** Se pasó del presupuesto de tiempo en una línea: deja de examinarse (con aviso). */
+  slow?: boolean;
 }
 interface Deco {
   deco: IDecoration;
@@ -40,7 +43,7 @@ export class HighlightEngine {
 
   list(): (TermHl & { count: number })[] {
     this.decos = this.decos.filter((d) => !d.deco.isDisposed);
-    return this.items.map(({ hl }) => ({ ...hl, count: this.decos.filter((d) => d.hl === hl.id).length }));
+    return this.items.map(({ hl, slow }) => ({ ...hl, count: this.decos.filter((d) => d.hl === hl.id).length, ...(slow ? { slow } : {}) }));
   }
 
   get size() {
@@ -48,7 +51,8 @@ export class HighlightEngine {
   }
 
   add(hl: TermHl) {
-    this.items.push({ hl, re: buildRegex(hl) });
+    const re = buildRegex(hl);
+    this.items.push({ hl, re, slow: isSlowRule(`hl/${re.flags}/${re.source}`) || undefined });
     if (this.items.length === 1) {
       this.subs.push(
         this.term.onWriteParsed(() => this.schedule()),
@@ -151,6 +155,21 @@ export class HighlightEngine {
     this.pos = this.term.registerMarker(Math.max(0, Math.min(buf.length - 1, row)) - (buf.baseY + buf.cursorY)) ?? null;
   }
 
+  /**
+   * Ejecuta `fn` con el regex de un resaltado y lo cronometra: si tarda más de SLOW_LINE_MS en una línea,
+   * el resaltado deja de examinarse en esta pestaña y se avisa (segunda red tras validateHl).
+   */
+  private timed<T>(it: Item, fn: () => T): T {
+    const t0 = performance.now();
+    const r = fn();
+    if (performance.now() - t0 > SLOW_LINE_MS && !it.slow) {
+      it.slow = true;
+      disableSlowRule(`hl/${it.re.flags}/${it.re.source}`, `Resaltado "${it.hl.pattern}"`);
+      queueMicrotask(this.onChange);
+    }
+    return r;
+  }
+
   /** Examina las filas [first, last] (una línea lógica) y pinta las coincidencias. */
   private scan(first: number, last: number) {
     const buf = this.term.buffer.active;
@@ -163,8 +182,11 @@ export class HighlightEngine {
       quick += s;
       if (narrow && !isNarrow(s)) narrow = false;
     }
+    // Una línea lógica enorme (sin saltos, miles de filas envueltas) no se examina: findSpans tampoco lo haría
+    // y el prefiltro sobre 100 KB con un patrón como .*x tarda segundos.
+    if (quick.length > MAX_SCAN_TEXT) return;
     // Lo habitual (texto latino y ninguna coincidencia): se descarta sin armar el mapa de celdas.
-    if (narrow && (!quick.trim() || !this.items.some(({ re }) => ((re.lastIndex = 0), re.test(quick))))) return;
+    if (narrow && (!quick.trim() || !this.items.some((it) => !it.slow && this.timed(it, () => ((it.re.lastIndex = 0), it.re.test(quick)))))) return;
     const rt: RowText = rowText(
       rowsList,
       this.term.cols,
@@ -173,9 +195,11 @@ export class HighlightEngine {
     );
     if (!rt.text.trim()) return;
     const cursorAbs = buf.baseY + buf.cursorY;
-    for (const { hl, re } of this.items) {
+    for (const it of this.items) {
+      if (it.slow) continue;
+      const { hl, re } = it;
       const c = colorOf(hl.color);
-      for (const [s, e] of findSpans(rt.text, re)) {
+      for (const [s, e] of this.timed(it, () => findSpans(rt.text, re))) {
         for (const seg of segmentsOf(rt, s, e)) {
           if (this.decos.length >= MAX_DECOS) {
             this.capped = true;

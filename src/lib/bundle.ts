@@ -4,10 +4,12 @@
  * carpetas y notas). El cifrado, el descifrado y las contraseñas de la bóveda están solo en Rust
  * (src-tauri/src/bundle.rs): ninguna contraseña guardada pasa por aquí.
  */
-import { type Settings, type Macro, defaultSettings } from "./settings";
-import type { Session } from "../types";
+import { type Settings, type Macro, type ModuleId, defaultSettings } from "./settings";
+import type { Session, Tunnel } from "../types";
 import type { HlRule } from "./highlight";
-import { regexError, riskyRegex } from "./highlight";
+import { regexError, riskyRegex, schemes } from "./highlight";
+import { type Pack, type Risk, buildCatalog, computeRisk } from "./packs";
+import { GHOST_COLORS, GHOST_STYLES, LIST_KEYS } from "./suggest";
 import { type AlertRule, alertError } from "./alerts";
 import { masterStrength } from "./credentials";
 import { joinPath, normPath } from "./folders";
@@ -49,10 +51,130 @@ export const SETTINGS_EXCLUDED = [
   "macros",
   "customRules",
   "extraFolders",
+  "serverGuard",
+  "disabledPacks",
 ] as const;
 
-/** Protecciones que el archivo solo puede encender (copia de `SETTINGS_SAFE_ONLY`). */
-export const SETTINGS_SAFE_ONLY: Record<string, boolean> = { logMask: true, confirmSend: true, confirmClose: true };
+/**
+ * Valor que el archivo puede fijar en estos ajustes: el seguro (copia de `SETTINGS_SAFE_ONLY` en Rust).
+ * Las protecciones (logMask, confirmSend, confirmClose) solo se encienden; lo que copia o pega solo, o
+ * graba todo a disco (copyOnSelect, rightClickPaste, autoLog), solo se apaga.
+ */
+export const SETTINGS_SAFE_ONLY: Record<string, boolean> = {
+  logMask: true,
+  confirmSend: true,
+  confirmClose: true,
+  copyOnSelect: false,
+  rightClickPaste: false,
+  autoLog: false,
+};
+
+/**
+ * Qué hace la importación con cada ajuste de `Settings` (tabla completa en docs/TECNICO.md):
+ * - `excluded`: nunca viaja ni se aplica (SETTINGS_EXCLUDED).
+ * - `safeOnly`: solo se acepta el valor seguro (SETTINGS_SAFE_ONLY).
+ * - `onlyOff`: objeto de interruptores; el archivo solo puede apagar (módulos).
+ * - `check`: se acepta si pasa la validación (rango, lista de valores o formato).
+ * - `free`: apariencia o preferencias inocuas; basta con que sea del mismo tipo.
+ * El tipo exige una entrada por clave: una clave nueva en settings.ts sin clasificar no compila, y
+ * scripts/tests/bundle.test.mjs falla si las listas no coinciden.
+ */
+export type SettingPolicy =
+  | { kind: "excluded" }
+  | { kind: "safeOnly" }
+  | { kind: "onlyOff" }
+  | { kind: "check"; ok: (v: unknown) => boolean; rule: string }
+  | { kind: "free" };
+
+const EXCLUDED: SettingPolicy = { kind: "excluded" };
+const SAFE: SettingPolicy = { kind: "safeOnly" };
+const FREE: SettingPolicy = { kind: "free" };
+const oneOf = (values: readonly string[]): SettingPolicy => ({ kind: "check", ok: (v) => typeof v === "string" && values.includes(v), rule: values.join(" | ") });
+const intIn = (min: number, max: number): SettingPolicy => ({ kind: "check", ok: (v) => Number.isInteger(v) && (v as number) >= min && (v as number) <= max, rule: `entero ${min}..${max}` });
+const numIn = (min: number, max: number): SettingPolicy => ({ kind: "check", ok: (v) => typeof v === "number" && Number.isFinite(v) && v >= min && v <= max, rule: `${min}..${max}` });
+const text = (re: RegExp, max: number, rule: string): SettingPolicy => ({ kind: "check", ok: (v) => typeof v === "string" && v.length <= max && re.test(v), rule });
+const strList = (max: number, each: (x: string) => boolean, rule: string): SettingPolicy => ({
+  kind: "check",
+  ok: (v) => Array.isArray(v) && v.length <= max && v.every((x) => typeof x === "string" && each(x)),
+  rule,
+});
+const NO_CONTROL = /^[^\u0000-\u001f\u007f]*$/;
+
+export const SETTINGS_POLICY: { [K in keyof Settings]: SettingPolicy } = {
+  // Apariencia.
+  appTheme: oneOf(["system", "light", "dark"]),
+  tabLayout: oneOf(["horizontal", "vertical"]),
+  terminalTheme: text(/^[\w.-]{1,64}$/, 64, "id de tema"),
+  fontFamily: text(/^[\p{L}\p{N} ,'"._-]*$/u, 120, "nombre de fuente sin símbolos"),
+  fontSize: intIn(9, 28),
+  lineHeight: numIn(1, 2),
+  cursorStyle: oneOf(["block", "bar", "underline"]),
+  cursorBlink: FREE,
+  showButtonBar: FREE,
+  floatingSidebar: FREE,
+  highlightEnabled: FREE,
+  highlightSchemes: strList(20, (x) => schemes.some((s) => s.id === x), "esquemas conocidos"),
+  suggestColor: oneOf(Object.keys(GHOST_COLORS)),
+  suggestStyle: oneOf(Object.keys(GHOST_STYLES)),
+  suggestTip: FREE,
+  // Comportamiento de la terminal.
+  scrollback: intIn(1000, 100_000),
+  sendLineDelay: intIn(0, 500),
+  copyOnSelect: SAFE,
+  rightClickPaste: SAFE,
+  confirmClose: SAFE,
+  confirmSend: SAFE,
+  commandSuggest: FREE,
+  commandSuggestSet: FREE,
+  suggestListKey: oneOf(Object.keys(LIST_KEYS)),
+  suggestTabAccept: FREE,
+  autoMarkCommands: FREE,
+  lifecycleInfo: FREE,
+  catalogVendor: text(/^[a-z0-9][a-z0-9_.-]{0,63}$/, 64, "id de fabricante"),
+  favCommands: strList(1000, (x) => x.length <= 300 && NO_CONTROL.test(x), "hasta 1.000 textos de 300"),
+  modules: { kind: "onlyOff" },
+  // Logs.
+  autoLog: SAFE,
+  logMask: SAFE,
+  logTimestamps: FREE,
+  logAppend: FREE,
+  logRotateDaily: FREE,
+  // Nombre relativo: sin rutas absolutas, unidades ni "..", sin caracteres de control (Rust además lo sanea).
+  logPattern: text(/^(?![\\/])(?![a-zA-Z]:)(?!.*(?:^|[\\/])\.\.(?:[\\/]|$))[^\u0000-\u001f\u007f]*$/, 200, "nombre relativo sin .."),
+  // Listas validadas (se combinan por id).
+  alertRules: { kind: "check", ok: Array.isArray, rule: "cada regla validada (alertError)" },
+  snmpProfiles: { kind: "check", ok: Array.isArray, rule: "id y host válidos, sin secretos" },
+  // Nunca.
+  autoLegacySsh: EXCLUDED,
+  mcpEnabled: EXCLUDED,
+  mcpPort: EXCLUDED,
+  mcpToken: EXCLUDED,
+  mcpApproval: EXCLUDED,
+  mcpReadOnly: EXCLUDED,
+  tftpPort: EXCLUDED,
+  httpPort: EXCLUDED,
+  syslogPort: EXCLUDED,
+  syslogSave: EXCLUDED,
+  ftpPort: EXCLUDED,
+  snmpTrapPort: EXCLUDED,
+  snmpTrapBind: EXCLUDED,
+  serverGuard: EXCLUDED,
+  vaultAutoLockMin: EXCLUDED,
+  vaultLockOnSleep: EXCLUDED,
+  logsDir: EXCLUDED,
+  monitors: EXCLUDED,
+  topoSources: EXCLUDED,
+  topology: EXCLUDED,
+  topoSnapshots: EXCLUDED,
+  sidebarOrder: EXCLUDED,
+  deviceInfo: EXCLUDED,
+  speedHistory: EXCLUDED,
+  updateDismissed: EXCLUDED,
+  disabledPacks: EXCLUDED,
+  macros: EXCLUDED,
+  customRules: EXCLUDED,
+  extraFolders: EXCLUDED,
+};
 
 export interface PasswordCounts {
   sessions: number;
@@ -71,7 +193,12 @@ export interface BundleSummary {
   rules: number;
   passwords: PasswordCounts;
   bytes: number;
+  /** Ruta escrita (con contraseñas la elige Rust en su propio diálogo). */
+  path: string;
 }
+
+/** Mensaje de Rust cuando el usuario cancela su diálogo de guardado o la confirmación (copia de `EXPORT_CANCELLED`). */
+export const EXPORT_CANCELLED = "Exportación cancelada: no se escribió ningún archivo";
 
 export interface BundleNote {
   name: string;
@@ -96,7 +223,18 @@ export interface BundlePreview {
   passwords: PasswordCounts;
   hops: [string, string][];
   snmp_profiles: string[];
+  /** Extras de las sesiones avanzadas (índice en `sessions`), para revisarlos antes de importarlos. */
+  extras?: SessionExtras[];
   warnings: string[];
+}
+
+/** Lo que una sesión del archivo trae además de los datos de conexión (ya validado por Rust). */
+export interface SessionExtras {
+  index: number;
+  ssh_args?: string | null;
+  tunnels?: Tunnel[] | null;
+  on_connect?: string | null;
+  legacy_ssh?: boolean | null;
 }
 
 export interface ApplyResult {
@@ -170,6 +308,15 @@ const LABELS: Record<string, string> = {
   topoSources: "fuentes de Topología",
   vaultAutoLockMin: "bloqueo automático de la bóveda",
   vaultLockOnSleep: "bloqueo al suspender",
+  serverGuard: "acceso a los servidores integrados",
+  sendLineDelay: "Pausa entre líneas",
+  lifecycleInfo: "Ciclo de vida en la barra de estado",
+  floatingSidebar: "Barra de sesiones superpuesta",
+  catalogVendor: "Fabricante del catálogo",
+  logTimestamps: "Marcas de tiempo en logs",
+  logAppend: "Anexar a logs existentes",
+  logRotateDaily: "Log nuevo cada día",
+  autoMarkCommands: "Marcar comandos",
 };
 export const settingLabel = (k: string) => LABELS[k] ?? k;
 
@@ -186,10 +333,18 @@ function mergeById<T extends { id: string }>(cur: T[], incoming: T[]): T[] {
 }
 
 /** Un valor de ajuste del archivo, ya validado para esta clave; undefined si no se aplica. */
-function cleanValue(k: string, v: unknown): unknown {
+function cleanValue(k: string, v: unknown, current?: Settings): unknown {
   const d = (defaultSettings as unknown as Record<string, unknown>)[k];
-  if (d === undefined || (SETTINGS_EXCLUDED as readonly string[]).includes(k) || !sameType(v, d)) return undefined;
-  if (k in SETTINGS_SAFE_ONLY && v !== SETTINGS_SAFE_ONLY[k]) return undefined;
+  const policy = Object.hasOwn(SETTINGS_POLICY, k) ? SETTINGS_POLICY[k as keyof Settings] : undefined;
+  if (d === undefined || !policy || policy.kind === "excluded" || (SETTINGS_EXCLUDED as readonly string[]).includes(k) || !sameType(v, d)) return undefined;
+  if (policy.kind === "safeOnly" || k in SETTINGS_SAFE_ONLY) return v === SETTINGS_SAFE_ONLY[k] ? v : undefined;
+  if (policy.kind === "onlyOff") {
+    // Módulos: solo se aplican los que el archivo apaga; encender uno lo decide el usuario aquí.
+    const offs = Object.entries(v as Record<string, unknown>).filter(([m, on]) => Object.hasOwn(defaultSettings.modules, m) && on === false);
+    if (!offs.length) return undefined;
+    return { ...(current?.modules ?? defaultSettings.modules), ...Object.fromEntries(offs) } as Record<ModuleId, boolean>;
+  }
+  if (policy.kind === "check" && !policy.ok(v)) return undefined;
   if (k === "alertRules")
     return (v as unknown[]).filter((r): r is AlertRule => isObj(r) && typeof r.id === "string" && typeof r.pattern === "string" && !alertError(r as unknown as AlertRule));
   if (k === "snmpProfiles")
@@ -206,7 +361,7 @@ export function settingsChanges(current: Settings, imported: Record<string, unkn
   const cur = current as unknown as Record<string, unknown>;
   const out: { key: string; label: string }[] = [];
   for (const [k, v] of Object.entries(imported)) {
-    const val = cleanValue(k, v);
+    const val = cleanValue(k, v, current);
     if (val === undefined) continue;
     const next = BY_ID.has(k) ? mergeById(cur[k] as { id: string }[], val as { id: string }[]) : val;
     if (!same(cur[k], next)) out.push({ key: k, label: settingLabel(k) });
@@ -222,31 +377,131 @@ export function ignoredSettings(imported: Record<string, unknown> | null): strin
     .map(([k]) => k);
 }
 
-function validMacros(list: unknown[] | null): Macro[] {
-  return (list ?? []).filter(
-    (m): m is Macro =>
-      isObj(m) &&
-      typeof m.id === "string" &&
-      !!m.id &&
-      typeof m.label === "string" &&
-      (m.kind === "send" || m.kind === "script") &&
-      (m.text === undefined || typeof m.text === "string") &&
-      (m.script === undefined || typeof m.script === "string"),
-  );
+export function validMacros(list: unknown[] | null): Macro[] {
+  return (list ?? [])
+    .filter(
+      (m): m is Macro =>
+        isObj(m) &&
+        typeof m.id === "string" &&
+        !!m.id &&
+        typeof m.label === "string" &&
+        (m.kind === "send" || m.kind === "script") &&
+        (m.text === undefined || typeof m.text === "string") &&
+        (m.script === undefined || typeof m.script === "string"),
+    )
+    .map((m) => ({ id: m.id, label: m.label, kind: m.kind, ...(m.text !== undefined ? { text: m.text } : {}), ...(m.script !== undefined ? { script: m.script } : {}) }));
 }
 
-/** Reglas de resaltado con forma válida y sin patrones peligrosos (mismas reglas que al crearlas). */
+const STYLE_KEYS = ["color", "bg", "bold", "italic", "underline"] as const;
+
+/**
+ * Reglas de resaltado con forma válida y sin patrones peligrosos (mismo validador que al crearlas,
+ * ver regexSafety.ts). Solo se conservan los campos conocidos.
+ */
 export function validRules(list: unknown[] | null): HlRule[] {
-  return (list ?? []).filter(
-    (r): r is HlRule =>
-      isObj(r) &&
-      typeof r.id === "string" &&
-      typeof r.name === "string" &&
-      typeof r.pattern === "string" &&
-      isObj(r.style) &&
-      !regexError(r.pattern) &&
-      !riskyRegex(r.pattern),
-  );
+  const out: HlRule[] = [];
+  for (const r of list ?? []) {
+    if (!isObj(r) || typeof r.id !== "string" || typeof r.name !== "string" || typeof r.pattern !== "string" || !isObj(r.style)) continue;
+    if (regexError(r.pattern) || riskyRegex(r.pattern, r.ignoreCase === true)) continue;
+    const style = Object.fromEntries(STYLE_KEYS.filter((k) => r.style && (r.style as Record<string, unknown>)[k] !== undefined).map((k) => [k, (r.style as Record<string, unknown>)[k]]));
+    out.push({
+      id: r.id,
+      name: r.name.slice(0, 120),
+      pattern: r.pattern,
+      style,
+      ...(r.ignoreCase === true ? { ignoreCase: true } : {}),
+      ...(Number.isInteger(r.group) && (r.group as number) > 0 && (r.group as number) <= 9 ? { group: r.group as number } : {}),
+      ...(r.enabled === false ? { enabled: false } : {}),
+    });
+  }
+  return out;
+}
+
+// ---------- Botones, reglas y packs del archivo: siempre se agregan, nunca reemplazan ----------
+
+function randomTag(): string {
+  const b = new Uint8Array(4);
+  crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/** Id nuevo que no choca con ninguno existente (ni con los ya asignados en esta importación). */
+function freshId(taken: Set<string>, prefix: string): string {
+  let id: string;
+  do id = `${prefix}${randomTag()}`;
+  while (taken.has(id));
+  taken.add(id);
+  return id;
+}
+
+/** "Interfaces" que ya existe pasa a "Interfaces (importado)", "Interfaces (importado 2)", … */
+function freshLabel(taken: Set<string>, label: string): string {
+  let out = label;
+  for (let i = 1; taken.has(out.toLowerCase()); i++) out = `${label} (importado${i > 1 ? ` ${i}` : ""})`;
+  taken.add(out.toLowerCase());
+  return out;
+}
+
+/**
+ * Botones del archivo como botones nuevos: id nuevo siempre (los ids predecibles m1, m2 de un archivo
+ * nunca pisan uno propio) y, si la etiqueta ya existe, con sufijo.
+ */
+export function planMacros(current: Macro[], incoming: Macro[]): Macro[] {
+  const ids = new Set(current.map((m) => m.id));
+  const labels = new Set(current.map((m) => m.label.toLowerCase()));
+  return incoming.map((m) => ({ ...m, id: freshId(ids, "imp-"), label: freshLabel(labels, m.label) }));
+}
+
+/** Reglas de resaltado del archivo como reglas nuevas (mismo criterio que los botones). */
+export function planRules(current: HlRule[], incoming: HlRule[]): HlRule[] {
+  const ids = new Set(current.map((r) => r.id));
+  const names = new Set(current.map((r) => r.name.toLowerCase()));
+  return incoming.map((r) => ({ ...r, id: freshId(ids, "c"), name: freshLabel(names, r.name || r.pattern) }));
+}
+
+/**
+ * Packs del archivo: un id que ya existe (pack propio o incluido) recibe un sufijo para no reemplazar
+ * el pack local. `existing`: ids de los packs propios ya guardados.
+ */
+export function planPacks(existing: string[], incoming: Pack[]): Pack[] {
+  const taken = new Set(existing);
+  return incoming.map((p) => {
+    let id = p.id;
+    if (taken.has(id) || id.startsWith("builtin")) {
+      const base = id.replace(/^builtin-?/, "").slice(0, 50) || "pack";
+      for (let i = 1; taken.has((id = `${base}-imp${i > 1 ? i : ""}`)); i++);
+    }
+    taken.add(id);
+    return id === p.id ? p : { ...p, id, name: `${p.name} (importado)` };
+  });
+}
+
+/** Riesgo del texto de un botón: el de su línea más riesgosa; un botón de script se trata como cambio. */
+export function macroRisk(m: Macro): Risk {
+  if (m.kind === "script") return "change";
+  return lineRisks(m.text ?? "").reduce<Risk>((a, l) => (RANK[l.risk] > RANK[a] ? l.risk : a), "read");
+}
+
+const RANK: Record<Risk, number> = { read: 0, change: 1, disruptive: 2 };
+
+/** Cada línea no vacía de un texto que se envía al equipo, con su riesgo (computeRisk de packs.ts). */
+export function lineRisks(text: string): { line: string; risk: Risk }[] {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 500)
+    .map((line) => ({ line, risk: computeRisk(line) }));
+}
+
+/** Comandos de un pack con su riesgo efectivo: el mayor entre el declarado y el calculado (buildCatalog). */
+export function packRisks(p: Pack): { cmd: string; risk: Risk; escalated: boolean }[] {
+  return (buildCatalog([p], [])[0]?.commands ?? []).map((c) => ({ cmd: c.cmd, risk: c.risk, escalated: c.escalated }));
+}
+
+/** Los extras traen comandos al conectar que cambian configuración o pueden cortar servicio. */
+export function extrasNeedConfirm(list: SessionExtras[] | undefined, selected: Set<number>): boolean {
+  return (list ?? []).some((e) => selected.has(e.index) && lineRisks(e.on_connect ?? "").some((l) => l.risk !== "read"));
 }
 
 export interface ApplyChoice {
@@ -266,14 +521,20 @@ export function settingsPatch(current: Settings, p: BundlePreview, choice: Apply
   const cur = current as unknown as Record<string, unknown>;
   if (choice.settings && p.settings) {
     for (const [k, v] of Object.entries(p.settings)) {
-      const val = cleanValue(k, v);
+      const val = cleanValue(k, v, current);
       if (val === undefined) continue;
       const next = BY_ID.has(k) ? mergeById(cur[k] as { id: string }[], val as { id: string }[]) : val;
       if (!same(cur[k], next)) out[k] = next;
     }
   }
-  if (choice.macros && p.macros) out.macros = mergeById(current.macros, validMacros(p.macros));
-  if (choice.highlight && p.highlight) out.customRules = mergeById(current.customRules, validRules(p.highlight));
+  if (choice.macros && p.macros) {
+    const add = planMacros(current.macros, validMacros(p.macros));
+    if (add.length) out.macros = [...current.macros, ...add];
+  }
+  if (choice.highlight && p.highlight) {
+    const add = planRules(current.customRules, validRules(p.highlight));
+    if (add.length) out.customRules = [...current.customRules, ...add];
+  }
   const base = normPath(choice.dest);
   const folders = p.folders.map((f) => joinPath(base, f)).filter((f) => f && !current.extraFolders.includes(f));
   if (folders.length) out.extraFolders = [...current.extraFolders, ...new Set(folders)];

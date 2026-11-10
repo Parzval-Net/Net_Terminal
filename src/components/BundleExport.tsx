@@ -4,7 +4,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { ShieldAlert } from "lucide-react";
 import { type CredStatus, credStatus, needsUnlock } from "../lib/credentials";
 import type { HopCredInfo } from "../lib/hopCred";
-import { type BundleSummary, type ExportOpts, CONFIRM_WORD, MIN_BUNDLE_PASSWORD, bundleStrength, bundleStrengthText } from "../lib/bundle";
+import { type BundleSummary, type ExportOpts, CONFIRM_WORD, EXPORT_CANCELLED, MIN_BUNDLE_PASSWORD, bundleStrength, bundleStrengthText } from "../lib/bundle";
 import { plural } from "../lib/plural";
 import { VaultUnlock } from "./VaultUnlock";
 
@@ -94,13 +94,18 @@ export function BundleExportPanel({ formId, sessionIds, allSessions, onBusy, onM
       );
       return;
     }
-    let dest = await save({
-      title: "Guardar archivo cifrado de NetTerminal",
-      defaultPath: "netterminal.ntx",
-      filters: [{ name: "Archivo cifrado de NetTerminal", extensions: ["ntx"] }],
-    }).catch(() => null);
-    if (!dest) return;
-    if (!/\.ntx$/i.test(dest)) dest += ".ntx";
+    // Con contraseñas, el destino lo elige Rust en su propio diálogo y confirma con un aviso nativo:
+    // la interfaz no puede decidir dónde se escriben.
+    let dest: string | null = null;
+    if (!withPw) {
+      dest = await save({
+        title: "Guardar archivo cifrado de NetTerminal",
+        defaultPath: "netterminal.ntx",
+        filters: [{ name: "Archivo cifrado de NetTerminal", extensions: ["ntx"] }],
+      }).catch(() => null);
+      if (!dest) return;
+      if (!/\.ntx$/i.test(dest)) dest += ".ntx";
+    }
     const opts: ExportOpts = {
       session_ids: sessionIds,
       all_sessions: allSessions,
@@ -115,7 +120,11 @@ export function BundleExportPanel({ formId, sessionIds, allSessions, onBusy, onM
         : null,
     };
     onBusy(true);
-    onMessage("Cifrando… (la derivación de la llave toma unos segundos a propósito)");
+    onMessage(
+      withPw
+        ? "Elige dónde guardar y confirma en el aviso del sistema. Luego se cifra (toma unos segundos a propósito)."
+        : "Cifrando… (la derivación de la llave toma unos segundos a propósito)",
+    );
     try {
       const r = await invoke<BundleSummary>("bundle_export", { dest, password: pw, master: askMaster ? master : null, opts });
       const parts = [plural(r.sessions, "sesión", "sesiones")];
@@ -127,11 +136,12 @@ export function BundleExportPanel({ formId, sessionIds, allSessions, onBusy, onM
       if (r.rules) parts.push(plural(r.rules, "regla de resaltado", "reglas de resaltado"));
       const npw = r.passwords.sessions + r.passwords.hops + r.passwords.snmp;
       if (withPw) parts.push(plural(npw, "contraseña", "contraseñas"));
-      onMessage(`Archivo cifrado guardado (${parts.join(", ")}): ${dest}`);
+      onMessage(`Archivo cifrado guardado (${parts.join(", ")}): ${r.path || dest}`);
       setPw("");
       setPw2("");
     } catch (err) {
-      onMessage(String(err), true);
+      const msg = String(err);
+      onMessage(msg, msg !== EXPORT_CANCELLED);
     } finally {
       // La maestra y la confirmación no se reutilizan: se piden en cada exportación.
       setMaster("");
@@ -183,6 +193,11 @@ export function BundleExportPanel({ formId, sessionIds, allSessions, onBusy, onM
                 El archivo contendrá las contraseñas de tus equipos. Quien tenga el archivo y su contraseña podrá usarlas. La custodia del
                 archivo y de su contraseña es responsabilidad de quien lo exporta. En entornos corporativos, exportar credenciales puede
                 estar regulado por la política de seguridad de tu organización: confírmalo antes.
+                <span className="block mt-1">
+                  Al guardar, NetTerminal abre su propio diálogo para elegir el archivo y un aviso del sistema con cuántas contraseñas se
+                  escriben y dónde.
+                  {st?.backend === "keychain" && " Con el llavero del sistema no hay contraseña maestra que pedir: ese aviso es la confirmación."}
+                </span>
               </p>
             </div>
             {!st ? (

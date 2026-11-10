@@ -43,7 +43,7 @@ import { CatalogEntry, Pack, PackCommand, Risk, buildCatalog, computeRisk, order
 import type { ScpRequest } from "./components/tools/FileManager";
 
 import { TemplateDialog, templateVars } from "./components/TemplateDialog";
-import { compile, effectiveRules } from "./lib/highlight";
+import { compile, effectiveRules, onSlowRule } from "./lib/highlight";
 import { allFolders } from "./lib/folders";
 import { useMonitors } from "./lib/monitors";
 import { ButtonBar } from "./components/ButtonBar";
@@ -191,6 +191,8 @@ function Workspace({
   useEffect(() => {
     if (dataNotices.saveError) toast(dataNotices.saveError, "error");
   }, [dataNotices.saveError, toast]);
+  // Regla de resaltado propia o importada que se puso lenta: queda apagada en esta sesión (highlight.ts).
+  useEffect(() => onSlowRule((name) => toast(`${name}: desactivada por lenta en esta sesión. Revisa el patrón en Ajustes › Resaltado.`, "error")), [toast]);
   /** Error del backend con su contexto: "No se pudo <acción>. Motivo: …". */
   const toastFail = useCallback((action: string, e: unknown) => toast(failText(action, e), "error"), [toast]);
   const [confirm, setConfirm] = useState<{

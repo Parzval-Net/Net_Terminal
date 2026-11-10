@@ -11,8 +11,10 @@ import {
   compile,
   cssColor,
   effectiveRules,
+  isSlowRule,
   regexError,
   riskyRegex,
+  ruleKey,
   runs,
   schemes,
 } from "../lib/highlight";
@@ -89,7 +91,7 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
       const data = JSON.parse(await readText());
       const list = (Array.isArray(data) ? data : [data]).filter(
         (r): r is HlRule =>
-          r && typeof r.pattern === "string" && typeof r.style === "object" && !riskyRegex(r.pattern),
+          r && typeof r.pattern === "string" && !!r.style && typeof r.style === "object" && !regexError(r.pattern) && !riskyRegex(r.pattern, !!r.ignoreCase),
       );
       if (!list.length) throw new Error();
       setRules([...rules, ...list.map((r) => ({ ...r, id: newId(), name: r.name || r.pattern }))]);
@@ -198,7 +200,11 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
 
         <div className="space-y-2">
           {rules.map((rule) => {
-            const err = rule.pattern ? (regexError(rule.pattern) ?? riskyRegex(rule.pattern)) : null;
+            const err = rule.pattern
+              ? (regexError(rule.pattern) ??
+                riskyRegex(rule.pattern, !!rule.ignoreCase) ??
+                (isSlowRule(ruleKey(rule)) ? "Desactivada por lenta en esta sesión: simplifica el patrón (vuelve a evaluarse al reiniciar la app)." : null))
+              : null;
             const custom = rule.style.color?.startsWith("#");
             return (
               <div key={rule.id} className="rounded-lg border border-line p-2.5 space-y-2">

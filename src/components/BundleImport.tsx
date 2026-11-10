@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, KeyRound, LockKeyhole } from "lucide-react";
-import { Session, sessionTarget } from "../types";
+import { Session, sessionTarget, tunnelLabel } from "../types";
 import { SessionIcon, typeLabel } from "./SessionIcon";
 import { mergeImported, planImport } from "../lib/importMerge";
 import type { Settings } from "../lib/settings";
@@ -9,16 +9,23 @@ import { type CredStatus, credStatus, needsUnlock } from "../lib/credentials";
 import {
   type ApplyResult,
   type BundlePreview,
+  extrasNeedConfirm,
   ignoredSettings,
   importedSnmpProfiles,
+  lineRisks,
+  macroRisk,
+  packRisks,
   planNotes,
+  planPacks,
   settingLabel,
   settingsChanges,
   settingsPatch,
+  validMacros,
   validRules,
   withDest,
 } from "../lib/bundle";
-import { type Pack, validatePack } from "../lib/packs";
+import { type Pack, type Risk, riskLabel, validatePack } from "../lib/packs";
+import { cmdpacksList } from "../lib/api";
 import { plural } from "../lib/plural";
 import { VaultUnlock } from "./VaultUnlock";
 import { CreateVault } from "./CredentialSettings";
@@ -55,7 +62,12 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
   const [overwrite, setOverwrite] = useState(true);
   const [advanced, setAdvanced] = useState(false);
   const [applySettings, setApplySettings] = useState(false);
-  const [extras, setExtras] = useState({ macros: true, packs: true, notes: true, highlight: true });
+  // Botones, reglas y packs pueden enviar comandos o cambiar lo que se ve: desmarcados hasta revisarlos.
+  const [extras, setExtras] = useState({ macros: false, packs: false, notes: true, highlight: false });
+  /** Confirmación extra: los comandos al conectar incluyen cambios o cortes. */
+  const [advancedOk, setAdvancedOk] = useState(false);
+  /** Ids de los packs propios ya guardados (un pack del archivo con el mismo id se renombra). */
+  const [packIds, setPackIds] = useState<string[]>([]);
   const [withPw, setWithPw] = useState(true);
   const [withHops, setWithHops] = useState(true);
   const [st, setSt] = useState<CredStatus | null>(null);
@@ -68,6 +80,12 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
   const refreshVault = () => credStatus().then(setSt).catch(() => setSt(null));
   // Si el diálogo se cierra sin importar, el contenido descifrado se descarta en el backend.
   useEffect(() => () => void invoke("bundle_import_cancel").catch(() => {}), []);
+  useEffect(() => {
+    if (!preview?.packs?.length) return;
+    cmdpacksList()
+      .then((list) => setPackIds(list.flatMap((x) => (x && typeof x === "object" && typeof (x as { id?: unknown }).id === "string" ? [(x as { id: string }).id] : []))))
+      .catch(() => setPackIds([]));
+  }, [preview]);
 
   const open = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,8 +117,11 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
 
   const changes = useMemo(() => (settings && preview ? settingsChanges(settings, preview.settings) : []), [settings, preview]);
   const ignored = useMemo(() => [...new Set([...(preview?.ignored_settings ?? []), ...ignoredSettings(preview?.settings ?? null)])], [preview]);
-  const packs = useMemo(() => (preview?.packs ?? []).map((r) => validatePack(r).pack).filter((p): p is Pack => !!p), [preview]);
+  const packs = useMemo(() => planPacks(packIds, (preview?.packs ?? []).map((r) => validatePack(r).pack).filter((p): p is Pack => !!p)), [preview, packIds]);
   const rules = useMemo(() => validRules(preview?.highlight ?? null), [preview]);
+  const macros = useMemo(() => validMacros(preview?.macros ?? null), [preview]);
+  const extrasSel = useMemo(() => (preview?.extras ?? []).filter((e) => selected.has(e.index)), [preview, selected]);
+  const needsAdvancedOk = advanced && extrasNeedConfirm(preview?.extras, selected);
   const advancedSel = (preview?.advanced ?? []).filter((i) => selected.has(i)).length;
   const pwSel = (preview?.with_password ?? []).filter((i) => selected.has(i)).length;
   const snmpIds = preview ? importedSnmpProfiles(preview, applySettings) : [];
@@ -152,7 +173,7 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
         const patch = settingsPatch(settings, preview, choice);
         if (Object.keys(patch).length) onSettings((cur) => settingsPatch(cur, preview, choice));
         if (applySettings && changes.length) parts.push(plural(changes.length, "ajuste aplicado", "ajustes aplicados"));
-        if (extras.macros && preview.macros?.length) parts.push(plural(preview.macros.length, "botón", "botones"));
+        if (extras.macros && macros.length) parts.push(plural(macros.length, "botón nuevo", "botones nuevos"));
         if (extras.highlight && rules.length) parts.push(plural(rules.length, "regla de resaltado", "reglas de resaltado"));
       }
       if (extras.packs && packs.length) {
@@ -229,7 +250,7 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
         {preview.created ? ` del ${preview.created.slice(0, 10)}` : ""}: {plural(preview.sessions.length, "sesión", "sesiones")}
         {preview.folders.length ? `, ${plural(preview.folders.length, "carpeta vacía", "carpetas vacías")}` : ""}
         {preview.settings ? `, ajustes` : ""}
-        {preview.macros?.length ? `, ${plural(preview.macros.length, "botón", "botones")}` : ""}
+        {macros.length ? `, ${plural(macros.length, "botón", "botones")}` : ""}
         {packs.length ? `, ${plural(packs.length, "pack de comandos", "packs de comandos")}` : ""}
         {preview.notes?.length ? `, ${plural(preview.notes.length, "nota", "notas")}` : ""}
         {rules.length ? `, ${plural(rules.length, "regla de resaltado", "reglas de resaltado")}` : ""}
@@ -309,15 +330,64 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
       <fieldset className="space-y-1.5 text-[12.5px]">
         <legend className="text-[11.5px] font-medium text-muted mb-1">Qué más importar</legend>
         {advancedSel > 0 && (
-          <label className="flex items-start gap-2">
-            <input type="checkbox" className="accent-[var(--accent)] mt-0.5" checked={advanced} onChange={(e) => setAdvanced(e.target.checked)} />
-            <span>
-              Comandos al conectar, túneles, argumentos extra de SSH y SSH legacy de {plural(advancedSel, "sesión", "sesiones")}
-              <span className="block text-[11.5px] text-muted">
-                Ya validados (mismas reglas que al conectar). Revísalos si el archivo no es tuyo: se envían o se aplican al conectar.
+          <div>
+            <label className="flex items-start gap-2">
+              <input
+                type="checkbox"
+                className="accent-[var(--accent)] mt-0.5"
+                checked={advanced}
+                onChange={(e) => {
+                  setAdvanced(e.target.checked);
+                  setAdvancedOk(false);
+                }}
+              />
+              <span>
+                Comandos al conectar, túneles, argumentos extra de SSH y SSH legacy de {plural(advancedSel, "sesión", "sesiones")}
+                <span className="block text-[11.5px] text-muted">
+                  Ya validados (mismas reglas que al conectar). Revísalos abajo si el archivo no es tuyo: se envían o se aplican al conectar.
+                </span>
               </span>
-            </span>
-          </label>
+            </label>
+            <Review label={`Ver los extras de ${plural(extrasSel.length, "sesión", "sesiones")}`}>
+              {extrasSel.map((e) => (
+                <li key={e.index} className="py-1.5 space-y-0.5">
+                  <p className="font-medium">{preview.sessions[e.index]?.name}</p>
+                  {e.ssh_args && (
+                    <p>
+                      <span className="text-muted">Argumentos SSH: </span>
+                      <code className="font-mono break-all">{e.ssh_args}</code>
+                    </p>
+                  )}
+                  {!!e.tunnels?.length && (
+                    <p>
+                      <span className="text-muted">Túneles: </span>
+                      <code className="font-mono">{e.tunnels.map(tunnelLabel).join(", ")}</code>
+                    </p>
+                  )}
+                  {e.legacy_ssh && <p className="text-warn">Usa algoritmos SSH legacy</p>}
+                  {e.on_connect && (
+                    <div>
+                      <span className="text-muted">Comandos al conectar:</span>
+                      <ul className="ml-2">
+                        {lineRisks(e.on_connect).map((l, k) => (
+                          <li key={k} className="flex items-baseline gap-2">
+                            <RiskTag risk={l.risk} />
+                            <code className="font-mono break-all">{l.line}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </Review>
+            {needsAdvancedOk && (
+              <label className="ml-5 mt-1 flex items-start gap-2 text-[11.5px] font-medium text-warn">
+                <input type="checkbox" className="accent-[var(--accent)] mt-0.5" checked={advancedOk} onChange={(e) => setAdvancedOk(e.target.checked)} />
+                Revisé los comandos al conectar: algunos cambian la configuración o pueden cortar servicio y se enviarán solos al conectar.
+              </label>
+            )}
+          </div>
         )}
         {preview.settings && (
           <div>
@@ -338,17 +408,57 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
             )}
           </div>
         )}
-        {!!preview.macros?.length && (
-          <label className="flex items-center gap-2">
-            <input type="checkbox" className="accent-[var(--accent)]" checked={extras.macros} onChange={(e) => setExtras((x) => ({ ...x, macros: e.target.checked }))} />
-            {plural(preview.macros.length, "botón", "botones")} (los del mismo id se reemplazan)
-          </label>
+        {macros.length > 0 && (
+          <div>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" className="accent-[var(--accent)]" checked={extras.macros} onChange={(e) => setExtras((x) => ({ ...x, macros: e.target.checked }))} />
+              {plural(macros.length, "botón", "botones")} (se agregan como nuevos; nunca reemplazan los tuyos)
+            </label>
+            <Review label="Ver el texto de cada botón">
+              {macros.map((m, k) => (
+                <li key={k} className="py-1 space-y-0.5">
+                  <p className="flex items-baseline gap-2">
+                    <RiskTag risk={macroRisk(m)} />
+                    <span className="font-medium">{m.label}</span>
+                    {m.kind === "script" && <span className="text-muted">ejecuta el script {m.script}</span>}
+                  </p>
+                  {m.kind === "send" && <pre className="font-mono whitespace-pre-wrap break-all text-muted max-h-24 overflow-y-auto">{m.text ?? ""}</pre>}
+                </li>
+              ))}
+            </Review>
+          </div>
         )}
         {packs.length > 0 && (
-          <label className="flex items-center gap-2">
-            <input type="checkbox" className="accent-[var(--accent)]" checked={extras.packs} onChange={(e) => setExtras((x) => ({ ...x, packs: e.target.checked }))} />
-            {plural(packs.length, "pack de comandos propio", "packs de comandos propios")} (validados; uno con el mismo id se reemplaza)
-          </label>
+          <div>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" className="accent-[var(--accent)]" checked={extras.packs} onChange={(e) => setExtras((x) => ({ ...x, packs: e.target.checked }))} />
+              {plural(packs.length, "pack de comandos propio", "packs de comandos propios")} (validados; uno con el id de un pack tuyo se agrega con otro id)
+            </label>
+            <Review label="Ver los comandos que cambian algo">
+              {packs.map((p) => {
+                const cmds = packRisks(p);
+                const risky = cmds.filter((c) => c.risk !== "read");
+                return (
+                  <li key={p.id} className="py-1 space-y-0.5">
+                    <p>
+                      <span className="font-medium">{p.name}</span> <span className="text-muted font-mono">({p.id})</span>: {plural(cmds.length, "comando", "comandos")},{" "}
+                      {plural(risky.length, "cambia algo", "cambian algo")}
+                    </p>
+                    <ul className="ml-2">
+                      {risky.slice(0, 50).map((c, k) => (
+                        <li key={k} className="flex items-baseline gap-2">
+                          <RiskTag risk={c.risk} />
+                          <code className="font-mono break-all">{c.cmd}</code>
+                          {c.escalated && <span className="text-muted">(el pack lo declaraba de menor riesgo)</span>}
+                        </li>
+                      ))}
+                      {risky.length > 50 && <li className="text-muted">y {risky.length - 50} más…</li>}
+                    </ul>
+                  </li>
+                );
+              })}
+            </Review>
+          </div>
         )}
         {!!preview.notes?.length && (
           <label className="flex items-center gap-2">
@@ -357,10 +467,19 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
           </label>
         )}
         {rules.length > 0 && (
-          <label className="flex items-center gap-2">
-            <input type="checkbox" className="accent-[var(--accent)]" checked={extras.highlight} onChange={(e) => setExtras((x) => ({ ...x, highlight: e.target.checked }))} />
-            {plural(rules.length, "regla de resaltado", "reglas de resaltado")}
-          </label>
+          <div>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" className="accent-[var(--accent)]" checked={extras.highlight} onChange={(e) => setExtras((x) => ({ ...x, highlight: e.target.checked }))} />
+              {plural(rules.length, "regla de resaltado", "reglas de resaltado")} (validadas contra patrones lentos; se agregan como nuevas)
+            </label>
+            <Review label="Ver los patrones">
+              {rules.map((r, k) => (
+                <li key={k} className="py-0.5">
+                  <span className="font-medium">{r.name}</span> <code className="font-mono break-all text-muted">{r.pattern}</code>
+                </li>
+              ))}
+            </Review>
+          </div>
         )}
       </fieldset>
 
@@ -436,8 +555,14 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
         <button
           type="button"
           onClick={doImport}
-          disabled={busy || vaultBlocked}
-          title={vaultBlocked ? "Desbloquea o crea la bóveda, o desmarca las contraseñas" : undefined}
+          disabled={busy || vaultBlocked || (needsAdvancedOk && !advancedOk)}
+          title={
+            vaultBlocked
+              ? "Desbloquea o crea la bóveda, o desmarca las contraseñas"
+              : needsAdvancedOk && !advancedOk
+                ? "Confirma que revisaste los comandos al conectar, o desmarca los extras"
+                : undefined
+          }
           className="px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90 disabled:opacity-50"
         >
           {busy ? "Importando…" : `Importar ${selected.size ? plural(selected.size, "sesión", "sesiones") : "lo elegido"}`}
@@ -445,6 +570,22 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
       </div>
     </div>
   );
+}
+
+/** Lista plegable para revisar lo que trae el archivo (todo el texto se muestra escapado, como texto). */
+function Review({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <details className="ml-5 mt-1 rounded-md border border-line text-[11.5px]">
+      <summary className="px-2 h-7 flex items-center cursor-default text-muted">{label}</summary>
+      <ul className="px-2 pb-1.5 max-h-48 overflow-y-auto divide-y divide-[var(--border)]">{children}</ul>
+    </details>
+  );
+}
+
+const RISK_CLASS: Record<Risk, string> = { read: "text-muted", change: "text-warn", disruptive: "text-danger font-medium" };
+
+function RiskTag({ risk }: { risk: Risk }) {
+  return <span className={`shrink-0 text-[10.5px] uppercase ${RISK_CLASS[risk]}`}>{riskLabel[risk]}</span>;
 }
 
 function Badge({ status, overwrite }: { status?: string; overwrite: boolean }) {
