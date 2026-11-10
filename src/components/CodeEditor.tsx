@@ -124,6 +124,8 @@ export const CodeEditor = forwardRef<HTMLTextAreaElement, Props>(function CodeEd
         className="code-editor absolute inset-0 w-full h-full resize-none outline-none bg-transparent overflow-auto"
         style={{
           ...shared,
+          // Vacío no hay texto que alinear con la capa resaltada: el placeholder puede ajustarse al ancho (panel de 260 px).
+          whiteSpace: value ? "pre" : "pre-wrap",
           color: "transparent",
           caretColor: String(theme.cursor ?? theme.foreground),
           WebkitTextFillColor: "transparent",

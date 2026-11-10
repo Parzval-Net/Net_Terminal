@@ -99,6 +99,7 @@ export function AiSettings({ settings: s, status, onChange }: Props) {
           min={1024}
           max={65535}
           className="field !w-28"
+          aria-label="Puerto del servidor MCP"
           value={s.mcpPort}
           onChange={(e) => onChange({ mcpPort: Number(e.target.value) || 47821 })}
         />

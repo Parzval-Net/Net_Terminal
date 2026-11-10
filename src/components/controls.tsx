@@ -46,14 +46,16 @@ export function Switch({ checked, onChange, label }: { checked: boolean; onChang
       aria-labelledby={label ? undefined : row.label}
       aria-describedby={row.hint}
       onClick={() => onChange(!checked)}
-      // Pista con borde de ≥3:1 (bg-field-line) y área de clic de ~42x26 px (el before).
-      className={`relative shrink-0 w-9 h-5 rounded-full transition-colors before:absolute before:-inset-[3px] before:content-[''] ${checked ? "bg-accent" : "bg-field-line"}`}
+      // Área de clic de 40 x 24 px (el botón); la pista visible de 36 x 20 va dentro y tiene borde de ≥3:1 (bg-field-line).
+      className="shrink-0 w-10 h-6 grid place-items-center rounded-full"
     >
-      <span
-        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-          checked ? "translate-x-4" : ""
-        }`}
-      />
+      <span className={`relative w-9 h-5 rounded-full transition-colors ${checked ? "bg-accent" : "bg-field-line"}`}>
+        <span
+          className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+            checked ? "translate-x-4" : ""
+          }`}
+        />
+      </span>
     </button>
   );
 }

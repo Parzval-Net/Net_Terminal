@@ -198,6 +198,9 @@ function Workspace({
   const [peek, setPeek] = useState(false);
   const peekTimer = useRef<number | undefined>(undefined);
   const peekRef = useRef<HTMLDivElement>(null);
+  /** Abierta con teclado o clic (no por el mouse encima): el foco entra al filtro y se cierra al salir de ella. */
+  const peekKb = useRef(false);
+  const [peekFocusReq, setPeekFocusReq] = useState(0);
   /** La barra de botones se oculta sola sin botones; esto la muestra igual (scripts) desde la paleta. */
   const [barForced, setBarForced] = useState(false);
   const [notesOpen, setNotesOpenRaw] = useState(() => stored("notesOpen", false));
@@ -247,12 +250,13 @@ function Workspace({
     if (areaRef.current) ro.observe(areaRef.current);
     return () => ro.disconnect();
   }, []);
-  const { sidebarAutoHidden, sidebarShown, panelOverlay, panelWidth } = panelLayout({
+  const { sidebarAutoHidden, sidebarHiddenBy, sidebarShown, panelOverlay, panelWidth } = panelLayout({
     rootW,
     vtabsW,
     focusMode,
     sidebarOpen,
     sidebarW: sidebarWidth,
+    toolsActive: activeId === "tools",
     panelOpen: commandsOpen || notesOpen,
     panelW: notesWidth,
     minTerm,
@@ -1221,6 +1225,14 @@ function Workspace({
   const focusTab = useCallback((tabId: string) => setActiveId(tabId), []);
   const reconnectTab = useCallback((tabId: string) => controllers.current.get(tabId)?.reconnect(), []);
 
+  /** Alterna la barra superpuesta con teclado o clic: al abrirla, el foco va a su filtro. */
+  const togglePeek = () => {
+    if (peek) return setPeek(false);
+    peekKb.current = true;
+    setPeek(true);
+    setPeekFocusReq((n) => n + 1);
+  };
+
   const h = useHandlers({
     // En tandas de 5 cada 1,5 s: abrir 40 sesiones de golpe satura AAA/TACACS y la CPU.
     openMany: (list: Session[]) =>
@@ -1242,10 +1254,11 @@ function Workspace({
     toggleSidebar: () => {
       // Con un panel derecho abierto en ventana angosta la barra queda oculta por la app: el atajo la
       // muestra superpuesta (sin tocar la preferencia) en vez de alternar algo que no se ve.
-      if (sidebarAutoHidden) return setPeek((p) => !p);
+      if (sidebarAutoHidden) return togglePeek();
       setPeek(false);
       setSidebarOpen((o) => !o);
     },
+
     toggleFocus: () => setFocusMode((f) => !f),
     newButton: () => setMacroEdit(null),
     /**
@@ -1254,10 +1267,12 @@ function Workspace({
      * clic fuera o al salir el mouse); si no, acopla u oculta.
      */
     clickSessions: () => {
-      if (sidebarAutoHidden) setPeek((p) => !p);
+      if (sidebarAutoHidden) togglePeek();
       else if (settings.floatingSidebar && !sidebarOpen) {
         window.clearTimeout(peekTimer.current);
+        peekKb.current = true;
         setPeek(true);
+        setPeekFocusReq((n) => n + 1);
       } else {
         setPeek(false);
         setSidebarOpen((o) => !o);
@@ -1272,7 +1287,7 @@ function Workspace({
       peekTimer.current = window.setTimeout(() => {
         // No se cierra con un menú contextual abierto ni mientras se escribe en el filtro.
         const box = peekRef.current;
-        if (document.querySelector('[role="menu"]') || (box && box.contains(document.activeElement) && document.activeElement?.tagName === "INPUT")) return;
+        if (document.querySelector('[role="menu"]') || (box && box.contains(document.activeElement) && (peekKb.current || document.activeElement?.tagName === "INPUT"))) return;
         setPeek(false);
       }, 300);
     },
@@ -1446,6 +1461,9 @@ function Workspace({
     states,
     activeId,
     onSelect: setActiveId,
+    onFocusTab: (id) => {
+      if (id === activeId) controllers.current.get(id)?.focus();
+    },
     onClose: h.requestClose,
     onCloseMany: h.requestCloseMany,
     onNew: newLocal,
@@ -1479,10 +1497,43 @@ function Workspace({
     if (sidebarShown) setPeek(false);
   }, [sidebarShown]);
 
-  // Barra flotante: Esc o un clic fuera la cierran (sin consumir la tecla: la terminal la sigue recibiendo).
+  // Abierta con teclado o clic: el foco entra al filtro de sesiones (flecha abajo pasa al árbol).
+  useEffect(() => {
+    if (!peekFocusReq || !peek) return;
+    const id = requestAnimationFrame(() =>
+      peekRef.current?.querySelector<HTMLElement>('input[aria-label^="Filtrar sesiones"]')?.focus({ preventScroll: true }),
+    );
+    return () => cancelAnimationFrame(id);
+  }, [peekFocusReq, peek]);
+  useEffect(() => {
+    if (!peek) peekKb.current = false;
+  }, [peek]);
+
+  // Barra flotante: Esc o un clic fuera la cierran. Con el foco dentro, Esc la cierra y devuelve el foco al botón
+  // Sesiones (con texto en el filtro, el primer Esc lo limpia); desde fuera no consume la tecla (la terminal la recibe).
   useEffect(() => {
     if (!peek) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setPeek(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const a = document.activeElement as HTMLElement | null;
+      if (a && peekRef.current?.contains(a)) {
+        if (a instanceof HTMLInputElement && a.value) return;
+        if (document.querySelector('[role="menu"]')) return;
+        e.preventDefault();
+        setPeek(false);
+        document.querySelector<HTMLElement>("[data-sessions-btn]")?.focus({ preventScroll: true });
+        return;
+      }
+      setPeek(false);
+    };
+    // Con el foco puesto por teclado, salir de la barra (Tab) la cierra: es un panel emergente, no un modal.
+    const onOut = (e: FocusEvent) => {
+      const to = e.relatedTarget as Element | null;
+      if (!peekKb.current || !to || peekRef.current?.contains(to) || to.closest('[role="menu"], [data-sessions-btn]')) return;
+      setPeek(false);
+    };
+    peekRef.current?.addEventListener("focusout", onOut);
+    const box = peekRef.current;
     const onDown = (e: MouseEvent) => {
       const t = e.target as Element | null;
       if (t?.closest('[role="menu"], [data-sessions-btn]') || peekRef.current?.contains(t)) return;
@@ -1491,6 +1542,7 @@ function Workspace({
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("mousedown", onDown, true);
     return () => {
+      box?.removeEventListener("focusout", onOut);
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("mousedown", onDown, true);
     };
@@ -1527,7 +1579,7 @@ function Workspace({
         <ActivityBar
           sidebarOpen={sidebarShown || peek}
           floatingSessions={settings.floatingSidebar && !sidebarShown}
-          sessionsAutoHidden={sidebarAutoHidden}
+          sessionsHiddenBy={sidebarHiddenBy}
           toolsActive={activeId === "tools"}
           toolsOpen={toolsOpen}
           alerts={monitors.downCount}
@@ -1863,7 +1915,7 @@ function Workspace({
           }}
         />
       )}
-      <Toasts toasts={toasts} onClose={closeToast} />
+      <Toasts toasts={toasts} onClose={closeToast} rightInset={!focusMode && (commandsOpen || notesOpen) ? panelWidth : 0} />
       {packsOpen && (
         <PacksModal
           packs={allPacks}
@@ -1995,6 +2047,7 @@ function Workspace({
           connected={states[historyFor]?.status === "connected"}
           onResend={(cmd) => h.sendToTab(historyFor, cmd)}
           onClose={h.closeHistory}
+          focusFallback={() => activeCtrl()?.focus()}
         />
       )}
       {quickOpen && <QuickConnectDialog onClose={() => setQuickOpen(false)} onOpen={openTab} />}

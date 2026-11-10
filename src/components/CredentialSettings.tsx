@@ -136,7 +136,7 @@ export function CredentialSettings() {
               onClick={() => setConfirmReset(true)}
               className="px-3 h-7 rounded-md border border-line text-danger hover:bg-hover shrink-0"
             >
-              Restablecer…
+              Restablecer bóveda…
             </button>
           )}
         </div>

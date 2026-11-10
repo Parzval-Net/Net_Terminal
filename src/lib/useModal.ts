@@ -51,7 +51,8 @@ export const setMenuOrigin = (el: HTMLElement | null) => {
   menuOrigin = el;
 };
 
-function returnTarget(): HTMLElement | null {
+/** Quién abrió algo emergente (diálogo, panel): el elemento enfocado o el último clic; si salió de un menú, quien abrió el menú. */
+export function returnTarget(): HTMLElement | null {
   const a = focusOrigin();
   return a?.closest('[role="menu"]') ? menuOrigin : a;
 }

@@ -162,6 +162,11 @@ button {
   background-clip: content-box;
 }
 
+/* Esquina donde se cruzan dos barras: por defecto es blanca y en oscuro se ve como un cuadro. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }

@@ -56,8 +56,9 @@ export const SplitPanes = memo(function SplitPanes({ split, tabs, states, active
               <span className="flex-1" />
               {id && (
                 <button
-                  className="w-6 h-6 grid place-items-center rounded text-muted hover:text-fg hover:bg-hover"
+                  className="w-6 min-w-6 h-6 shrink-0 grid place-items-center rounded text-muted hover:text-fg hover:bg-hover"
                   title="Quitar del panel (la pestaña sigue abierta)"
+                  aria-label="Quitar del panel"
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={() => onPick(i, null)}
                 >

@@ -52,6 +52,8 @@ export interface TabBarProps {
   /** "vertical": las pestañas van en VerticalTabs y esta barra solo deja las acciones globales. */
   tabLayout?: TabLayout;
   onTabLayout?: (layout: TabLayout) => void;
+  /** Clic en una pestaña: lleva el foco a su terminal (la pestaña activa no cambia al hacer clic en ella, y el foco podía quedar en el fondo). */
+  onFocusTab?: (id: string) => void;
   /** Arrastrar una pestaña: la deja antes o después de `to`. */
   onReorder?: (from: string, to: string, after: boolean) => void;
 }
@@ -111,6 +113,28 @@ export const closeBtnClass = (active: boolean) =>
   `hidden group-hover:grid group-focus-within:grid focus-visible:grid w-6 h-6 shrink-0 place-items-center rounded outline-none focus-visible:ring-2 focus-visible:ring-accent ${
     active ? "text-term-fg/70 hover:text-term-fg hover:bg-term-fg/15" : "text-muted hover:text-fg hover:bg-hover"
   }`;
+
+/**
+ * Extremo de una pestaña: el punto de estado y, al pasar el mouse o enfocar, el botón de cierre en el mismo lugar.
+ * La casilla de 24 x 24 px se reserva siempre: la pestaña no cambia de ancho (ni el título se corre) al pasar el mouse.
+ */
+export function TabEnd({ status, active, tabIndex, title, onClose }: { status: ConnStatus; active: boolean; tabIndex: number; title: string; onClose: () => void }) {
+  return (
+    <span className="relative w-6 h-6 shrink-0 grid place-items-center">
+      <StatusDot status={status} active={active} className="group-hover:invisible group-focus-within:invisible" />
+      <button
+        tabIndex={tabIndex}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={onClose}
+        title={`Cerrar (${modLabel}W)`}
+        aria-label={`Cerrar ${title}`}
+        className={`absolute inset-0 ${closeBtnClass(active)}`}
+      >
+        <X size={12} />
+      </button>
+    </span>
+  );
+}
 
 /** Nombre accesible de una pestaña: título, estado de conexión y marcas pendientes (el punto y los símbolos no se leen). */
 export const tabLabel = (title: string, status: ConnStatus, marker: "alert" | "activity" | null) =>
@@ -216,6 +240,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                   if (editing !== t.id) e.preventDefault();
                   onSelect(t.id);
                   if (editing !== t.id) drag.begin(e, t.id);
+                  if (e.button === 0 && editing !== t.id) props.onFocusTab?.(t.id);
                 }
               }}
               onDoubleClick={() => setEditing(t.id)}
@@ -229,7 +254,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                 });
               }}
               title={`${tabTitle(t)}${t.title ? ` (${t.session.name})` : ""}\nArrastra para mover · doble clic: renombrar · clic derecho: opciones · clic medio: cerrar`}
-              className={`group relative flex items-center gap-2 h-7 pl-3 pr-1.5 min-w-[120px] max-w-[220px] rounded-t-lg text-[12.5px] cursor-default focus-visible:outline-offset-[-2px] ${
+              className={`group relative flex items-center gap-2 h-7 pl-3 pr-1 min-w-[128px] max-w-[220px] rounded-t-lg text-[12.5px] cursor-default focus-visible:outline-offset-[-2px] ${
                 drag.dragId === t.id ? "opacity-50" : ""
               } ${drag.target?.id === t.id ? dropMark(drag.target.after ? "right" : "left") : ""} ${
                 active
@@ -271,17 +296,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                   ●
                 </span>
               )}
-              <StatusDot status={status} active={active} className="group-hover:hidden group-focus-within:hidden" />
-              <button
-                tabIndex={focusId === t.id ? 0 : -1}
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => onClose(t.id)}
-                title={`Cerrar (${modLabel}W)`}
-                aria-label={`Cerrar ${tabTitle(t)}`}
-                className={closeBtnClass(active)}
-              >
-                <X size={12} />
-              </button>
+              <TabEnd status={status} active={active} tabIndex={focusId === t.id ? 0 : -1} title={tabTitle(t)} onClose={() => onClose(t.id)} />
             </div>
           );
         })}

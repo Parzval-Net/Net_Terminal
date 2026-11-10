@@ -245,22 +245,22 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
             onKeyDown={(e) => e.key === "Escape" && setQuery("")}
           />
         </div>
-        <div className="flex items-center gap-3 text-[12px] text-muted whitespace-nowrap">
-          <label className="flex items-center gap-1.5 min-h-6" title="Solo consultas: oculta lo que cambia configuración o puede cortar servicio">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-muted">
+          <label className="flex items-center gap-1.5 min-h-6 whitespace-nowrap" title="Solo consultas: oculta lo que cambia configuración o puede cortar servicio">
             <input type="checkbox" className="accent-[var(--accent)]" checked={onlyRead} onChange={(e) => setOnlyRead(e.target.checked)} />
             <span className="@[19rem]:hidden">Consultas</span>
             <span className="hidden @[19rem]:inline">Solo consultas</span>
           </label>
-          <label className="flex items-center gap-1.5 min-h-6">
+          <label className="flex items-center gap-1.5 min-h-6 whitespace-nowrap">
             <input type="checkbox" className="accent-[var(--accent)]" checked={onlyFav} onChange={(e) => setOnlyFav(e.target.checked)} />
             Favoritos
           </label>
-          <span className="ml-auto" role="status" aria-live="polite">
+          <span className="ml-auto whitespace-nowrap" role="status" aria-live="polite">
             {total}
             <span className="sr-only"> {total === 1 ? "comando" : "comandos"}</span>
           </span>
           {vendor && (
-            <button title="Agregar un comando propio" onClick={() => p.onAdd(vendor.id)} className="h-6 px-1 text-accent hover:underline flex items-center gap-0.5">
+            <button title="Agregar un comando propio" onClick={() => p.onAdd(vendor.id)} className="h-6 px-1 text-accent hover:underline flex items-center gap-0.5 whitespace-nowrap">
               <Plus size={12} /> Propio
             </button>
           )}
@@ -376,8 +376,8 @@ const CommandRow = memo(function CommandRow({
     e.preventDefault();
     cards[to].focus();
   };
-  // Acciones a la vista con el mouse encima, con el foco dentro o en la tarjeta seleccionada. La fila ocupa su alto siempre
-  // (invisible, no hidden): la lista no salta al pasar el mouse.
+  // Acciones superpuestas en la esquina inferior derecha (fondo del panel) con el mouse encima, el foco dentro o la tarjeta
+  // seleccionada: no reservan alto y la lista no salta. Invisibles (no hidden) para no cambiar nada al aparecer.
   const showActions = selected ? "visible" : "invisible group-hover:visible group-focus-within:visible";
   return (
     <div
@@ -389,7 +389,7 @@ const CommandRow = memo(function CommandRow({
       onFocus={() => actions.focus(favKey)}
       onKeyDown={onKeyDown}
       onClick={(e) => !(e.target as HTMLElement).closest("button") && actions.select(favKey)}
-      className={`group rounded-lg px-2 py-1.5 border-l-2 focus-visible:outline-offset-[-2px] [content-visibility:auto] [contain-intrinsic-size:auto_92px] ${riskBorder[c.risk]} ${
+      className={`group relative rounded-lg px-2 py-1.5 border-l-2 focus-visible:outline-offset-[-2px] [content-visibility:auto] [contain-intrinsic-size:auto_92px] ${riskBorder[c.risk]} ${
         selected ? "bg-selected ring-1 ring-inset ring-[var(--accent)]" : "hover:bg-hover"
       }`}
     >
@@ -408,7 +408,7 @@ const CommandRow = memo(function CommandRow({
             </div>
           ) : null}
           {c.note && <p className="text-[11px] text-muted mt-0.5 italic leading-snug">{c.note}</p>}
-          <div className="flex flex-wrap items-center gap-x-2 mt-0.5 text-[11px]">
+          <div className="flex flex-wrap items-center gap-x-2 mt-0.5 min-h-6 text-[11px]">
             <span id={`${id}-r`} className={riskStyle[c.risk]} title={c.escalated ? `El pack lo declaró "${riskLabel[c.declaredRisk]}"; la app lo subió por seguridad` : undefined}>
               <span aria-hidden>{riskIcon[c.risk]}</span> {riskLabel[c.risk]}
               {c.escalated ? " (ajustado)" : ""}
@@ -431,38 +431,44 @@ const CommandRow = memo(function CommandRow({
           <Star size={14} fill={fav ? "currentColor" : "none"} />
         </button>
       </div>
-      <div className={`flex flex-wrap gap-1 mt-1.5 ${showActions}`}>
+      <div
+        role="toolbar"
+        aria-label="Acciones del comando"
+        className={`absolute right-1.5 bottom-1.5 flex gap-1 p-0.5 rounded-lg bg-panel border border-line shadow-pop ${showActions}`}
+      >
         <PanelBtn
           tabIndex={ti}
           disabled={!target}
           aria-describedby={target ? undefined : blockedId}
+          aria-label={`Ejecutar ${c.cmd.split("\n")[0]}`}
           onClick={() => actions.run(c, cmd)}
           title={target ? `Ejecutar en ${target}` : blocked}
         >
-          <Play size={11} /> Ejecutar
+          <Play size={12} /> <span className="hidden @[19rem]:inline">Ejecutar</span>
         </PanelBtn>
         {!cmd.includes("\n") && (
           <PanelBtn
             tabIndex={ti}
             disabled={!target}
             aria-describedby={target ? undefined : blockedId}
+            aria-label="Escribir en la terminal sin Enter"
             onClick={() => actions.type(cmd)}
             title={target ? "Escribir en la terminal sin Enter" : blocked}
           >
-            <TextCursorInput size={11} /> Escribir
+            <TextCursorInput size={12} />
           </PanelBtn>
         )}
-        <PanelBtn tabIndex={ti} onClick={() => actions.copy(c, cmd)}>
-          {copied ? <CornerDownLeft size={11} /> : <Copy size={11} />} {copied ? "Copiado" : "Copiar"}
+        <PanelBtn tabIndex={ti} aria-label={copied ? "Copiado" : "Copiar el comando"} title={copied ? "Copiado" : "Copiar el comando"} onClick={() => actions.copy(c, cmd)}>
+          {copied ? <CornerDownLeft size={12} /> : <Copy size={12} />}
         </PanelBtn>
         {c.source && (
-          <PanelBtn tabIndex={ti} onClick={() => openUrl(c.source!)} title={c.source}>
-            <ExternalLink size={11} /> Fuente
+          <PanelBtn tabIndex={ti} aria-label="Abrir la fuente" onClick={() => openUrl(c.source!)} title={`Fuente: ${c.source}`}>
+            <ExternalLink size={12} />
           </PanelBtn>
         )}
         {c.packId.startsWith("user-") && (
-          <PanelBtn tabIndex={ti} onClick={() => actions.edit(c)}>
-            <Pencil size={11} /> Editar
+          <PanelBtn tabIndex={ti} aria-label="Editar el comando" title="Editar el comando" onClick={() => actions.edit(c)}>
+            <Pencil size={12} />
           </PanelBtn>
         )}
       </div>
@@ -478,7 +484,7 @@ function PanelBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
       {...props}
-      className="inline-flex items-center gap-1 px-2 h-6 rounded-md border border-line bg-panel text-[12px] hover:bg-hover disabled:opacity-40"
+      className="inline-flex items-center justify-center gap-1 min-w-6 px-1.5 h-6 rounded-md border border-line bg-panel text-[12px] hover:bg-hover disabled:opacity-40"
     />
   );
 }

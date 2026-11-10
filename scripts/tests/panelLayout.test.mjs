@@ -1,7 +1,7 @@
 // Pruebas del reparto de ancho entre barra de sesiones, terminal y panel derecho:
 // `node scripts/tests/panelLayout.test.mjs` (Node 22.15+).
 import assert from "node:assert/strict";
-const { panelLayout, minTermFor, PANEL_MIN } = await import("../../src/lib/panelLayout.ts");
+const { panelLayout, minTermFor, PANEL_MIN, TOOLS_NARROW } = await import("../../src/lib/panelLayout.ts");
 
 const base = { rootW: 1024, vtabsW: 0, focusMode: false, sidebarOpen: true, sidebarW: 256, panelOpen: true, panelW: 307, minTerm: minTermFor(13) };
 const L = (o) => panelLayout({ ...base, ...o });
@@ -63,5 +63,27 @@ assert.deepEqual([r.sidebarAutoHidden, r.panelOverlay], [false, false]);
 
 // La preferencia no cambia: al cerrar el panel la barra vuelve sola.
 assert.equal(L({ panelOpen: false }).sidebarShown, true);
+
+// Herramientas en ventana angosta (< 900 px): la barra de sesiones acoplada se oculta sola, sin panel abierto y sin tocar la preferencia.
+assert.equal(TOOLS_NARROW, 900);
+r = L({ rootW: 720, panelOpen: false, toolsActive: true });
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.sidebarHiddenBy], [true, false, "tools"]);
+assert.equal(r.termWidth, 720 - 44, "el mapa recibe todo el ancho");
+r = L({ rootW: 899, panelOpen: false, toolsActive: true });
+assert.equal(r.sidebarHiddenBy, "tools");
+// Desde 900 px cabe con la barra, y sin Herramientas activa (terminal) no se oculta por ese motivo.
+r = L({ rootW: 900, panelOpen: false, toolsActive: true });
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.sidebarHiddenBy], [false, true, null]);
+r = L({ rootW: 720, panelOpen: false, toolsActive: false });
+assert.deepEqual([r.sidebarAutoHidden, r.sidebarShown, r.sidebarHiddenBy], [false, true, null]);
+// Si el usuario no la tenía acoplada, no se marca como oculta por la app; modo foco o sin medir: nada.
+assert.equal(L({ rootW: 720, panelOpen: false, toolsActive: true, sidebarOpen: false }).sidebarAutoHidden, false);
+assert.equal(L({ rootW: 720, panelOpen: false, toolsActive: true, focusMode: true }).sidebarAutoHidden, false);
+assert.equal(L({ rootW: 0, panelOpen: false, toolsActive: true }).sidebarAutoHidden, false);
+// Con un panel abierto el motivo declarado sigue siendo Herramientas si ya la ocultaba por eso.
+assert.equal(L({ rootW: 720, toolsActive: true }).sidebarHiddenBy, "tools");
+assert.equal(L({ rootW: 1024 }).sidebarHiddenBy, "panel");
+// La preferencia no cambia: fuera de Herramientas la barra vuelve sola.
+assert.equal(L({ rootW: 720, panelOpen: false, toolsActive: false }).sidebarShown, true);
 
 console.log("panelLayout: ok");

@@ -1392,6 +1392,15 @@ export function TopologyTool({
   /** Saltos en curso por pestaña (una pestaña, un salto): cada uno espera el prompt antes de enviar el comando. */
   const hopRuns = useRef(new Map<string, HopRun>());
   const [hopRunning, setHopRunning] = useState<string[]>([]);
+  /** Pestañas que están descubriendo vecinos ahora (se les envían comandos): ni un salto ni "exit" en esa pestaña hasta que termine. */
+  const discovering = useRef(new Set<string>());
+  const [discoveringTabs, setDiscoveringTabs] = useState<string[]>([]);
+  const markDiscovering = (tabId: string | undefined, on: boolean) => {
+    if (!tabId) return;
+    if (on) discovering.current.add(tabId);
+    else discovering.current.delete(tabId);
+    setDiscoveringTabs([...discovering.current]);
+  };
   /** Lo que se muestra de cada salto (en curso o terminado hace poco) en el panel de Topología. */
   const [hopViews, setHopViews] = useState<HopView[]>([]);
   /** Contraseñas guardadas o del pivote que se rechazaron: se avisa y las escribe el usuario. */
@@ -1457,9 +1466,9 @@ export function TopologyTool({
   // Por defecto la sesión más reciente, sin contar las que tienen un salto en curso (están cambiando de equipo).
   useEffect(() => {
     if (term) return;
-    const free = terminals.filter((t) => !t.tabId || !hopRunning.includes(t.tabId));
+    const free = terminals.filter((t) => !t.tabId || (!hopRunning.includes(t.tabId) && !discoveringTabs.includes(t.tabId)));
     if (free.length) setConnId(free[free.length - 1].connId);
-  }, [terminals, term, hopRunning]);
+  }, [terminals, term, hopRunning, discoveringTabs]);
   // "Conectar y seguir la ruta": en cuanto la sesión abierta queda conectada, se elige sola en "Equipo".
   useEffect(() => {
     if (!pendingFollow) return;
@@ -1501,10 +1510,12 @@ export function TopologyTool({
     if (why) return setMsg(why);
     busyRef.current = true;
     setBusy(true);
+    markDiscovering(tab.tabId, true);
     setMsg("");
     try {
       await discoverWith(tab, tab.connId);
     } finally {
+      markDiscovering(tab.tabId, false);
       busyRef.current = false;
       setBusy(false);
     }
@@ -2154,17 +2165,19 @@ export function TopologyTool({
     return () => window.clearInterval(timer);
   }, [visible]);
   const HOP_BUSY = "Esa pestaña tiene un salto en curso: espera a que llegue o falle.";
+  const DISCOVERING = "Esa pestaña está descubriendo vecinos: espera a que termine.";
   const NOT_AT_PROMPT = "La pestaña no está en su prompt (login, contraseña, paginador o un comando en curso): termina ahí primero.";
   /** Por qué no se puede enviar nada ahora a esa pestaña (descubrir, "exit"), leyendo su pantalla en este momento. */
   const tabBlock = (tabId?: string): string | undefined => {
     if (!tabId) return undefined;
     if (hopRuns.current.has(tabId)) return HOP_BUSY;
+    if (discovering.current.has(tabId)) return DISCOVERING;
     const t = liveRef.current.terminals.find((x) => x.tabId === tabId);
     return t?.screen && !atPrompt(t.screen(6)) ? NOT_AT_PROMPT : undefined;
   };
   /** Lo mismo para pintar los botones (estado de este render), con el descubrimiento en curso primero. */
   const blockWhy = (tabId?: string): string | undefined =>
-    busy ? "Ya hay un descubrimiento en curso: espera a que termine." : !tabId ? undefined : hopRunning.includes(tabId) ? HOP_BUSY : notReady.includes(tabId) ? NOT_AT_PROMPT : undefined;
+    busy ? "Ya hay un descubrimiento en curso: espera a que termine." : !tabId ? undefined : hopRunning.includes(tabId) ? HOP_BUSY : discoveringTabs.includes(tabId) ? DISCOVERING : notReady.includes(tabId) ? NOT_AT_PROMPT : undefined;
 
   /** Preguntas de llave de los saltos, de a una: dos saltos que la piden a la vez ya no se pisan. */
   const [keyAsks, setKeyAsks] = useState<{ tabId: string; conn: string; cmd: string; title: string; message: string }[]>([]);
@@ -2198,6 +2211,8 @@ export function TopologyTool({
   const runHop = (full: TabRoute, tab?: TerminalRef) => {
     if (!full.steps.length) return;
     const target = full.steps[full.steps.length - 1];
+    // Un salto en la misma pestaña le escribiría en medio de un descubrimiento de vecinos.
+    if (tab?.tabId && discovering.current.has(tab.tabId)) return setMsg(DISCOVERING);
     if ([...hopRuns.current.values()].some((r) => r.route.steps.length && r.route.steps[r.route.steps.length - 1].ip === target.ip && r.job.phase !== "done")) {
       setMsg(`Ya hay un salto a ${target.name} en curso.`);
       return;
@@ -2458,7 +2473,7 @@ export function TopologyTool({
       const device = tabDevice(t, route);
       if (!device) continue;
       const prompt = classifyHopScreen(t.screen?.(8) ?? "").kind === "prompt";
-      planTabs.push({ tabId: t.tabId, name: t.name, session: t.session, status: "connected", route, device, free: prompt && !hopRuns.current.has(t.tabId) });
+      planTabs.push({ tabId: t.tabId, name: t.name, session: t.session, status: "connected", route, device, free: prompt && !hopRuns.current.has(t.tabId) && !discovering.current.has(t.tabId) });
     }
     const live = new Set(terms.map((t) => t.tabId));
     for (const b of briefs) {
@@ -2629,7 +2644,7 @@ export function TopologyTool({
 
   const showSuggestions = () => {
     setUi((u) => ({ ...u, panel: true, sec: { ...u.sec, sugerencias: true } }));
-    requestAnimationFrame(() => suggestionsRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+    requestAnimationFrame(() => suggestionsRef.current?.scrollIntoView({ block: "start", behavior: reducedMotion ? "auto" : "smooth" }));
   };
 
   /** Ajustar a la vista: zoom con piso de legibilidad, centrado en el equipo elegido o en el primero. */

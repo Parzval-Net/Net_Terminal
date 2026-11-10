@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Radio } from "lucide-react";
+import { ChevronDown, Radio, Send } from "lucide-react";
 import {
   TargetMode,
   openFolders,
@@ -72,7 +72,7 @@ export const BroadcastTargetPicker = memo(function BroadcastTargetPicker() {
           const r = e.currentTarget.getBoundingClientRect();
           setOpen((o) => (o ? null : { right: Math.max(8, window.innerWidth - r.right), bottom: window.innerHeight - r.top + 6 }));
         }}
-        title="Elegir a qué sesiones se envía lo de Notas, catálogo, botones y scripts"
+        title={`Enviar a: ${multi ? `${targetLabel(target, ws)} (${count} conectadas)` : "pestaña actual"}\nElegir a qué sesiones se envía lo de Notas, catálogo, botones y scripts`}
         aria-haspopup="dialog"
         aria-expanded={isOpen}
         aria-label={multi ? `Enviar a: ${targetLabel(target, ws)}, ${count} conectadas` : "Enviar a: pestaña actual"}
@@ -80,8 +80,9 @@ export const BroadcastTargetPicker = memo(function BroadcastTargetPicker() {
           multi ? "border-warn text-warn font-medium" : "border-transparent text-muted hover:text-fg hover:bg-hover"
         }`}
       >
-        {multi && <Radio size={12} />}
-        <span className="hidden @[52rem]:inline shrink-0 font-normal text-muted">Enviar a:</span>
+        {/* Ícono propio también con la barra angosta: sin él quedaba "Actual" sin contexto. */}
+        {multi ? <Radio size={12} aria-hidden /> : <Send size={12} aria-hidden className="shrink-0" />}
+        <span className="hidden @[36rem]:inline shrink-0 font-normal text-muted">Enviar a:</span>
         <span className="max-w-[90px] @[52rem]:max-w-[140px] truncate">
           {multi ? (
             `${shortLabel} (${count})`

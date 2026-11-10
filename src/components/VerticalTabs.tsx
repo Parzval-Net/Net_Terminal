@@ -1,10 +1,10 @@
 import { persist, stored } from "../lib/prefs";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { Columns2, LayoutGrid, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, PanelTop, Plus, Rows2, X } from "lucide-react";
+import { Columns2, LayoutGrid, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, PanelTop, Plus, Rows2 } from "lucide-react";
 import { tabTitle } from "../types";
 import { ContextMenu } from "./Sidebar";
 import { SessionIcon, isQuickSession } from "./SessionIcon";
-import { StatusDot, TabBarProps, closeBtnClass, dropMark, tabLabel } from "./TabBar";
+import { StatusDot, TabBarProps, TabEnd, dropMark, tabLabel } from "./TabBar";
 import { useTabDrag } from "../lib/tabDrag";
 import { useTabKeys } from "../lib/useTabKeys";
 import { MenuItem, layoutItem, newTabMenuItems, splitMenuItems, tabMenuItems } from "./tabMenu";
@@ -197,6 +197,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                   if (e.button !== 0) return;
                   onSelect(t.id);
                   drag.begin(e, t.id);
+                  if (editing !== t.id) props.onFocusTab?.(t.id);
                 }
               }}
               onDoubleClick={() => rename(t.id)}
@@ -261,17 +262,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                       ●
                     </span>
                   ) : null}
-                  <StatusDot status={status} active={active} className="group-hover:hidden group-focus-within:hidden" />
-                  <button
-                    tabIndex={focusId === t.id ? 0 : -1}
-                    aria-label={`Cerrar ${title}`}
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onClick={() => onClose(t.id)}
-                    title={`Cerrar (${modLabel}W)`}
-                    className={closeBtnClass(active)}
-                  >
-                    <X size={12} />
-                  </button>
+                  <TabEnd status={status} active={active} tabIndex={focusId === t.id ? 0 : -1} title={title} onClose={() => onClose(t.id)} />
                 </>
               )}
             </div>

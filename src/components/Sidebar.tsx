@@ -127,6 +127,7 @@ export const Sidebar = memo(function Sidebar(p: Props) {
   const pendingFocus = useRef<{ key: string; tries: number } | null>(null);
   /** Enter o Esc en el campo de renombrar devuelven el foco a la fila; un clic fuera no. */
   const refocusRename = useRef(false);
+  const filterRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -473,6 +474,11 @@ export const Sidebar = memo(function Sidebar(p: Props) {
       e.preventDefault();
       return setSelected(it.kind === "folder" ? { kind: "folder", path: it.node.path } : { kind: "session", id: it.session.id });
     }
+    // Arriba desde la primera fila vuelve al filtro (el recorrido de ida y vuelta de la barra superpuesta).
+    if (e.key === "ArrowUp" && index === 0) {
+      e.preventDefault();
+      return filterRef.current?.focus();
+    }
     const page = Math.max(1, Math.floor((navRef.current?.clientHeight ?? 400) / rowH) - 1);
     const mv = treeKey(treeRows, index, e.key, page);
     if (!mv) return;
@@ -734,7 +740,17 @@ export const Sidebar = memo(function Sidebar(p: Props) {
             aria-label="Filtrar sesiones por nombre, IP o carpeta"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            onKeyDown={(e) => e.key === "Escape" && setFilter("")}
+            ref={filterRef}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && filter) {
+                e.preventDefault();
+                setFilter("");
+              } else if (e.key === "ArrowDown" && rows.length) {
+                // Flecha abajo pasa al árbol: a la fila con foco o seleccionada, si no a la primera.
+                e.preventDefault();
+                focusRow(Math.max(0, rows.findIndex((r) => rowKey(r.it) === tabKey)));
+              }
+            }}
           />
         </div>
         {p.onQuickConnect && (

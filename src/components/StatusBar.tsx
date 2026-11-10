@@ -170,6 +170,7 @@ export const StatusBar = memo(function StatusBar({
           className={logging ? "!text-danger" : ""}
         >
           {logging ? <CircleDot size={12} /> : <Circle size={12} />}
+          <span className="hidden @[36rem]:inline @[52rem]:hidden">Log</span>
           <span className={LBL}>Grabar log</span>
           {logging && <span className="sr-only">(grabando)</span>}
           {!connected && !logging && (

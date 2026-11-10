@@ -181,7 +181,7 @@ export function SettingsModal({
         className="@container w-[800px] h-[600px] min-w-[420px] min-h-[340px] max-w-[96vw] max-h-[94vh] resize flex bg-panel border border-line rounded-xl shadow-pop overflow-hidden"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <nav aria-label="Secciones de ajustes" className="w-12 @[640px]:w-44 shrink-0 bg-chrome border-r border-line p-2 space-y-0.5 overflow-y-auto">
+        <nav aria-label="Secciones de ajustes" className="w-12 @[640px]:w-48 shrink-0 bg-chrome border-r border-line p-2 space-y-0.5 overflow-y-auto">
           <div {...win.handle} className="hidden @[640px]:block px-2 pt-1.5 pb-2 text-[14px] font-semibold select-none">
             Ajustes
           </div>
@@ -193,6 +193,13 @@ export function SettingsModal({
               aria-label="Buscar ajuste"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              // Con texto, el primer Esc limpia la búsqueda; el segundo cierra Ajustes.
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && query) {
+                  e.preventDefault();
+                  setQuery("");
+                }
+              }}
             />
           </label>
           {groups.map((g) => (

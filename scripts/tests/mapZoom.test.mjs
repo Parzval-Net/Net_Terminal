@@ -66,6 +66,12 @@ while (Z.labelsVisible(kOn - 0.005) && kOn > 0.1) kOn -= 0.005;
 close(Z.SMALL_PX * Z.smallScale(kOn) * kOn, Z.LABELS_MIN_PX, 0.6, "umbral");
 assert.ok(Z.labelsVisible(kOn) && !Z.labelsVisible(kOn - 0.01));
 
+// Piso de 11 px: mientras puertos e IP se muestran, nunca quedan bajo 11 px efectivos.
+for (let k = 0.1; k < 4; k += 0.007) {
+  if (Z.labelsVisible(k)) assert.ok(Z.SMALL_PX * Z.smallScale(k) * k >= 11 - 1e-6, `puertos bajo 11 px con k=${k}`);
+}
+assert.equal(Z.SMALL_MIN_PX, 11);
+
 // ---------- Centrado y desplazamiento ----------
 
 const b2 = { x: -100, y: -50, w: 2000, h: 1000 };

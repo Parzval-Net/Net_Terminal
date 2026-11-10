@@ -183,7 +183,7 @@ export function StatTile({ label, value, tone }: { label: string; value: string;
   const color = tone === "danger" ? "text-danger" : tone === "ok" ? "text-ok" : tone === "warn" ? "text-warn" : "text-fg";
   return (
     <div className="rounded-lg border border-line px-2.5 py-2 min-w-0" title={`${label}: ${value}`}>
-      <div className="text-[11px] text-muted truncate">{label}</div>
+      <div className="text-[11px] text-muted leading-tight [overflow-wrap:anywhere]">{label}</div>
       <div className={`text-[16px] font-semibold tabular-nums truncate ${color}`}>{value}</div>
     </div>
   );

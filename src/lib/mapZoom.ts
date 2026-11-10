@@ -61,9 +61,9 @@ export const NAME_PX = 13;
 export const SMALL_PX = 11;
 /** Piso de legibilidad del nombre del equipo, en px de pantalla. */
 export const NAME_MIN_PX = 11;
-/** Tamaño que se busca para los textos chicos (puertos, IP) y el mínimo con el que aún se muestran. */
-export const SMALL_MIN_PX = 10;
-export const LABELS_MIN_PX = 9.5;
+/** Tamaño que se busca para los textos chicos (puertos, IP) y el mínimo con el que aún se muestran: 11 px, nunca menos. */
+export const SMALL_MIN_PX = 11;
+export const LABELS_MIN_PX = 11;
 /** Máximo que se agranda el texto para compensar la escala (más ancho que la caja del equipo). */
 export const TEXT_SCALE_MAX = 1.2;
 export const ZOOM_MIN = 0.4;
@@ -125,7 +125,7 @@ export function smallScale(k: number): number {
  * ocultan del dibujo y quedan en la ficha al pasar el mouse.
  */
 export function labelsVisible(k: number): boolean {
-  return SMALL_PX * smallScale(k) * k >= LABELS_MIN_PX;
+  return SMALL_PX * smallScale(k) * k >= LABELS_MIN_PX - 1e-6;
 }
 
 /** Tamaño en px de pantalla del nombre del equipo a la escala `k`. */

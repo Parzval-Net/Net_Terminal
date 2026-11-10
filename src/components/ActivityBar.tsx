@@ -10,8 +10,8 @@ interface Props {
   sidebarOpen: boolean;
   /** Barra de sesiones flotante activa (ajuste) y cerrada: el mouse sobre Sesiones la abre. */
   floatingSessions: boolean;
-  /** La app ocultó la barra acoplada porque un panel derecho necesita el espacio (vuelve al cerrarlo). */
-  sessionsAutoHidden?: boolean;
+  /** La app ocultó la barra acoplada (no el usuario): un panel derecho o Herramientas en ventana angosta; vuelve sola. */
+  sessionsHiddenBy?: "panel" | "tools" | null;
   /** La vista de Herramientas es la que se ve ahora. */
   toolsActive: boolean;
   /** Herramientas montada (sus monitoreos y servidores siguen vivos aunque se vea una terminal). */
@@ -61,14 +61,22 @@ export const ActivityBar = memo(function ActivityBar(p: Props) {
       <ActivityBtn
         label="Sesiones"
         title={
-          p.sessionsAutoHidden
-            ? `Sesiones oculta mientras el panel derecho está abierto (ventana angosta). Clic o ${modLabel}B: verlas encima`
+          p.sessionsHiddenBy
+            ? `Sesiones oculta automáticamente: ${
+                p.sessionsHiddenBy === "tools" ? "Herramientas necesita el ancho de la ventana" : "el panel derecho necesita el espacio"
+              }. Vuelve sola al ${p.sessionsHiddenBy === "tools" ? "volver a una terminal o ensanchar la ventana" : "cerrar el panel"}.\nClic o ${modLabel}B: verlas encima`
             : `Mostrar/ocultar sesiones (${modLabel}B)${p.floatingSessions ? "\nPasa el mouse para verlas sobre la terminal" : ""}`
         }
+        alert={p.sessionsHiddenBy ? "oculta automáticamente por falta de ancho" : undefined}
         sessions={{ enter: p.onSessionsEnter, leave: p.onSessionsLeave, floating: p.floatingSessions }}
         active={p.sidebarOpen}
         onClick={p.onSessions}
         icon={<PanelLeft size={18} />}
+        badge={
+          p.sessionsHiddenBy && (
+            <span aria-hidden data-auto-hidden="" className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-warn ring-2 ring-[var(--chrome)]" />
+          )
+        }
       />
       <ActivityBtn
         label="Herramientas"
