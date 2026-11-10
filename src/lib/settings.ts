@@ -120,6 +120,10 @@ export interface Settings {
   /** IP local del receptor de traps ("" = 127.0.0.1). */
   snmpTrapBind: string;
   ftpPort: number;
+  /** Bóveda con contraseña maestra: minutos sin usarla antes de bloquearla (0 = nunca). */
+  vaultAutoLockMin: number;
+  /** Bóveda con contraseña maestra: bloquear al notar que el equipo estuvo suspendido. */
+  vaultLockOnSleep: boolean;
 }
 
 export interface UpdateInfo {
@@ -201,6 +205,8 @@ export const defaultSettings: Settings = {
   snmpTrapPort: 162,
   snmpTrapBind: "",
   ftpPort: 21,
+  vaultAutoLockMin: 0,
+  vaultLockOnSleep: false,
 };
 
 /** Opciones de log que se pasan a set_logging. */
@@ -287,6 +293,8 @@ export interface DataFileNotice {
   dropped: string[];
   tooLarge: boolean;
   corrupt: boolean;
+  /** Se restauró desde un respaldo (que no guarda el token del API local) y se generó un token nuevo. */
+  tokenRegenerated: boolean;
 }
 
 export interface DataFilesInfo {
@@ -338,6 +346,7 @@ function parseNotice(v: unknown): DataFileNotice | null {
     dropped: strList(v.dropped),
     tooLarge: v.tooLarge === true,
     corrupt: v.corrupt === true,
+    tokenRegenerated: v.tokenRegenerated === true,
   };
 }
 
@@ -398,6 +407,12 @@ export function describeDataNotices(info: DataFilesInfo | null, seen: ReadonlySe
       out.push({ key: `large:${file}`, text: `${file} superaba el tamaño máximo (64 MB) y se apartó como ${stem}.corrupt-<fecha>.json. La app partió con valores por defecto.` });
     } else if (n.corrupt) {
       out.push({ key: `corrupt:${file}`, text: `${file} estaba dañado y no había un respaldo válido. El archivo se conservó como ${stem}.corrupt-<fecha>.json.` });
+    }
+    if (n.tokenRegenerated) {
+      out.push({
+        key: `token:${file}:${n.restoredFrom}`,
+        text: "Los respaldos no guardan el token del API local (MCP): al restaurar los ajustes se generó uno nuevo. Si usas clientes MCP, copia el token nuevo desde Ajustes › Agentes IA.",
+      });
     }
     if (n.newer) {
       out.push({

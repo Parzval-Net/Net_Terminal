@@ -1,5 +1,6 @@
 mod autofill;
 mod backups;
+mod bundle;
 mod cmdpacks;
 mod connection;
 mod datafiles;
@@ -50,6 +51,8 @@ struct AppState {
     files: datafiles::DataFiles,
     /// Carpeta de logs elegida por el usuario (validada); None: `data/logs`.
     logs_root: std::sync::Mutex<Option<PathBuf>>,
+    /// Importación de un archivo cifrado (.ntx) a la espera de que se confirme la vista previa.
+    bundle: bundle::PendingSlot,
 }
 
 impl AppState {
@@ -222,16 +225,48 @@ fn disarm_autofill(conn: String, state: State<'_, AppState>) -> Result<bool, Str
     state.conns.disarm_autofill(&conn)
 }
 
+/// Temporizador del bloqueo automático: existe solo mientras la bóveda con contraseña maestra está
+/// desbloqueada y la opción activa (despierta cada 30 s como máximo). Al vencer, la llave se borra de
+/// memoria y se avisa `creds-changed`.
+fn arm_autolock(app: &tauri::AppHandle) {
+    let Some(gen) = app.state::<AppState>().creds.autolock_arm() else { return };
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        let tick = app.state::<AppState>().creds.autolock_tick(gen, std::time::Instant::now(), std::time::SystemTime::now());
+        match tick {
+            credentials::Tick::Wait(d) => std::thread::sleep(d),
+            credentials::Tick::Locked => {
+                let _ = app.emit("creds-changed", ());
+                break;
+            }
+            credentials::Tick::Stop => break,
+        }
+    });
+}
+
+/// Bloqueo automático de la bóveda (Ajustes › Credenciales): minutos sin uso (0 = apagado) y al
+/// notar una suspensión del equipo. Solo aplica con contraseña maestra.
+#[tauri::command]
+fn vault_autolock_set(minutes: u32, on_sleep: bool, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.creds.set_autolock(minutes, on_sleep)?;
+    arm_autolock(&app);
+    Ok(())
+}
+
 #[tauri::command(async)]
 fn vault_create(master: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let master = zeroize::Zeroizing::new(master);
-    creds_changed(&app, state.creds.create(&master))
+    let r = creds_changed(&app, state.creds.create(&master));
+    arm_autolock(&app);
+    r
 }
 
 #[tauri::command(async)]
 fn vault_unlock(master: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let master = zeroize::Zeroizing::new(master);
-    creds_changed(&app, state.creds.unlock(&master))
+    let r = creds_changed(&app, state.creds.unlock(&master));
+    arm_autolock(&app);
+    r
 }
 
 #[tauri::command]
@@ -243,7 +278,9 @@ fn vault_lock(app: tauri::AppHandle, state: State<'_, AppState>) {
 #[tauri::command(async)]
 fn vault_change(old: String, new: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let (old, new) = (zeroize::Zeroizing::new(old), zeroize::Zeroizing::new(new));
-    creds_changed(&app, state.creds.change(&old, &new))
+    let r = creds_changed(&app, state.creds.change(&old, &new));
+    arm_autolock(&app);
+    r
 }
 
 #[tauri::command(async)]
@@ -1249,6 +1286,7 @@ pub fn run() {
                 files: datafiles::DataFiles::new(&data_dir),
                 data_dir,
                 logs_root: std::sync::Mutex::new(None),
+                bundle: bundle::PendingSlot::default(),
             });
             Ok(())
         })
@@ -1363,6 +1401,11 @@ pub fn run() {
             vault_lock,
             vault_change,
             vault_reset,
+            vault_autolock_set,
+            bundle::bundle_export,
+            bundle::bundle_inspect,
+            bundle::bundle_import_apply,
+            bundle::bundle_import_cancel,
             snmp::snmp_request,
             snmp::snmp_walk,
             snmp::snmp_walk_many,

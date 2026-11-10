@@ -305,16 +305,30 @@ pub fn backup_corrupt(path: &Path) {
         return set_aside(path);
     }
     let dest = corrupt_dest(path);
-    if fs::copy(path, &dest).is_ok() {
+    // settings.json: la copia va sin el token del API local (ni otros secretos de los ajustes).
+    let copied = if crate::datafiles::is_settings(path) {
+        fs::read(path).is_ok_and(|b| crate::seal::write_atomic(&dest, &crate::datafiles::backup_bytes(path, b)).is_ok())
+    } else {
+        fs::copy(path, &dest).is_ok()
+    };
+    if copied {
         restrict(&dest);
     }
     prune_corrupt(path);
 }
 
 /// Aparta (renombra, sin copiar) un archivo demasiado grande para leerlo: el original no se pierde
-/// y la app arranca con valores por defecto.
+/// y la app arranca con valores por defecto. settings.json apartado se redacta en el mismo paso
+/// (sin secretos de los ajustes en la copia).
 pub fn set_aside(path: &Path) {
-    if fs::rename(path, corrupt_dest(path)).is_ok() {
+    let dest = corrupt_dest(path);
+    if fs::rename(path, &dest).is_ok() {
+        if crate::datafiles::is_settings(path) {
+            if let Some(clean) = fs::read(&dest).ok().and_then(|b| crate::datafiles::redact_settings_bytes(&b)) {
+                let _ = crate::seal::write_atomic(&dest, &clean);
+            }
+            restrict(&dest);
+        }
         prune_corrupt(path);
     }
 }

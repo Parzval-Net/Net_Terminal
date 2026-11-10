@@ -842,7 +842,7 @@ const SSH_FLAGS_FORBIDDEN: &str = "FIE";
 /// Valida los argumentos extra con la misma semántica de getopt que usa ssh: flags
 /// agrupados ("-vo…", "-vF…"), valor pegado o en el argumento siguiente. Solo se aceptan
 /// opciones; un argumento suelto cambiaría el host o el comando remoto.
-fn check_extra_args(args: &[String]) -> Result<(), String> {
+pub(crate) fn check_extra_args(args: &[String]) -> Result<(), String> {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -1152,7 +1152,7 @@ fn legacy_options() -> &'static [String] {
 }
 
 /// Divide argumentos como una shell simple: respeta comillas simples y dobles.
-fn split_args(s: &str) -> Vec<String> {
+pub(crate) fn split_args(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;

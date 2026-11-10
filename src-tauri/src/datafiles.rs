@@ -11,6 +11,10 @@
 //!   a `<archivo>.v<N>.bak.json`.
 //! - `<archivo>.bak` y `<archivo>.bak2` guardan el último estado válido (como mucho uno por día,
 //!   en un hilo aparte). Un archivo ilegible se restaura desde ellos.
+//! - Ninguna copia de settings.json guarda secretos de los ajustes (`SETTINGS_SECRETS`, hoy el token
+//!   del API local): se redactan al escribir la copia, al rotar o borrar el token y, en cada arranque,
+//!   en las copias de versiones anteriores. Al restaurar desde una copia se genera un token nuevo y
+//!   se avisa (`tokenRegenerated`).
 
 use crate::seal;
 use crate::session_store;
@@ -33,6 +37,12 @@ pub const TOPOLOGY_KEYS: [&str; 2] = ["topology", "topoSnapshots"];
 pub const MAX_TOPOLOGY_BYTES: usize = 64 * 1024 * 1024;
 /// Tope al leer (y al respaldar): el de la topología más un margen para la versión y claves extra.
 const MAX_READ_BYTES: u64 = MAX_TOPOLOGY_BYTES as u64 + 1024 * 1024;
+/// Secretos guardados en settings.json: nunca se escriben en sus copias de respaldo.
+pub const SETTINGS_SECRETS: [&str; 1] = ["mcpToken"];
+/// Clave del token del API local (MCP): al restaurar desde un respaldo se genera uno nuevo.
+pub const MCP_TOKEN_KEY: &str = "mcpToken";
+/// Tope al redactar copias ya existentes (más allá se dejan como están).
+const MAX_REDACT_BYTES: u64 = 256 * 1024 * 1024;
 /// Cuántas copias `*.corrupt-<fecha>.json` se conservan por archivo.
 pub const KEEP_CORRUPT: usize = 5;
 /// Edad mínima del respaldo `.bak` antes de renovarlo (un respaldo por día como máximo).
@@ -102,6 +112,8 @@ pub struct FileNotice {
     pub too_large: bool,
     /// El archivo era ilegible (se respaldó como `*.corrupt-<fecha>.json`).
     pub corrupt: bool,
+    /// Se restauró desde un respaldo, que no guarda el token del API local: se generó uno nuevo.
+    pub token_regenerated: bool,
 }
 
 impl FileNotice {
@@ -116,6 +128,9 @@ struct FileState {
     version: u64,
     /// Falta copiar el original a `<archivo>.v<N>.bak.json` antes del próximo guardado.
     bak_pending: bool,
+    /// Huella (SHA-256) de los secretos de settings.json al leerlo o escribirlo por última vez: si
+    /// cambian al guardar (token rotado o borrado) se repasan las copias de respaldo.
+    secrets: Option<[u8; 32]>,
 }
 
 pub struct DataFiles {
@@ -238,10 +253,121 @@ fn write_version_backup(path: &Path, version: u64) {
     }
     // Copia a un temporal propio y rename: un corte no deja una copia a medias con el nombre final.
     if let Ok(bytes) = fs::read(path) {
-        if seal::write_atomic(&dest, &bytes).is_ok() {
+        if seal::write_atomic(&dest, &backup_bytes(path, bytes)).is_ok() {
             session_store::restrict(&dest);
         }
     }
+}
+
+// ---------- Secretos de los ajustes fuera de los respaldos ----------
+
+pub fn is_settings(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == SETTINGS_FILE)
+}
+
+/// Contenido a escribir en una copia de respaldo de `path`: sin secretos si es settings.json.
+pub fn backup_bytes(path: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    if is_settings(path) {
+        redact_settings_bytes(&bytes).unwrap_or(bytes)
+    } else {
+        bytes
+    }
+}
+
+fn secret_re() -> &'static regex::bytes::Regex {
+    static RE: std::sync::OnceLock<regex::bytes::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        let keys = SETTINGS_SECRETS.iter().map(|k| regex::escape(k)).collect::<Vec<_>>().join("|");
+        // Valor de texto JSON (con escapes) o cualquier otro valor simple hasta la coma o la llave.
+        // Sin Unicode: un archivo dañado puede traer bytes que no son UTF-8 dentro del valor.
+        let pattern = format!(r#"(?-u)"({keys})"(\s*):(\s*)(?:"(?:[^"\\]|\\.)*"|[^,}}\]\s]+)"#);
+        regex::bytes::Regex::new(&pattern).expect("regex de secretos")
+    })
+}
+
+/// Un secreto con valor (no vacío) en un objeto de ajustes.
+fn has_secret_value(map: &Map<String, Value>) -> bool {
+    SETTINGS_SECRETS.iter().any(|k| map.get(*k).is_some_and(|v| v.as_str() != Some("")))
+}
+
+/// settings.json (válido o dañado) sin los valores de `SETTINGS_SECRETS`: cada uno queda como `""`
+/// y el resto del archivo byte a byte igual. None si no había nada que redactar. Si tras el
+/// reemplazo de texto el JSON todavía trae un secreto (clave escrita con escapes `\u…`), se
+/// reescribe desde el objeto.
+pub fn redact_settings_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut out = secret_re().replace_all(bytes, &br#""${1}"${2}:${3}"""#[..]).into_owned();
+    if let Ok(Value::Object(mut m)) = serde_json::from_slice::<Value>(&out) {
+        if has_secret_value(&m) {
+            for k in SETTINGS_SECRETS {
+                if m.contains_key(k) {
+                    m.insert(k.to_string(), Value::String(String::new()));
+                }
+            }
+            out = serde_json::to_vec_pretty(&Value::Object(m)).ok()?;
+        }
+    }
+    (out != bytes).then_some(out)
+}
+
+/// Huella de los secretos de un objeto de ajustes (para notar una rotación o un borrado).
+fn secrets_digest(map: &Map<String, Value>) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for k in SETTINGS_SECRETS {
+        h.update(k.as_bytes());
+        h.update([0]);
+        if let Some(v) = map.get(k) {
+            h.update(v.to_string().as_bytes());
+        }
+        h.update([0]);
+    }
+    h.finalize().into()
+}
+
+/// Token nuevo para el API local: 24 bytes aleatorios en hexadecimal (como `newToken` de la interfaz).
+pub fn new_mcp_token() -> String {
+    seal::random::<24>().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Copias de settings.json en `dir`: `.bak`, `.bak2`, `settings.v<N>.bak.json` y `settings.corrupt-<fecha>.json`.
+fn settings_backups(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    entries
+        .flatten()
+        .filter(|e| {
+            let n = e.file_name();
+            let Some(n) = n.to_str() else { return false };
+            n == "settings.json.bak"
+                || n == "settings.json.bak2"
+                || n.strip_prefix("settings.v").and_then(|r| r.strip_suffix(".bak.json")).is_some_and(digits)
+                || n.strip_prefix("settings.corrupt-").and_then(|r| r.strip_suffix(".json")).is_some_and(digits)
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
+/// Redacta los secretos en las copias de settings.json que ya existen (versiones anteriores, o tras
+/// rotar o borrar el token). Conserva la fecha de modificación (la rotación diaria la usa). Nunca
+/// sigue enlaces simbólicos ni toca otros archivos. Devuelve cuántas copias reescribió.
+pub fn scrub_settings_backups(dir: &Path) -> usize {
+    let mut n = 0;
+    for p in settings_backups(dir) {
+        let Ok(meta) = fs::symlink_metadata(&p) else { continue };
+        if !meta.is_file() || meta.len() > MAX_REDACT_BYTES {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&p) else { continue };
+        let Some(clean) = redact_settings_bytes(&bytes) else { continue };
+        if seal::write_atomic(&p, &clean).is_ok() {
+            if let Ok(m) = meta.modified() {
+                let _ = fs::File::options().write(true).open(&p).and_then(|f| f.set_modified(m));
+            }
+            session_store::restrict(&p);
+            n += 1;
+        }
+    }
+    n
 }
 
 impl DataFiles {
@@ -250,7 +376,7 @@ impl DataFiles {
     }
 
     pub fn with_schemas(dir: &Path, settings: Schema, topology: Schema) -> Self {
-        let fresh = |s: Schema| Mutex::new(FileState { version: s.target, bak_pending: false });
+        let fresh = |s: Schema| Mutex::new(FileState { version: s.target, bak_pending: false, secrets: None });
         DataFiles { dir: dir.to_path_buf(), schemas: [settings, topology], settings: fresh(settings), topology: fresh(topology) }
     }
 
@@ -339,6 +465,9 @@ impl DataFiles {
             }
         }
         map.remove(VERSION_KEY);
+        if kind == Kind::Settings {
+            st.secrets = Some(secrets_digest(&map));
+        }
         if !dropped.is_empty() && !notice.newer {
             // Se descartó algo al leer: el original queda respaldado antes de que se reescriba.
             session_store::backup_corrupt(&path);
@@ -350,9 +479,18 @@ impl DataFiles {
     /// Busca el último respaldo válido de un archivo ilegible y lo devuelve ya escrito en su lugar.
     fn restore(&self, path: &Path, notice: &mut FileNotice) -> Option<Map<String, Value>> {
         for cand in [bak_path(path), bak2_path(path)] {
-            if let Ok(Some((map, bytes))) = read_object(&cand) {
+            if let Ok(Some((mut map, mut bytes))) = read_object(&cand) {
+                // Los respaldos no guardan el token del API local: si los ajustes lo tenían se genera
+                // uno nuevo (el anterior pudo quedar en una copia vieja) y la interfaz avisa.
+                let regen = is_settings(path) && map.contains_key(MCP_TOKEN_KEY);
+                if regen {
+                    map.insert(MCP_TOKEN_KEY.into(), Value::String(new_mcp_token()));
+                    let Ok(b) = serde_json::to_vec_pretty(&Value::Object(map.clone())) else { continue };
+                    bytes = b;
+                }
                 if seal::write_atomic(path, &bytes).is_ok() {
                     notice.restored_from = cand.file_name().map(|n| n.to_string_lossy().into_owned());
+                    notice.token_regenerated = regen;
                     return Some(map);
                 }
             }
@@ -413,7 +551,25 @@ impl DataFiles {
         let json = if compact.len() < 512 * 1024 { serde_json::to_string_pretty(&value).map_err(|e| e.to_string())? } else { compact };
         seal::write_atomic(&path, json.as_bytes())?;
         st.version = schema.target.max(st.version);
+        if kind == Kind::Settings {
+            // Token rotado o borrado: ninguna copia anterior debe conservarlo (defensa en profundidad:
+            // las copias ya se escriben redactadas).
+            let digest = value.as_object().map(secrets_digest);
+            if st.secrets.is_some() && digest != st.secrets {
+                scrub_settings_backups(&self.dir);
+            }
+            st.secrets = digest;
+        }
         Ok(())
+    }
+
+    /// Ajustes guardados tal como están en disco, sin migrar ni escribir nada (exportación cifrada).
+    /// Sin las marcas internas ni `schemaVersion`. None si no hay archivo o es ilegible.
+    pub fn peek_settings(&self) -> Option<Map<String, Value>> {
+        let _st = self.state(Kind::Settings);
+        let (mut map, _) = read_object(&self.path(Kind::Settings)).ok()??;
+        map.retain(|k, _| k != VERSION_KEY && !k.starts_with("__"));
+        Some(map)
     }
 
     /// Ajustes y topología como los ve el frontend: topology.json manda sobre settings.json y solo
@@ -501,6 +657,7 @@ pub fn rotate_backup(path: &Path, validate: &dyn Fn(&[u8]) -> bool, now: SystemT
     if !validate(&bytes) {
         return Rotation::Skipped;
     }
+    let bytes = backup_bytes(path, bytes);
     if let Some(bm) = &bak_meta {
         if fs::read(&bak).is_ok_and(|old| old == bytes) {
             return Rotation::Unchanged;
@@ -536,6 +693,9 @@ pub fn rotate_all(dir: &Path, now: SystemTime, min_age: Duration) -> Vec<(&'stat
 /// Rota los respaldos pasados unos segundos del arranque, sin bloquear nada.
 pub fn spawn_rotation(dir: PathBuf) {
     std::thread::spawn(move || {
+        // Copias de settings.json de versiones anteriores con el token MCP en claro: se redactan
+        // apenas arranca (idempotente: una copia ya limpia no se reescribe).
+        scrub_settings_backups(&dir);
         std::thread::sleep(ROTATE_DELAY);
         rotate_all(&dir, SystemTime::now(), BAK_MIN_AGE);
     });
@@ -587,6 +747,150 @@ mod tests {
 
     fn put(dir: &Path, name: &str, body: &str) {
         fs::write(dir.join(name), body).unwrap();
+    }
+
+    /// El texto de un settings.json tal como queda en sus respaldos (sin el token MCP).
+    fn redacted(s: &str) -> String {
+        String::from_utf8(redact_settings_bytes(s.as_bytes()).unwrap_or_else(|| s.as_bytes().to_vec())).unwrap()
+    }
+
+    /// Mismo JSON salvo `mcpToken`, que es otro (regenerado: 48 caracteres hexadecimales).
+    fn assert_same_but_token(got: &str, orig: &str, ctx: &str) {
+        let mut g: Map<String, Value> = serde_json::from_str(got).unwrap();
+        let mut o: Map<String, Value> = serde_json::from_str(orig).unwrap();
+        let (gt, ot) = (g.remove(MCP_TOKEN_KEY), o.remove(MCP_TOKEN_KEY));
+        assert_eq!(g, o, "{ctx}");
+        let gt = gt.and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        assert!(gt.len() == 48 && gt.bytes().all(|b| b.is_ascii_hexdigit()), "{ctx}: token {gt:?}");
+        assert_ne!(Some(Value::String(gt)), ot, "{ctx}: token nuevo");
+    }
+
+    fn has_token(p: &Path, token: &str) -> bool {
+        fs::read(p).unwrap().windows(token.len()).any(|w| w == token.as_bytes())
+    }
+
+    #[test]
+    fn redaction_keeps_everything_but_secrets() {
+        // Válido: byte a byte igual salvo el valor del token.
+        let out = redacted(S0920);
+        assert!(!out.contains("00ff00ff00ff"));
+        assert!(out.contains(r#""mcpToken": """#));
+        assert_eq!(out.len(), S0920.len() - 48);
+        let (a, b): (Value, Value) = (serde_json::from_str(&out).unwrap(), serde_json::from_str(S0920).unwrap());
+        let (mut a, mut b) = (a.as_object().unwrap().clone(), b.as_object().unwrap().clone());
+        assert_eq!(a.remove(MCP_TOKEN_KEY), Some(json!("")));
+        b.remove(MCP_TOKEN_KEY);
+        assert_eq!(a, b);
+        // Dañado (JSON cortado, otra codificación) y con escapes o valores raros.
+        for (raw, secret) in [
+            (&br#"{"fontSize": 13, "mcpToken" :  "abc\"def123", "x": "#[..], &b"def123"[..]),
+            (&b"{\"mcpToken\":\"tok-\xff-secreto\", \"a\""[..], &b"secreto"[..]),
+            (&br#"{"mcpToken": 12345678901, "a": 1}"#[..], &b"12345678901"[..]),
+            (&br#"{"mcpToken": "escapado-secreto", "a": 1}"#[..], &b"escapado-secreto"[..]),
+        ] {
+            let out = redact_settings_bytes(raw).expect("redactado");
+            assert!(!out.windows(secret.len()).any(|w| w == secret), "{}", String::from_utf8_lossy(raw));
+        }
+        // Sin token, o ya vacío: nada que hacer.
+        assert!(redact_settings_bytes(br#"{"mcpToken": "", "a": 1}"#).is_none());
+        assert!(redact_settings_bytes(b"{ roto").is_none());
+        // Otra clave que contiene el nombre no se toca.
+        assert!(redact_settings_bytes(br#"{"notmcpTokenX": "v"}"#).is_none());
+    }
+
+    #[test]
+    fn backups_never_contain_the_token() {
+        let d = temp_dir("token");
+        let path = d.join(SETTINGS_FILE);
+        put(&d, SETTINGS_FILE, S0911);
+        let tok = "0123456789abcdef0123456789abcdef0123456789abcdef";
+        // Rotación diaria (.bak y .bak2).
+        assert_eq!(rotate_backup(&path, &valid_object, SystemTime::now(), BAK_MIN_AGE), Rotation::Rotated);
+        assert!(!has_token(&bak_path(&path), tok));
+        assert!(has_token(&path, tok), "el original no cambia");
+        assert_eq!(rotate_backup(&path, &valid_object, SystemTime::now() + Duration::from_secs(3 * 86400), BAK_MIN_AGE), Rotation::Unchanged, "mismo contenido redactado");
+        // Copia previa a migrar.
+        let df = DataFiles::new(&d);
+        let (v, _) = df.load(Kind::Settings);
+        df.save(Kind::Settings, v.clone()).unwrap();
+        assert!(!has_token(&d.join("settings.v0.bak.json"), tok));
+        // Copia de un archivo dañado.
+        fs::write(&path, format!(r#"{{"mcpToken": "{tok}", "fontSize": "#)).unwrap();
+        session_store::backup_corrupt(&path);
+        let corrupt: Vec<_> = fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("settings.corrupt-")).collect();
+        assert_eq!(corrupt.len(), 1);
+        assert!(!has_token(&corrupt[0].path(), tok));
+        // Apartado por tamaño.
+        let big = d.join("big").join(SETTINGS_FILE);
+        fs::create_dir_all(big.parent().unwrap()).unwrap();
+        fs::write(&big, format!(r#"{{"mcpToken": "{tok}"}}"#)).unwrap();
+        session_store::set_aside(&big);
+        let aside = fs::read_dir(big.parent().unwrap()).unwrap().flatten().next().unwrap().path();
+        assert!(!has_token(&aside, tok));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn startup_scrub_cleans_old_backups_and_token_rotation_rescrubs() {
+        let d = temp_dir("scrub");
+        let tok = "00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff";
+        // Copias de una versión anterior, con el token en claro.
+        for name in ["settings.json.bak", "settings.json.bak2", "settings.v0.bak.json", "settings.corrupt-1700000000.json"] {
+            put(&d, name, S0920);
+        }
+        put(&d, "settings.json.bak.txt", S0920);
+        put(&d, "topology.json.bak", S0920);
+        let old = SystemTime::now() - Duration::from_secs(5 * 86400);
+        fs::File::options().write(true).open(d.join("settings.json.bak")).unwrap().set_modified(old).unwrap();
+        assert_eq!(scrub_settings_backups(&d), 4);
+        for name in ["settings.json.bak", "settings.json.bak2", "settings.v0.bak.json", "settings.corrupt-1700000000.json"] {
+            assert!(!has_token(&d.join(name), tok), "{name}");
+            assert_eq!(fs::read_to_string(d.join(name)).unwrap(), redacted(S0920), "{name}: el resto intacto");
+        }
+        assert!(has_token(&d.join("settings.json.bak.txt"), tok), "archivo ajeno: no se toca");
+        assert!(has_token(&d.join("topology.json.bak"), tok), "solo copias de settings.json");
+        let m = fs::metadata(d.join("settings.json.bak")).unwrap().modified().unwrap();
+        assert!(m.duration_since(old).unwrap_or_default() < Duration::from_secs(2), "conserva la fecha (rotación diaria)");
+        assert_eq!(scrub_settings_backups(&d), 0, "idempotente");
+
+        // Rotar el token: una copia que lo tenga (p. ej. dejada por otra versión) se redacta al guardar.
+        put(&d, SETTINGS_FILE, S0920);
+        let df = DataFiles::new(&d);
+        let (v, _) = df.load(Kind::Settings);
+        put(&d, "settings.json.bak2", S0920);
+        df.save(Kind::Settings, v.clone()).unwrap();
+        assert!(has_token(&d.join("settings.json.bak2"), tok), "mismo token: no se repasa");
+        let mut rotated = v.as_object().unwrap().clone();
+        rotated.insert(MCP_TOKEN_KEY.into(), json!(new_mcp_token()));
+        df.save(Kind::Settings, Value::Object(rotated.clone())).unwrap();
+        assert!(!has_token(&d.join("settings.json.bak2"), tok), "token rotado: copias redactadas");
+        // Borrar el token también.
+        put(&d, "settings.json.bak2", S0920);
+        rotated.insert(MCP_TOKEN_KEY.into(), json!(""));
+        df.save(Kind::Settings, Value::Object(rotated)).unwrap();
+        assert!(!has_token(&d.join("settings.json.bak2"), tok));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn restore_regenerates_token_only_when_settings_had_one() {
+        let d = temp_dir("regen");
+        let path = d.join(SETTINGS_FILE);
+        put(&d, "settings.json.bak", r#"{"fontSize": 14}"#);
+        fs::write(&path, b"{ roto").unwrap();
+        let (v, n) = DataFiles::new(&d).load(Kind::Settings);
+        assert_eq!(v["fontSize"], 14);
+        assert!(!n.token_regenerated && v.get(MCP_TOKEN_KEY).is_none(), "sin token no se inventa uno");
+        put(&d, "settings.json.bak", &redacted(S0920));
+        fs::write(&path, b"{ roto").unwrap();
+        let (v, n) = DataFiles::new(&d).load(Kind::Settings);
+        assert!(n.token_regenerated);
+        assert_eq!(v[MCP_TOKEN_KEY].as_str().unwrap().len(), 48);
+        assert_eq!(read_json(&path)[MCP_TOKEN_KEY], v[MCP_TOKEN_KEY], "quedó escrito");
+        let info = DataFiles::new(&d).load_merged(None);
+        assert_eq!(info["__datafiles"]["settings"]["tokenRegenerated"], false, "solo una vez");
+        assert_ne!(new_mcp_token(), new_mcp_token());
+        fs::remove_dir_all(&d).unwrap();
     }
 
     /// Esquema de pruebas con dos pasos: renombra `viejo` a `nuevo` (1) y agrega `capa` (2).
@@ -668,7 +972,7 @@ mod tests {
         df.save(Kind::Settings, Value::Object(light)).unwrap();
         assert_eq!(read_json(&d.join(TOPOLOGY_FILE))["topoSnapshots"][0]["name"], "Antes del cambio");
         assert!(read_json(&d.join(SETTINGS_FILE)).get("topology").is_none());
-        assert_eq!(fs::read_to_string(d.join("settings.v0.bak.json")).unwrap(), S0911, "volver a la 0.9.11 conserva todo");
+        assert_eq!(fs::read_to_string(d.join("settings.v0.bak.json")).unwrap(), redacted(S0911), "volver a la 0.9.11 conserva todo salvo el token MCP");
         let again = DataFiles::new(&d).load_merged(None);
         assert_eq!(again["__topoStore"], true);
         assert_eq!(again["topology"], v["topology"]);
@@ -721,7 +1025,7 @@ mod tests {
                 }
             }
             // La copia del original quedó junto al archivo, idéntica a lo que había.
-            assert_eq!(fs::read_to_string(d.join("settings.v0.bak.json")).unwrap(), s, "{tag}");
+            assert_eq!(fs::read_to_string(d.join("settings.v0.bak.json")).unwrap(), redacted(s), "{tag}");
             assert_eq!(fs::read_to_string(d.join("topology.v0.bak.json")).unwrap(), t, "{tag}");
             fs::remove_dir_all(&d).unwrap();
         }
@@ -814,9 +1118,9 @@ mod tests {
         assert_eq!(n.migrated_from, Some(0));
         assert!(!d.join("settings.v0.bak.json").exists(), "leer no copia");
         df.save(Kind::Settings, json!({"a": 1})).unwrap();
-        assert_eq!(fs::read_to_string(d.join("settings.v0.bak.json")).unwrap(), S0920);
+        assert_eq!(fs::read_to_string(d.join("settings.v0.bak.json")).unwrap(), redacted(S0920));
         df.save(Kind::Settings, json!({"a": 2})).unwrap();
-        assert_eq!(fs::read_to_string(d.join("settings.v0.bak.json")).unwrap(), S0920);
+        assert_eq!(fs::read_to_string(d.join("settings.v0.bak.json")).unwrap(), redacted(S0920));
         // Sin archivo previo no hay nada que copiar.
         let d2 = temp_dir("verbak2");
         let df2 = DataFiles::new(&d2);
@@ -867,7 +1171,7 @@ mod tests {
         let path = d.join(SETTINGS_FILE);
         put(&d, SETTINGS_FILE, S0920);
         assert_eq!(rotate_backup(&path, &valid_object, SystemTime::now(), BAK_MIN_AGE), Rotation::Rotated);
-        assert_eq!(fs::read_to_string(d.join("settings.json.bak")).unwrap(), S0920);
+        assert_eq!(fs::read_to_string(d.join("settings.json.bak")).unwrap(), redacted(S0920));
 
         let cases: [&[u8]; 4] = [br#"{"fontSize": 1"#, b"[1, 2]", b"null", &[0xff, 0xfe, b'{']];
         for (i, bad) in cases.into_iter().enumerate() {
@@ -877,7 +1181,8 @@ mod tests {
             assert_eq!(v["floatingSidebar"], true, "caso {i}");
             assert_eq!(n.restored_from.as_deref(), Some("settings.json.bak"), "caso {i}");
             assert!(n.corrupt, "caso {i}");
-            assert_eq!(fs::read_to_string(&path).unwrap(), S0920, "caso {i}: el archivo quedó restaurado");
+            assert_same_but_token(&fs::read_to_string(&path).unwrap(), S0920, &format!("caso {i}: el archivo quedó restaurado"));
+            assert!(n.token_regenerated, "caso {i}");
         }
         assert!(count(&d, "settings.corrupt-") >= 1, "el dañado quedó aparte");
 
