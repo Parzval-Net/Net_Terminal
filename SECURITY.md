@@ -32,7 +32,7 @@ Si sospechas que la clave de firma o un Release fueron comprometidos, repórtalo
 
 En la edición portable se puede cifrar la carpeta de datos con la contraseña maestra (Ajustes › Credenciales). Viene apagado. Detalle técnico en [docs/TECNICO.md](docs/TECNICO.md#modo-portable-cifrado).
 
-**Qué protege.** Un pendrive perdido o copiado: sesiones, ajustes, topología, notas, historial, respaldos de configuración (con sus huellas de secretos), logs de sesión, auditoría de agentes y todas sus copias de respaldo quedan cifrados (XChaCha20-Poly1305, llave de datos aleatoria envuelta con Argon2id). Un archivo alterado, cortado, reordenado o mezclado con otro no se acepta. Sin la contraseña la app no muestra nada.
+**Qué protege.** Un pendrive perdido o copiado: sesiones, ajustes, topología, notas, historial, respaldos de configuración (con sus huellas de secretos), logs de sesión, auditoría de agentes y todas sus copias de respaldo quedan cifrados (XChaCha20-Poly1305, llave de datos aleatoria envuelta con Argon2id). Dentro de cada archivo, un bloque alterado, quitado, reordenado o traído de otro archivo no se acepta y un archivo cortado se nota. Sin la contraseña la app no muestra nada.
 
 **Qué no protege.**
 
@@ -44,7 +44,10 @@ En la edición portable se puede cifrar la carpeta de datos con la contraseña m
 - **Borrado en memoria flash.** Al activar el modo, cada original en claro se borra después de verificar su copia cifrada, pero en un pendrive, tarjeta o SSD el borrado no garantiza la eliminación física (nivelación de desgaste, sectores reasignados). Si la carpeta estuvo en claro, puede quedar rastro en el dispositivo: para datos sensibles, activa el modo en un pendrive nuevo o usa además cifrado del dispositivo.
 - **Lo que queda fuera.** La carpeta compartida (TFTP, HTTP y FTP), los scripts, los plugins, los packs de comandos propios y los mensajes de Syslog guardados no se cifran. Los nombres, tamaños y fechas de los archivos siguen visibles (por ejemplo, el nombre de un equipo en la carpeta de respaldos o de la sesión en el nombre de un log). Un archivo exportado descifrado queda en claro donde lo guardes.
 - **Versiones anteriores.** No abren la carpeta cifrada: muestran una sola sesión que lo explica y no modifican los datos cifrados, pero lo que creen (ajustes, notas o logs nuevos) queda en claro. La versión actual lo detecta, no lo lee y ofrece cifrarlo.
-- **Dos instancias.** Abrir la misma carpeta desde dos copias de la app a la vez no está soportado (tampoco en claro).
+- **Reemplazo de archivos completos.** Quien pueda escribir en el pendrive puede reemplazar un archivo cifrado entero por otro válido de la misma carpeta o por una versión anterior suya (por ejemplo, volver a un respaldo viejo de las sesiones): eso no se detecta, porque el nombre del archivo no forma parte de lo autenticado (renombrar notas y rotar respaldos copian archivos cifrados tal cual). También puede borrar archivos.
+- **Logs en el búfer.** Los logs cifrados se escriben en bloques cada 16 KiB o 250 ms: ante un corte de energía o un cierre forzado se pierde como mucho lo de esos 250 ms. Un archivo cifrado dañado se aparta con «.dañado-» en el nombre y se avisa; no se trunca.
+- **Dos instancias.** Con la carpeta cifrada, una segunda ventana de la app sobre la misma carpeta no abre (bloqueo del sistema sobre `datakey.lock`). Sobre una carpeta compartida en red ese bloqueo puede no funcionar: no está soportado. En claro, dos instancias tampoco están soportadas.
+- **Rutas visibles.** `datakey.roots` guarda en claro las rutas de las carpetas de logs usadas con el modo activo.
 
 ## Limitaciones conocidas
 
