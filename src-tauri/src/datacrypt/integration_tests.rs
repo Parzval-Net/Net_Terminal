@@ -223,3 +223,121 @@ fn recording_keeps_going_after_lock_with_its_own_file_key() {
     drop(w);
     assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), b"antes\ndespues\n");
 }
+
+/// Mediciones del modo cifrado frente al claro (reproducible):
+/// `cargo test --release --lib -- --ignored --nocapture bench_datacrypt`
+#[test]
+#[ignore]
+fn bench_datacrypt() {
+    use crate::logfile::{LogOptions, LogVars, LogWriter};
+    use std::time::Duration;
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let line = "\x1b[32mGi1/0/1\x1b[0m   connected    10   a-full a-1000 10/100/1000BaseTX áé\r\n";
+    let chunk: Vec<u8> = line.repeat(1024 / line.len() + 1).into_bytes()[..1024].to_vec();
+    // 1. Logs: 32 MB en fragmentos de 1 KB (como llega la salida de un equipo).
+    for enc in [false, true] {
+        let e = Enc::new("bench-log");
+        let dir = if enc { e.d.join("logs") } else { tmp("bench-plain") };
+        for mask in [false, true] {
+            let o = LogOptions { pattern: format!("b{mask}"), timestamps: true, mask, ..Default::default() };
+            let mut w = LogWriter::create(&dir, o, LogVars::default()).unwrap();
+            let t = Instant::now();
+            for _ in 0..32 * 1024 {
+                w.write(&chunk);
+            }
+            drop(w);
+            println!("log {} enmascarado={mask}: {:.0} MB/s", if enc { "cifrado" } else { "en claro" }, 32.0 / t.elapsed().as_secs_f64());
+        }
+        if !enc {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+    // Cifrado por bloques sin el procesamiento del log.
+    let e = Enc::new("bench-raw");
+    let dk = e.dk();
+    for size in [1024usize, 16 * 1024, 256 * 1024] {
+        let p = e.d.join(format!("raw{size}.log.nte"));
+        let (a, _) = open_append(&p, Some(&dk), OpenMode::CreateNew).unwrap();
+        let buf = vec![b'x'; size];
+        let n = (64 * 1024 * 1024) / size;
+        let t = Instant::now();
+        for _ in 0..n {
+            a.append(&buf).unwrap();
+        }
+        drop(a);
+        println!("bloques de {} KB: {:.0} MB/s", size / 1024, 64.0 / t.elapsed().as_secs_f64());
+    }
+    // 2. Guardar ajustes (~30 KB, con fsync) y 200 sesiones; leer ajustes.
+    let settings = serde_json::json!({ "fontSize": 13, "favCommands": (0..800).map(|i| format!("show interfaces Gi1/0/{i} status")).collect::<Vec<_>>() });
+    let sessions: Vec<serde_json::Value> =
+        (0..200).map(|i| serde_json::json!({"id": format!("s{i}"), "name": format!("equipo-{i}"), "type": "ssh", "host": "192.0.2.1", "created_at": ""})).collect();
+    for enc in [false, true] {
+        let e = Enc::new("bench-set");
+        let d = if enc { e.d.clone() } else { tmp("bench-set-plain") };
+        let files = crate::datafiles::DataFiles::new(&d);
+        let t = Instant::now();
+        for _ in 0..100 {
+            files.save(crate::datafiles::Kind::Settings, settings.clone()).unwrap();
+        }
+        let s_ms = ms(t.elapsed()) / 100.0;
+        let body = serde_json::to_vec_pretty(&sessions).unwrap();
+        let t = Instant::now();
+        for _ in 0..100 {
+            write_atomic(&d.join("sessions.json"), &body).unwrap();
+        }
+        let x_ms = ms(t.elapsed()) / 100.0;
+        let t = Instant::now();
+        for _ in 0..100 {
+            let _ = files.load(crate::datafiles::Kind::Settings);
+        }
+        let l_ms = ms(t.elapsed()) / 100.0;
+        println!(
+            "{}: guardar ajustes {s_ms:.2} ms, guardar 200 sesiones ({} KB) {x_ms:.2} ms, leer ajustes {l_ms:.2} ms",
+            if enc { "cifrado" } else { "en claro" },
+            body.len() / 1024
+        );
+        if !enc {
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+    // 3. Desbloqueo con los parámetros reales (Argon2id 64 MiB, t=3).
+    let d = tmp("bench-unlock");
+    let dk = DataKey::generate();
+    let kf = KeyFile::create(&dk, "maestra-de-prueba", crate::seal::KDF_DEFAULT).unwrap();
+    let t = Instant::now();
+    kf.unwrap("maestra-de-prueba").unwrap();
+    println!("desbloqueo de datos (Argon2id 64 MiB t=3): {:.0} ms", ms(t.elapsed()));
+    let c = crate::credentials::Credentials::new(&d, true);
+    c.create("maestra-de-prueba").unwrap();
+    fs::write(d.join("settings.json"), b"{}").unwrap();
+    let mut key = None;
+    enable(&Layout::new(&d, None), "maestra-de-prueba", crate::seal::KDF_DEFAULT, &no_hook, &mut |_| {}, &mut key).unwrap();
+    let sh = Shared::new();
+    register(&d, &sh);
+    c.attach_data(sh.clone());
+    let t = Instant::now();
+    assert!(c.data_unlock("maestra-de-prueba").unwrap().vault);
+    println!("desbloqueo de datos y bóveda (dos Argon2id en paralelo): {:.0} ms", ms(t.elapsed()));
+    unregister(&sh);
+    let _ = fs::remove_dir_all(&d);
+    // 4. Búsqueda en 64 MB de logs (16 archivos de 4 MB).
+    let text: String = (0..80_000).map(|i| format!("[2026-01-01 10:00:00] Gi1/0/{} up up linea {i}\n", i % 48)).collect();
+    let text = &text.as_bytes()[..4 * 1024 * 1024];
+    for enc in [false, true] {
+        let e = Enc::new("bench-search");
+        let logs = if enc { e.d.join("logs") } else { tmp("bench-search-plain") };
+        fs::create_dir_all(&logs).unwrap();
+        for i in 0..16 {
+            write_atomic(&logs.join(format!("equipo{i}.log")), text).unwrap();
+        }
+        let roots = crate::logsearch::Roots { logs: logs.clone(), backups: e.d.join("backups"), notes: e.d.join("notes") };
+        let params = crate::logsearch::SearchParams { query: "linea 7999".into(), kinds: vec!["logs".into()], ..Default::default() };
+        let t = Instant::now();
+        let (files, sum) = crate::logsearch::search_now(&roots, &params, Duration::from_secs(120)).unwrap();
+        assert_eq!(files.len(), 16);
+        println!("búsqueda en 64 MB de logs {}: {:.0} ms ({} archivos)", if enc { "cifrados" } else { "en claro" }, ms(t.elapsed()), sum.scanned);
+        if !enc {
+            let _ = fs::remove_dir_all(&logs);
+        }
+    }
+}
