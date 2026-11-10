@@ -442,6 +442,14 @@ fn disconnect(id: String, state: State<'_, AppState>) {
     state.conns.disconnect(&id)
 }
 
+/// Solo lectura de una pestaña, también en el backend: con la marca, `write`, `send_break`, los
+/// trabajos de equipo (`device_run`), el servidor MCP y los scripts rechazan escribir en la conexión.
+/// La interfaz lo invoca al activar o desactivar el modo y antes de cada (re)conexión.
+#[tauri::command]
+fn set_read_only(id: String, on: bool, state: State<'_, AppState>) {
+    state.conns.set_read_only(&id, on)
+}
+
 #[tauri::command]
 fn send_break(id: String, state: State<'_, AppState>) -> Result<(), String> {
     state.conns.send_break(&id)
@@ -1313,6 +1321,7 @@ pub fn run() {
             resize,
             disconnect,
             send_break,
+            set_read_only,
             set_logging,
             logs_dir_get,
             logs_dir_set,

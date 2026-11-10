@@ -195,6 +195,10 @@ if (location.search.includes("toast=1")) {
     emit("alert-hit", { conn: [...channels.keys()][0], rule: "qa-updown", line: "%LINK-3-UPDOWN: Interface GigabitEthernet1/0/3, changed state to down" });
   }, 300);
 }
+// ?automark=1: "Marcar cada comando al enviarlo" activado (escena new-term).
+if (location.search.includes("automark=1")) settings.autoMarkCommands = true;
+// Escena new-servers: acceso de TFTP con interfaz de escucha, clientes permitidos e inactividad.
+if (location.search.includes("scene=new-servers")) settings.serverGuard = { tftp: { bind: "192.0.2.250", allow: "192.0.2.0/24, 198.51.100.7", idle: 30 } };
 // ?term=<id>: tema de terminal preseleccionado (capturas de temas).
 settings.terminalTheme = new URLSearchParams(location.search).get("term") ?? "auto";
 // ?logsdir=1: carpeta de logs elegida por el usuario (modo portable, con su aviso).
@@ -625,6 +629,12 @@ const handlers = {
     { name: "bridge100", ip: "198.51.100.200", default: false },
     { name: "utun4", ip: "203.0.113.9", default: false },
   ],
+  // Solo lectura en el backend: el mock guarda las marcas (window.__roConns) y las llamadas (window.__roCalls) para revisarlas.
+  set_read_only: ({ id, on }) => {
+    (window.__roCalls ??= []).push({ id, on });
+    (window.__roConns ??= new Set())[on ? "add" : "delete"](id);
+    return null;
+  },
   server_running: () => [...running],
   // ---- Servidores: acceso (interfaz, clientes permitidos, inactividad) ----
   server_start: ({ kind, allowWrite, opts }) => {
@@ -1822,6 +1832,95 @@ Object.assign(scenes, {
   "q-reset": async () => { await click("Ajustes"); await wait(300); await click("Restablecer valores"); },
   "q-topo-clear": async () => { await tool("Topología")(); await wait(300); await click("Más opciones: exportar, snapshots, fuentes de descubrimiento"); await click("Eliminar diagrama…"); },
 });
+// ---- Escenas de las funciones nuevas (README y sitio): datos ficticios, sin tocar disco ----
+/** Menú contextual de la pestaña `name` y, si se indica, la opción `item`. */
+async function tabMenuOf(name, item) {
+  const el = document.querySelector(`[role="tab"][title^="${name}"], [data-tab][title^="${name}"], [title^="${name}"]`);
+  const tabEl = [...document.querySelectorAll(`[title^="${name}"]`)].find((e) => e.closest('[role="tablist"], [data-tab]') || e.matches("[data-tab], [role=tab]")) ?? el;
+  const r = tabEl?.getBoundingClientRect();
+  tabEl?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: (r?.left ?? 300) + 30, clientY: (r?.top ?? 30) + 14 }));
+  await wait(300);
+  if (item) await click(item);
+}
+Object.assign(scenes, {
+  // Buscar en logs: coincidencias de una línea de syslog en logs y respaldos (corpus ficticio del mock).
+  "new-logsearch": async () => {
+    await tool("Buscar en logs")();
+    await wait(500);
+    setVal(document.querySelector('input[placeholder^="Ej. changed"]'), "changed state to down");
+    await wait(150);
+    document.querySelector("form button[type=submit]")?.click();
+  },
+  // Exportar sesiones › Archivo cifrado (.ntx) con las contraseñas de la bóveda y su aviso visibles.
+  "new-bundle-export": async () => {
+    await open("core-sw01");
+    await click("Ajustes"); await wait(300);
+    await click("Importar y exportar"); await wait(300);
+    await click("Exportar…"); await wait(400);
+    await click("Archivo cifrado (.ntx)"); await wait(400);
+    const label = [...document.querySelectorAll("label")].find((l) => l.textContent.trim().startsWith("Incluir las contraseñas guardadas"));
+    label?.querySelector("input")?.click();
+    await wait(400);
+    const pws = document.querySelectorAll('input[type="password"]');
+    setVal(pws[0], "frase de respaldo del sitio central");
+    setVal(pws[1], "frase de respaldo del sitio central");
+    await wait(300);
+    [...document.querySelectorAll("label")].find((l) => l.textContent.trim().startsWith("Contraseña del archivo"))?.scrollIntoView({ block: "start" });
+    await wait(200);
+  },
+  // Pegado seguro: vista previa con el riesgo de cada línea y envío línea a línea.
+  "new-paste": async () => {
+    await open("core-sw01");
+    await wait(600);
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "show ip interface brief\nconfigure terminal\ninterface GigabitEthernet1/0/5\n description PRUEBA\n shutdown\nend\nreload\n");
+    document.querySelector(".xterm")?.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    await wait(400);
+  },
+  // Terminal con comandos marcados (?automark=1) y resaltado de la pestaña: la escena de shoot.mjs teclea y luego llama a __newScene.
+  "new-term": async () => { await open("core-sw01"); },
+  // Pestaña en solo lectura: candado en la pestaña y en la barra de estado.
+  "new-readonly": async () => {
+    await open("ar-wan01"); await open("core-sw01");
+    await wait(500);
+    await tabMenuOf("core-sw01", "Solo lectura (modo monitoreo)");
+    await wait(300);
+    // Sin el aviso para que se vea la insignia de la terminal y la barra de estado.
+    document.querySelector('[aria-label="Cerrar aviso"]')?.click();
+    await wait(300);
+  },
+  // Servidores: acceso con interfaz de escucha, clientes permitidos e inactividad, y TFTP activo.
+  "new-servers": async () => {
+    await open("core-sw01");
+    await tool("Transferencias")(); await wait(500);
+    // Primer ancestro del título que tiene su botón Iniciar (el de la tarjeta TFTP).
+    let card = [...document.querySelectorAll("h3")].find((h) => h.textContent === "Servidor TFTP");
+    while (card && ![...card.querySelectorAll("button")].some((b) => b.textContent.trim() === "Iniciar")) card = card.parentElement;
+    // Inicia TFTP y simula orígenes rechazados por la lista de clientes permitidos.
+    [...(card?.querySelectorAll("button") ?? [])].find((b) => b.textContent.trim() === "Iniciar")?.click();
+    await wait(600);
+    window.__mock.guardStats.set("tftp", { rejected: 3, last: "203.0.113.45" });
+    emit("server-guard", { kind: "tftp", rejected: 3, last: "203.0.113.45" });
+    await wait(300);
+    [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Acceso y seguridad"))?.click();
+    await wait(300);
+    [...document.querySelectorAll("h3")].find((h) => h.textContent === "Servidor TFTP")?.scrollIntoView({ block: "start" });
+  },
+});
+window.__newScene = {
+  // Resaltado al vuelo: "LINK" y "down" en la pestaña activa.
+  highlight: async () => {
+    await tabMenuOf("core-sw01", "Resaltar…"); await wait(400);
+    const input = document.querySelector('input[aria-label="Texto a resaltar"]');
+    setVal(input, "down"); await wait(100); input.form.requestSubmit(); await wait(200);
+    setVal(document.querySelector('input[aria-label="Texto a resaltar"]'), "LINK"); await wait(100);
+    document.querySelector('input[aria-label="Texto a resaltar"]').form.requestSubmit(); await wait(300);
+    document.querySelector("[data-modal-close]")?.click(); await wait(300);
+  },
+  marks: async () => {
+    await tabMenuOf("core-sw01", "Marcadores…"); await wait(400);
+  },
+};
 // Acceso para el script de QA (CDP): pasos adicionales sobre una escena.
 window.__demo = { click, open, wait, svgNode, emit, find, setVal };
 // Acceso para backends simulados que extienden este (scripts/video/plugins/mock-video.js).

@@ -112,6 +112,10 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
     }
     let state = app.state::<crate::AppState>();
     state.conns.info(&conn).ok_or("La sesión no está conectada")?;
+    // Solo lectura: se rechaza de inmediato (la escritura también lo vigila, ver ConnectionManager::set_read_only).
+    if state.conns.is_read_only(&conn) {
+        return Err(crate::connection::READ_ONLY.into());
+    }
     let job = uuid::Uuid::new_v4().to_string();
     let id = job.clone();
     let deadline = Duration::from_secs(timeout_secs.clamp(5, 7200));
@@ -227,7 +231,12 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
                     emit("error", "Demasiadas confirmaciones; se detuvo por seguridad".into(), None);
                     break;
                 }
-                let _ = conns.write(&conn, r.as_bytes());
+                // Si la pestaña pasó a solo lectura con el trabajo en curso, se detiene en esta escritura.
+                if let Err(e) = conns.write(&conn, r.as_bytes()) {
+                    flush(&mut partial, true);
+                    emit("error", format!("{e}. Se detuvo el trabajo"), None);
+                    break;
+                }
                 tail.clear();
                 continue;
             }

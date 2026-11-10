@@ -220,6 +220,10 @@ pub trait Bridge: Send + Sync + 'static {
     /// Escribe la contraseña guardada de la sesión en el pedido de login que muestra su
     /// pantalla. Nunca devuelve el valor; el error explica por qué no se escribió.
     fn type_saved_password(&self, conn: &str) -> Result<(), String>;
+    /// La conexión está en solo lectura (pestaña con candado): cualquier escritura se rechaza.
+    fn read_only(&self, _conn: &str) -> bool {
+        false
+    }
 }
 
 /// Semáforo simple: tope de sesiones con una operación en curso.
@@ -413,6 +417,9 @@ impl<B: Bridge> Broker<B> {
             Ok(t) => t,
             Err(e) => return e,
         };
+        if self.bridge.read_only(&t.conn) {
+            return self.read_only_stop(t);
+        }
         let io = lock(&t.io);
         let _permit = self.parallel.acquire();
         // Con texto a medio escribir la contraseña quedaría pegada a él.
@@ -432,7 +439,19 @@ impl<B: Bridge> Broker<B> {
         }
     }
 
+    /// La pestaña de la sesión pasó a solo lectura (antes o durante la ejecución): el script se
+    /// detiene en esta escritura y se informa, sin pedir confirmaciones por comandos que no se enviarían.
+    fn read_only_stop(&self, t: &Target) -> Value {
+        let msg = format!("{} ({}). Script detenido: no se escribe en esa sesión", crate::connection::READ_ONLY, t.name);
+        self.stop.store(true, Ordering::SeqCst);
+        self.bridge.abort(msg.clone());
+        fail("read_only", msg)
+    }
+
     fn send(&self, t: &Target, io: &mut Io, data: &str) -> Value {
+        if self.bridge.read_only(&t.conn) {
+            return self.read_only_stop(t);
+        }
         for chunk in split_commits(&mut io.line, data) {
             let bytes = match chunk {
                 Chunk::Text(b) => b,
@@ -450,6 +469,9 @@ impl<B: Bridge> Broker<B> {
                 }
             };
             if let Err(e) = self.bridge.write(&t.conn, bytes.as_bytes()) {
+                if e == crate::connection::READ_ONLY {
+                    return self.read_only_stop(t);
+                }
                 return fail("write", e);
             }
         }
@@ -745,6 +767,10 @@ impl Bridge for TauriBridge {
 
     fn type_saved_password(&self, conn: &str) -> Result<(), String> {
         crate::type_saved_password(&self.app.state::<crate::AppState>(), conn)
+    }
+
+    fn read_only(&self, conn: &str) -> bool {
+        self.app.state::<crate::AppState>().conns.is_read_only(conn)
     }
 }
 
@@ -1311,6 +1337,7 @@ mod tests {
         secret: Option<String>,
         aborted: Mutex<Option<String>>,
         line: Mutex<HashMap<String, String>>,
+        read_only: Mutex<std::collections::HashSet<String>>,
     }
 
     impl Fake {
@@ -1324,6 +1351,7 @@ mod tests {
                 secret: secret.map(str::to_string),
                 aborted: Mutex::default(),
                 line: Mutex::default(),
+                read_only: Mutex::default(),
             }
         }
         fn sent(&self, conn: &str) -> String {
@@ -1340,6 +1368,9 @@ mod tests {
 
     impl Bridge for Fake {
         fn write(&self, conn: &str, data: &[u8]) -> Result<(), String> {
+            if self.read_only(conn) {
+                return Err(crate::connection::READ_ONLY.into());
+            }
             let text = String::from_utf8_lossy(data).to_string();
             lock(&self.written).push((conn.to_string(), text.clone()));
             let mut lines = lock(&self.line);
@@ -1370,6 +1401,9 @@ mod tests {
         }
         fn abort(&self, reason: String) {
             *lock(&self.aborted) = Some(reason);
+        }
+        fn read_only(&self, conn: &str) -> bool {
+            lock(&self.read_only).contains(conn)
         }
         /// Como la app: el valor va directo al equipo (aquí, a `written`) y nunca vuelve.
         fn type_saved_password(&self, conn: &str) -> Result<(), String> {
@@ -1450,6 +1484,43 @@ mod tests {
         // Tras el rechazo ninguna sesión acepta más operaciones.
         let r = b.handle(&(json!({"op": "send", "session": "core", "data": "show clock\r"})));
         assert_eq!(r["code"], "cancelled");
+        assert_eq!(b.bridge.sent("core"), "");
+    }
+
+    /// Solo lectura: lo que escribe se rechaza con un error claro y sin pedir confirmaciones; lo que
+    /// lee sigue funcionando; si el modo se activa con el script en marcha, se detiene en su siguiente escritura.
+    #[test]
+    fn read_only_session_rejects_writes_but_reads_keep_working() {
+        let b = broker(Fake::new(true, Some("x")), &["core", "acc1"], true);
+        lock(&b.bridge.read_only).insert("core".into());
+        let r = b.handle(&(json!({"op": "send", "session": "core", "data": "show version\r"})));
+        assert_eq!((r["ok"].as_bool(), r["code"].as_str()), (Some(false), Some("read_only")));
+        assert!(r["error"].as_str().unwrap().starts_with("La pestaña está en solo lectura"), "{r}");
+        assert_eq!(b.bridge.sent("core"), "");
+        assert!(b.bridge.confirmations().is_empty(), "no se pide confirmar lo que no se enviaría");
+        assert!(b.bridge.aborted.lock().unwrap().as_deref().unwrap().contains("solo lectura"));
+        // La ejecución quedó detenida: ni siquiera la sesión editable acepta más.
+        assert_eq!(b.handle(&(json!({"op": "send", "session": "acc1", "data": "show clock\r"})))["code"], "cancelled");
+
+        // Leer sigue funcionando en una sesión en solo lectura.
+        let b = broker(Fake::new(true, None), &["core"], true);
+        assert_eq!(b.handle(&(json!({"op": "send", "data": "show clock\r"})))["ok"], true);
+        lock(&b.bridge.read_only).insert("core".into());
+        let r = b.handle(&(json!({"op": "wait", "pattern": "core#", "timeout": 2})));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(b.handle(&(json!({"op": "read"})))["ok"], true);
+        assert_eq!(b.handle(&(json!({"op": "clear"})))["ok"], true);
+        // Se activó con el script en marcha: la siguiente escritura lo detiene y lo informa.
+        let r = b.handle(&(json!({"op": "send", "data": "show version\r"})));
+        assert_eq!(r["code"], "read_only");
+        assert_eq!(b.bridge.sent("core"), "show clock\r");
+        assert!(b.bridge.aborted.lock().unwrap().is_some());
+
+        // Tampoco escribe la contraseña guardada pedida por el script.
+        let b = Arc::try_unwrap(broker(Fake::new(true, None), &["core"], true)).ok().unwrap().with_vault(true);
+        lock(&b.bridge.read_only).insert("core".into());
+        let r = b.handle(&(json!({"op": "type_saved_password"})));
+        assert_eq!(r["code"], "read_only");
         assert_eq!(b.bridge.sent("core"), "");
     }
 

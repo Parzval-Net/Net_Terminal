@@ -335,7 +335,8 @@ fn tools(cfg: &McpConfig) -> Value {
         list.push(json!({
             "name": "send_command",
             "description": "Ejecuta comandos en una conexión abierta (una línea por comando) y devuelve la salida. \
-                El usuario debe aprobar cada ejecución en NetTerminal.",
+                El usuario debe aprobar cada ejecución en NetTerminal. \
+                Las conexiones en solo lectura (candado en la pestaña) rechazan la ejecución.",
             "inputSchema": {"type": "object", "required": ["connection_id", "command"], "properties": {
                 "connection_id": {"type": "string"},
                 "command": {"type": "string"},
@@ -410,6 +411,11 @@ fn call_tool(app: &AppHandle, cfg: &McpConfig, name: &str, args: &Value) -> Resu
             if state.scripts.owner(id).is_some() {
                 activity(&info.name, command, false);
                 return Err(crate::scripts::BUSY.into());
+            }
+            // Pestaña en solo lectura: se rechaza antes de molestar al usuario con la aprobación.
+            if state.conns.is_read_only(id) {
+                activity(&info.name, command, false);
+                return Err(crate::connection::READ_ONLY.into());
             }
             let local = session.session_type == crate::models::SessionType::Local;
             if needs_approval(cfg, local) && !state.mcp.ask(app, name, &info.name, command) {

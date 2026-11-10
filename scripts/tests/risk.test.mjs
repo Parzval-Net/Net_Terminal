@@ -197,6 +197,44 @@ is("ethtool -s eth0 speed 100 duplex full", "disruptive");
 is("ethtool -S eth0", "read");
 is("iptables -F", "change");
 
+// ---------- Revisión del catálogo: comandos declarados disruptive que el motor daba como cambio ----------
+// Aruba
+for (const c of ["trunk 1-2 trk1 lacp", "trunk 3-4 trk2 trunk", "vlan 10 ip address 192.0.2.2/24", "vlan {{vlan}} ip address {{ip}}/{{prefijo}}", "copy tftp startup-config 192.0.2.9 sw.cfg", "airmatch runnow quick", "aaa user delete mac 00:00:5e:00:53:01", "aaa user delete all"]) is(c, "disruptive");
+for (const c of ["show trunks", "show airmatch solution ap-name ap-01", "show aaa user table", "show vlan 10"]) is(c, "read");
+for (const c of ["copy tftp flash 192.0.2.9 sw.swi secondary", "vlan 10\n tagged 1-2\n exit", "airmatch freeze", "aaa authentication login console local"]) is(c, "change");
+// FortiAP y FortiOS
+for (const c of ["cfg -a AP_MGMT_VLAN_ID=10", "restore image.out 192.0.2.5", "restore {{imagen}} {{tftp_ip}}", "diagnose sys kill 11 1234", "diagnose sys kill 1 {{pid}}", "diagnose sys kill 15 99", "diagnose extender cmd 1 FX01E00000000001"]) is(c, "disruptive");
+for (const c of ["cfg -a AP_NAME=ap-01", "restore backup.cfg"]) is(c, "change");
+is("diagnose extender list", "read");
+is("cfg -s", "read");
+is("diagnose sys top", "read");
+is("diagnose sys session list", "read");
+is("config wireless-controller ap-status\nedit 1\nset status suppressed\nend", "disruptive");
+is("config wireless-controller ap-status\nedit 1\nset status rogue\nend", "change");
+is("config system interface\nedit port1\nset status up\nnext\nend", "change");
+// Grandstream: velocidad del puerto y modo STP (solo al inicio de la línea, no como palabra de un show)
+for (const c of ["speed 1000", "speed auto", "speed {{velocidad}}", "interface Ethernet 1/0/1\n speed 100", "spanning-tree mode rstp", "spanning-tree mode {{modo}}"]) is(c, "disruptive");
+for (const c of ["show interfaces speed", "show spanning-tree mode", "show interfaces status | include speed", "display interface speed"]) is(c, "read");
+is("speedtest-cli --simple", "change");
+// Aruba habilita STP con "spanning-tree" y luego fija el modo: no es un cambio de modo en un árbol que ya corre.
+is("spanning-tree\nspanning-tree mode mstp", "change");
+// Huawei
+for (const c of ["undo mac-address dynamic GigabitEthernet0/0/1", "undo mac-address all", "system-view\nundo mac-address dynamic {{interfaz}}\nreturn"]) is(c, "disruptive");
+is("undo mac-address 0001-0001-0001 vlan 10", "change");
+is("display mac-address dynamic", "read");
+// WatchGuard: "type" y "mode" solo cuentan en su bloque; fuera de él no suben de nivel
+is("no vpn-status l2tp virtual-ip 192.0.2.50", "disruptive");
+is("configure\ninterface FastEthernet 1\ntype trusted\nexit\nexit", "disruptive");
+is("configure\ninterface FastEthernet {{numero}}\ntype external\nexit\nexit", "disruptive");
+is("configure\nlink-aggregation lag1\nmember 2\nmode static\nexit\nexit", "disruptive");
+is("configure\ninterface FastEthernet 1\ndescription uplink\nexit\nexit", "change");
+is("type trusted.txt", "change");
+is("cd C:\\temp\ntype trusted", "change");
+is("interface Port-channel1\n mode dynamic", "change");
+is("show link-aggregation", "read");
+// Sesión: igual que terminal monitor
+for (const c of ["terminal monitor", "terminal no monitor"]) is(c, "read");
+
 // ---------- Teclas de edición: misma semántica que split_commits (src-tauri/src/scripts.rs) ----------
 assert.equal(editedLine("show ver\x15rel\x7fload"), "reload");
 assert.equal(editedLine("show clock reload\x17"), "show clock ");
@@ -217,6 +255,8 @@ for (const cmd of [
   "ssh " + "-o x ".repeat(2000), "firewall-cmd " + "--zone=a ".repeat(2000) + "x", "nmcli " + "-f a ".repeat(2000), "sysctl " + "-a ".repeat(3000) + "=",
   "sudo " + "-u -u ".repeat(1500), "Get-X | " + "% { a } | ".repeat(500), "x\b".repeat(3000), "date " + "-x ".repeat(3000) + "1", "nc " + "-v ".repeat(3000),
   "pfctl " + "-v ".repeat(3000) + "-F", "ls " + "2> ".repeat(3000),
+  "trunk " + "a ".repeat(4000) + "trk", "restore " + "a ".repeat(4000), "speed " + "1 ".repeat(4000), "vlan " + "a ".repeat(4000) + "ip", "diagnose sys kill " + "1 ".repeat(3000),
+  "configure\n" + "interface a 1\ntype x\n".repeat(500),
 ]) {
   fastEnough(`computeRisk con entrada larga (${cmd.slice(0, 20)}…)`, 50, () => computeRisk(cmd));
 }

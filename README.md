@@ -37,6 +37,18 @@ Funciona en Windows 10/11, macOS (Intel y Apple Silicon) y Linux, pesa unos 8 MB
 | :---: | :---: |
 | <img src="docs/screenshots/notas.png" width="420" alt="Notas y plantillas"> | <img src="docs/screenshots/modo-oscuro.png" width="420" alt="Modo oscuro"> |
 
+| Pegado seguro con riesgo por línea | Buscar en logs |
+| :---: | :---: |
+| <img src="docs/screenshots/pegado-seguro.png" width="420" alt="Pegado seguro"> | <img src="docs/screenshots/buscar-logs.png" width="420" alt="Buscar en logs"> |
+
+| Resaltado y marcadores | Archivo cifrado (.ntx) |
+| :---: | :---: |
+| <img src="docs/screenshots/terminal-resaltado.png" width="420" alt="Resaltado y marcadores en la terminal"> | <img src="docs/screenshots/exportar-cifrado.png" width="420" alt="Exportar sesiones a un archivo cifrado"> |
+
+| Pestaña en solo lectura | Servidores con clientes permitidos |
+| :---: | :---: |
+| <img src="docs/screenshots/solo-lectura.png" width="420" alt="Pestaña en solo lectura"> | <img src="docs/screenshots/servidores-acceso.png" width="420" alt="Acceso y seguridad de los servidores"> |
+
 </div>
 
 Las capturas usan datos ficticios.
@@ -50,6 +62,9 @@ Las capturas usan datos ficticios.
 - **Sesiones guardadas** en carpetas, **conexión rápida** e importación desde PuTTY, SecureCRT, MobaXterm, ssh_config o CSV.
 - **Sugerencias de comandos** mientras escribes, también con abreviaturas, sin interferir con el autocompletado del equipo.
 - **Pestañas horizontales o verticales**, vista dividida de hasta 4 equipos y modo foco.
+- **Resaltado al vuelo y marcadores** en la salida de cada pestaña, para encontrar un texto o saltar entre comandos.
+- **Pegado seguro**: vista previa con el riesgo de cada línea y envío línea a línea.
+- **Solo lectura por pestaña** (modo monitoreo): la interfaz, el servidor MCP, los scripts y las transferencias dejan de escribir en esa conexión.
 
 ### Diagnóstico de red
 - **Topología** de vecinos CDP / LLDP con estado de puertos, revisiones de enlaces (dúplex, VLAN nativa, Port-channel, CRC), tráfico por enlace y saltos encadenados entre vecinos.
@@ -57,8 +72,9 @@ Las capturas usan datos ficticios.
 - **Calculadora de subredes** IPv4 e IPv6, **speedtest** e **iperf3**.
 
 ### Operación en terreno
-- **Servidores TFTP, HTTP, FTP y SFTP** para respaldar configuraciones y subir firmware, con verificación MD5.
+- **Servidores TFTP, HTTP, FTP y SFTP** para respaldar configuraciones y subir firmware, con verificación MD5, interfaz de escucha, clientes permitidos y detención automática por inactividad.
 - **Respaldos** y comparación de configuraciones.
+- **Buscar en logs**: texto o regex en logs de sesión, respaldos y notas.
 - **Syslog** y **SNMP v1, v2c y v3** de solo lectura, con receptor de traps.
 
 ### Productividad
@@ -66,7 +82,8 @@ Las capturas usan datos ficticios.
 - **Notas y plantillas** con variables y envío a varias sesiones.
 - **CLI Lab**: envía procedimientos línea a línea a una o varias sesiones y se detiene ante errores.
 - **Scripts Python, plugins y agentes de IA (MCP)**, de solo lectura por defecto.
-- **Bóveda cifrada** de credenciales y **ciclo de vida del equipo** (opcional).
+- **Bóveda cifrada** de credenciales, con bloqueo automático, y **ciclo de vida del equipo** (opcional).
+- **Archivo cifrado (.ntx)** para respaldar o llevar tus sesiones y ajustes a otro equipo; las contraseñas guardadas solo se incluyen si lo eliges.
 
 ---
 
@@ -78,6 +95,7 @@ Las capturas usan datos ficticios.
 | Topología, monitoreo y diagnóstico | ✅ | ✅ | ✅ |
 | TFTP, HTTP, FTP, SFTP, Syslog y SNMP | ✅ | ✅ | ✅ |
 | Catálogo, notas, CLI Lab y bóveda | ✅ | ✅ | ✅ |
+| Buscar en logs y archivo cifrado (.ntx) | ✅ | ✅ | ✅ |
 | Scripts Python, plugins y agentes de IA | Opcional | Opcional | Opcional |
 | Actualización automática | ✅ | ✅ | AppImage |
 
@@ -86,7 +104,7 @@ Las capturas usan datos ficticios.
 ### Consideraciones
 - **Serial en Linux**: tu usuario debe estar en el grupo `dialout` (o `uucp`).
 - **macOS**: la app no tiene firma de Apple; la primera vez se abre con clic derecho › Abrir.
-- **Funciones sensibles** (servidores TFTP y FTP, traps SNMP, agentes de IA, algoritmos SSH legacy): apagadas hasta que tú las activas.
+- **Funciones sensibles** (servidores TFTP, HTTP y FTP, traps SNMP, agentes de IA, algoritmos SSH legacy): apagadas hasta que tú las activas.
 
 ---
 

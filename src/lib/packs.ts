@@ -109,7 +109,7 @@ const maxRisk = (a: Risk, b: Risk): Risk => (RANK[a] >= RANK[b] ? a : b);
  * configuración ("ssh server enable", "telnet 10.0.0.0 255.0.0.0 inside") o un comando remoto.
  */
 const READ_START =
-  /^(show|display|get|dir|more|ping|traceroute|tracert|tracepath|verify|monitor (traffic(?!.*\bwrite-file\b)|interface|start|stop)|test policy|compare configuration|who|policy-check|tcpdump|dnslookup|nslookup|vpn-tunnel diag-report|(undo )?terminal (logging|monitor|debugging|trapping)|request system storage cleanup dry-run|request system software validate|admin show|packet-tracer|ethanalyzer local(?!.*\bwrite\b)|terminal (length|width|monitor|pager)|no page\s*$|checkpoint diff\b|diag cable-diagnostic show\b|cd \/md\S*\s*$|mdconnect\s*$|screen-length\s+\d+\s+temporary|screen-width|set cli |file (list|show|checksum)|commit check|request support information|diagnose (sys (top|status|session (stat|list)|session filter(?=\s*$)|ha (status|checksum (?!recalculate)))|vpn (ike gateway|tunnel) list|sniffer packet|ip (route|arp) list|firewall iprope lookup|test application(?!\s+\S+\s+99\b))|execute (ping6?|traceroute6?|telnet|ssh)(?!-)|execute (ping|traceroute)-options view-settings|tftp \S+ put|copy (running-config|startup-config|run|start) (tftp|scp|ftp|http)|execute backup)\b/i;
+  /^(show|display|get|dir|more|ping|traceroute|tracert|tracepath|verify|monitor (traffic(?!.*\bwrite-file\b)|interface|start|stop)|test policy|compare configuration|who|policy-check|tcpdump|dnslookup|nslookup|vpn-tunnel diag-report|(undo )?terminal (logging|monitor|debugging|trapping)|request system storage cleanup dry-run|request system software validate|admin show|packet-tracer|ethanalyzer local(?!.*\bwrite\b)|terminal (length|width|(no )?monitor|pager)|no page\s*$|checkpoint diff\b|diag cable-diagnostic show\b|cd \/md\S*\s*$|mdconnect\s*$|screen-length\s+\d+\s+temporary|screen-width|set cli |file (list|show|checksum)|commit check|request support information|diagnose (sys (top|status|session (stat|list)|session filter(?=\s*$)|ha (status|checksum (?!recalculate)))|vpn (ike gateway|tunnel) list|sniffer packet|ip (route|arp) list|firewall iprope lookup|test application(?!\s+\S+\s+99\b))|execute (ping6?|traceroute6?|telnet|ssh)(?!-)|execute (ping|traceroute)-options view-settings|tftp \S+ put|copy (running-config|startup-config|run|start) (tftp|scp|ftp|http)|execute backup)\b/i;
 
 /**
  * Cortan servicio o sesiones, o dejan el equipo en otro estado (conmutación, rollback,
@@ -118,6 +118,43 @@ const READ_START =
  */
 const DISRUPTIVE =
   /^(reload(?! cancel)|reboot|shutdown|halt|poweroff|power-off|erase|format(?!-(Table|List|Wide|Custom|Hex)\b)|write erase|delete|undelete|rmdir|squeeze|zeroize|factory|configure replace|configure revert now|reset saved-configuration|reset (bgp|ospf|isis|mpls|ip ospf|ike sa|ipsec sa|recycle-bin|mac-address(?! flapping))|rollback (configuration|running-config)\b|checkpoint rollback|commit replace|abort trial|debug(ging)?\b|redundancy (force-)?switchover|(system|slave|master) switchover|test cable-diagnostics|diag cable-diagnostic test|show cable-diag\b|diagnose switch physical-ports cable-diag|clear (ip )?(bgp|ospf|isis|eigrp)(?!.*\bsoft\b)|clear bgp(?!.*\bsoft\b)|clear (ip )?route|clear arp\s*$|clear ip nat translation|clear crypto\b|clear mac(-| )address-table\b|clear interfaces statistics all\b|clear ethernet-switching table\s*$|clear security flow session\b|request system (reboot|halt|power-off|zeroize|logout|software rollback)|request chassis cluster failover|request chassis routing-engine master\b|request node (reboot|halt|power-off|offline)|restart \S+|set interfaces \S+( unit \d+)? disable\b|cfg -x|execute (reboot|shutdown|factoryreset\w*|formatlogdisk|restore|ha failover|disk format|sim-switch|clear system arp table|poe-reset|(bpdu|loop)-guard reset)|execute (lte|5g)-modem (reboot|power-off|sim-switch|start-upgrade|firmware-upgrade|carrier-config switch)|execute switch-controller (switch-action (poe reset|cable-diag|bpdu-guard reset|loop-guard reset|restart|set-standalone|factory-reset)|poe-reset|switch-software upgrade)|execute wireless-controller (reset-wtp|restart-\S+|push-wtp-image|rolling-wtp-upgrade)|execute extender (reset-fortiextender|restart-fortiextender-daemon|push-fortiextender-image|install-forticloud-\S+)|execute router clear (bgp|ospf)(?!.*\bsoft\b)|diagnose sys session clear|diagnose sys ha reset-uptime|diagnose switch-controller restart-daemon|diagnose test application \S+ 99\b|diagnose vpn tunnel down\b|diagnose vpn ike (gateway (clear|flush)|restart)\b|diagnose vpn "?\/ike\/restart|diagnose firewall auth clear\b|fnsysctl killall\b|schedule reboot|install (activate|remove|commit)|install add\b.*\sactivate\b|deactivate|cpstop|cpstart|cprestart|cphastop|mdsstop|fw unload(local)?|clusterXL_admin down|set cluster member admin down|fwaccel off|fw tab\b.*\s-x\b|fw ctl conntab\b.*\s-x\b|fw ctl zdebug\b|fw ctl debug (?!(0|-x)\s*$)\S|vpn tu (del|delete)\b|save config\s*$|load configuration\b|set interface \S+ state off\b|set static-route\b.*\boff\b|upgrade system\b|upgrade\s*$|vpn-tunnel rekey\b|cluster (failover|reboot|reset)\b|import config\b|restore (image|factory-default|backup-image)\b|restore-defaults\b|boot system( flash)?( primary| secondary)?\s*$|interface \S+ (disable|speed-duplex)\b|no interface \S+ power-over-ethernet\b|vsx update-software\b|poe mode disable|apboot\b|ap-re(group|name)\b|ifconfig \S+ down|ip (-\S+ )*l(i(nk?)?)? s(et?)? (dev )?\S+ down|cphaprob\b.*-s problem)\b/i;
+
+/**
+ * Cortan servicio y solo se reconocen por el fabricante (revisión del catálogo: los comandos se
+ * declaraban "disruptive" y el motor daba "change" al escribirlos a mano). Cada alternativa lleva su
+ * propia frontera: los valores pueden ser variables "{{x}}" y el "\b" final de DISRUPTIVE no las ve.
+ * Aruba: trunk LACP (corta los puertos al agruparlos), IP de una VLAN (puede ser la de gestión),
+ * "copy tftp startup-config" (reemplaza el arranque), AirMatch inmediato y borrar un usuario (reautentica).
+ * FortiAP: VLAN de gestión y "restore <imagen> <ip>" (carga firmware). FortiOS: "diagnose sys kill" con
+ * cualquier señal y comandos AT al módem. Grandstream (y todo equipo con "speed" como orden de interfaz):
+ * velocidad fija y renegociación del enlace. Huawei: borrar MAC dinámicas. WatchGuard: terminar la sesión L2TP.
+ * Solo al inicio de la línea: "show speed" o "type" en otro contexto no coinciden.
+ */
+const DISRUPTIVE_VENDOR = new RegExp(
+  "^(" +
+    [
+      "trunk \\S+ trk\\S+ (lacp|trunk)(\\s|$)",
+      "(no )?vlan \\S+ ip address(\\s|$)",
+      "copy tftp startup-config(\\s|$)",
+      "airmatch runnow(\\s|$)",
+      "aaa user delete(\\s|$)",
+      "cfg -a\\s+AP_MGMT_VLAN_ID=",
+      "restore \\S+ (\\d{1,3}(\\.\\d{1,3}){3}|\\{\\{\\w+\\}\\})(\\s|$)",
+      "diagnose sys kill \\S+",
+      "diagnose extender cmd(\\s|$)",
+      "speed (auto|\\d+[gm]?|\\{\\{\\w+\\}\\})(\\s|$)",
+      "undo mac-address (dynamic|all)(\\s|$)",
+      "no vpn-status l2tp(\\s|$)",
+    ].join("|") +
+    ")",
+  "i",
+);
+/**
+ * "spanning-tree mode <modo>" (Grandstream): reconverge el árbol. Solo con los modos de ese
+ * fabricante y sin una línea "spanning-tree" suelta en el mismo texto: esa forma (Aruba, "spanning-tree"
+ * y luego "spanning-tree mode mstp") habilita STP, no cambia el modo de uno que ya corre.
+ */
+const STP_MODE = /^spanning-tree mode (stp|rstp|mstp|pvst|rpvst|\{\{\w+\}\})\s*$/i;
 
 /**
  * FortiOS: "diagnose ..." consulta salvo que lleve un verbo que cambia estado ("up" y "down"
@@ -533,10 +570,28 @@ const ETHTOOL_SET = /^ethtool -s\b/;
  * Dentro de un bloque de configuración, estas órdenes cortan servicio: apagar la interfaz o su
  * PoE, reiniciarla ("restart" de VRP), devolverla a fábrica ("default interface"), cambiar su
  * velocidad, cambiar o quitar su IP (IOS, VRP y la forma "ip a.b.c.d/n" de Fireware) o "apply",
- * que en Fireware aplica de inmediato todos los cambios pendientes de políticas.
+ * que en Fireware aplica de inmediato todos los cambios pendientes de políticas, o "set status
+ * suppressed" (FortiOS, ap-status: el controlador deautentica clientes del AP rogue). Los de
+ * WatchGuard que dependen del bloque ("type trusted|optional|external" bajo la interfaz y "mode
+ * dynamic|static" bajo link-aggregation) están en `blockDisruptive`.
  */
 const DISRUPTIVE_IN_CONFIG =
-  /^(shutdown|set (status|admin|admin-status) (down|disable)|set poe-status disable|disable|no enable\s*$|restart\s*$|default interface\b|power inline never|undo poe enable|poe mode disable|link-speed\b|(no |undo )?ip address\b|ip \d+\.\d+\.\d+\.\d+\/\d+|apply\s*$|set .*admin-status down)\b/i;
+  /^(shutdown|set (status|admin|admin-status) (down|disable)|set poe-status disable|disable|no enable\s*$|restart\s*$|default interface\b|power inline never|undo poe enable|poe mode disable|link-speed\b|(no |undo )?ip address\b|ip \d+\.\d+\.\d+\.\d+\/\d+|apply\s*$|set .*admin-status down|set status suppressed)\b/i;
+
+/**
+ * Órdenes que cortan servicio solo por el bloque en que van (varias líneas). Se exige la línea que
+ * fija el contexto para no subir de nivel un "type" ni un "mode" de otro fabricante: en WatchGuard
+ * Fireware "interface FastEthernet 1" (número separado por espacio) con "type trusted|optional|external"
+ * cambia la zona de la interfaz, y "link-aggregation <nombre>" con "mode dynamic|static" rehace el enlace.
+ */
+const WG_IFACE = /^interface \S+ (\d+|\{\{\w+\}\})$/i;
+const WG_IFACE_TYPE = /^type (trusted|optional|external)$/i;
+const WG_LAG = /^link-aggregation \S+$/i;
+const WG_LAG_MODE = /^mode (dynamic|static)$/i;
+function blockDisruptive(lines: string[]): boolean {
+  const has = (re: RegExp) => lines.some((l) => re.test(l));
+  return (has(WG_IFACE) && has(WG_IFACE_TYPE)) || (has(WG_LAG) && has(WG_LAG_MODE));
+}
 
 /**
  * ";" "&&" "||" y "&" encadenan otro comando en la misma línea (shells, cmd y NX-OS): se
@@ -656,7 +711,7 @@ export function computeRisk(cmd: string): Risk {
   return risk;
 }
 
-const cuts = (x: string) => DISRUPTIVE.test(x) || OS_DISRUPTIVE.test(x);
+const cuts = (x: string) => DISRUPTIVE.test(x) || OS_DISRUPTIVE.test(x) || DISRUPTIVE_VENDOR.test(x);
 
 /** La línea es una consulta (`word`: su primera palabra en minúsculas). */
 function isRead(line: string, word: string): boolean {
@@ -697,6 +752,7 @@ function evalRisk(cmd: string): Risk {
   if (lines.every((l) => FORTI_CONTEXT.test(l)) && /^config (global|vdom)$/i.test(lines[0]) && lines.length <= 2) return "read";
   // Una sustitución `...` o $(...) ejecuta un comando que no se analiza.
   if (/`|\$\(/.test(cmd)) risk = "change";
+  if (multi && blockDisruptive(lines)) return "disruptive";
   const parts = cmd.split("\n").flatMap(splitChain);
   for (const raw of parts.map((l) => l.trim()).filter(Boolean)) {
     // "sudo" no cambia la naturaleza del comando: se evalúa lo que ejecuta.
@@ -708,6 +764,7 @@ function evalRisk(cmd: string): Risk {
     // el "|" es un filtro y lo que sigue puede ser una expresión regular ("| include
     // up|reload"): ahí no se evalúa como comando.
     if (cuts(line) || ETHTOOL_SET.test(line) || (multi && DISRUPTIVE_IN_CONFIG.test(line))) return "disruptive";
+    if (STP_MODE.test(line) && !lines.some((l) => /^spanning-tree$/i.test(l))) return "disruptive";
     if (pipes.length && word !== "show" && word !== "display" && word !== "get" && !abbrevRead(line) && pipes.some(cuts)) return "disruptive";
     const remote = word === "ssh" || word === "telnet" || word === "stelnet" ? remoteCommand(line) : null;
     if (remote) {

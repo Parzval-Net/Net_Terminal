@@ -3,7 +3,8 @@
 // Variables opcionales: PORT (puerto de vite), OUT (carpeta de salida), CHROME (binario).
 // Cada captura: [archivo, escena, tema, { query?, hover?, type?, keys?, wait?, motion? }]; `hover` es un selector CSS
 // sobre el que se deja el mouse antes de capturar (estados hover, p. ej. la X de una pestaña);
-// `type` se escribe tecla por tecla en la terminal y `keys` son teclas especiales ("ctrl+period").
+// `type` se escribe tecla por tecla en la terminal ("\n" es Enter), `keys` son teclas especiales ("ctrl+period") y
+// `eval` es una expresión (puede devolver una promesa) que se ejecuta en la página tras teclear, para dejar la escena a punto.
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -62,9 +63,19 @@ const SHOTS = [
   // lista explica cómo pedir sugerencias, y con `do ` vuelven.
   ["sugerencias-config", "suggest-config", "light", { query: "&video=1", type: "sh", keys: ["ctrl+period"] }],
   ["sugerencias-config-do", "suggest-config", "dark", { query: "&video=1&term=solarized-dark", type: "do sh ip int b" }],
+  // Funciones de la terminal y las herramientas nuevas (datos ficticios; ver las escenas "new-*" de mock.js).
+  ["buscar-logs", "new-logsearch", "light", { wait: 8000 }],
+  ["exportar-cifrado", "new-bundle-export", "light"],
+  ["pegado-seguro", "new-paste", "light"],
+  // Marcas de comando automáticas (Ajustes › Terminal) y resaltado al vuelo: se teclean comandos y se abre Marcadores.
+  ["terminal-resaltado", "new-term", "light", { query: "&video=1&automark=1", type: "show clock\nshow ip interface brief\nshow logging | include LINK\n", wait: 4500, eval: "window.__newScene.highlight()" }],
+  ["marcadores", "new-term", "light", { query: "&video=1&automark=1", type: "show clock\nshow ip interface brief\nshow logging | include LINK\n", wait: 4500, eval: "window.__newScene.marks()" }],
+  ["solo-lectura", "new-readonly", "light"],
+  ["solo-lectura-oscuro", "new-readonly", "dark"],
+  ["servidores-acceso", "new-servers", "light", { wait: 6000 }],
 ];
 /** Teclas especiales para `keys`: [key, code, keyCode, modificadores CDP (2 = Ctrl)]. */
-const KEYS = { "ctrl+space": [" ", "Space", 32, 2], "ctrl+period": [".", "Period", 190, 2], right: ["ArrowRight", "ArrowRight", 39, 0], down: ["ArrowDown", "ArrowDown", 40, 0], tab: ["Tab", "Tab", 9, 0], esc: ["Escape", "Escape", 27, 0] };
+const KEYS = { enter: ["Enter", "Enter", 13, 0], "ctrl+space": [" ", "Space", 32, 2], "ctrl+period": [".", "Period", 190, 2], right: ["ArrowRight", "ArrowRight", 39, 0], down: ["ArrowDown", "ArrowDown", 40, 0], tab: ["Tab", "Tab", 9, 0], esc: ["Escape", "Escape", 27, 0] };
 const only = process.argv.slice(2);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -117,6 +128,12 @@ try {
       await sleep(400);
     }
     for (const ch of extra.type ?? "") {
+      if (ch === "\n") {
+        await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r", unmodifiedText: "\r" });
+        await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+        await sleep(700);
+        continue;
+      }
       await send("Input.dispatchKeyEvent", { type: "keyDown", key: ch, text: ch, unmodifiedText: ch });
       await send("Input.dispatchKeyEvent", { type: "keyUp", key: ch });
       await sleep(80);
@@ -128,6 +145,11 @@ try {
       await sleep(150);
     }
     if (extra.type || extra.keys) await sleep(600);
+    if (extra.eval) {
+      const r = await send("Runtime.evaluate", { expression: extra.eval, awaitPromise: true });
+      if (r.result?.exceptionDetails) console.warn(`${name}: eval falló`, r.result.exceptionDetails.exception?.description?.split("\n")[0]);
+      await sleep(600);
+    }
     const { result } = await send("Page.captureScreenshot", { format: "png" });
     writeFileSync(join(OUT, `${name}.png`), Buffer.from(result.data, "base64"));
     console.log(`${name}.png`);

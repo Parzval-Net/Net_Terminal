@@ -411,6 +411,8 @@ pub struct ConnInfo {
     #[serde(rename = "type")]
     pub kind: SessionType,
     pub target: String,
+    /// La pestaña está en solo lectura: `write` y `send_break` se rechazan.
+    pub read_only: bool,
 }
 
 enum Transport {
@@ -470,9 +472,10 @@ struct Connection {
 }
 
 impl Connection {
-    fn info(&self, id: &str) -> ConnInfo {
+    fn info(&self, id: &str, read_only: bool) -> ConnInfo {
         let s = &self.session;
         ConnInfo {
+            read_only,
             id: id.to_string(),
             name: self.name.clone(),
             kind: s.session_type.clone(),
@@ -497,10 +500,16 @@ pub struct FillSpec {
     pub only_host: Option<String>,
 }
 
+/// Error de toda escritura en una conexión marcada como solo lectura (ver `ConnectionManager::set_read_only`).
+pub const READ_ONLY: &str = "La pestaña está en solo lectura";
+
 #[derive(Default)]
 pub struct ConnectionManager {
     conns: Mutex<HashMap<String, Connection>>,
     triggers: Arc<triggers::Hub>,
+    /// Conexiones en solo lectura. Va aparte del mapa de conexiones a propósito: la interfaz lo marca
+    /// antes de conectar (y en cada reconexión, que usa un id nuevo) y no debe perderse con el cierre.
+    read_only: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ConnectionManager {
@@ -513,8 +522,8 @@ impl ConnectionManager {
         data: Channel<InvokeResponseBody>,
         fill: Option<FillSpec>,
     ) -> Result<(), String> {
-        // Una reconexión reutiliza el id: se cierra lo anterior primero.
-        self.disconnect(&id);
+        // Una reconexión reutiliza el id: se cierra lo anterior primero (sin tocar la marca de solo lectura).
+        self.close(&id);
 
         let sink = Sink::new(data);
         lock(&sink.mirror).watch = Some(Watcher::new(self.triggers.clone(), id.clone(), session.folder.as_deref()));
@@ -562,6 +571,8 @@ impl ConnectionManager {
     /// ahora (pedido por un script con la aprobación del usuario). El valor nunca vuelve a quien
     /// lo pidió ni pasa por el log, el historial o los suscriptores.
     pub fn type_saved(&self, id: &str, fill: FillSpec, host: Option<&str>, strict: bool) -> Result<(), String> {
+        // A diferencia del autocompletado al conectar, esto lo pide un script: escribe en el equipo.
+        self.ensure_writable(id)?;
         let (mirror, input, newline) = {
             let map = lock(&self.conns);
             let conn = map.get(id).filter(|c| !c.sink.exited.load(Ordering::SeqCst)).ok_or("Sesión no conectada")?;
@@ -584,6 +595,7 @@ impl ConnectionManager {
     /// comando `after` (ver `Mirror::type_hop_secret`). El valor no vuelve a quien lo pide ni pasa
     /// por el log, el historial o los suscriptores.
     pub fn type_hop(&self, id: &str, secret: &str, host: &str, after: &str, token: &str) -> Result<(), String> {
+        self.ensure_writable(id)?;
         let (mirror, input, newline) = {
             let map = lock(&self.conns);
             let conn = map.get(id).filter(|c| !c.sink.exited.load(Ordering::SeqCst)).ok_or("Sesión no conectada")?;
@@ -593,7 +605,37 @@ impl ConnectionManager {
         m.type_hop_secret(&input, secret, newline, host, after, token)
     }
 
+    /// Marca o desmarca una conexión como de solo lectura. La interfaz lo invoca al activar o
+    /// desactivar el modo de la pestaña y antes de cada (re)conexión, y puede hacerlo antes de que la
+    /// conexión exista. Con la marca, `write`, `send_break`, `type_saved` y `type_hop` fallan con
+    /// `READ_ONLY`; este es el punto común de escritura de todo lo que no es el teclado de la interfaz
+    /// (servidor MCP, scripts y plugins, CLI Lab, difusión, `device_run` de transferencias y descubrimientos).
+    ///
+    /// Única excepción: el autocompletado de la contraseña guardada al conectar o reconectar
+    /// (`Outgoing::Secret`, que no pasa por `write`). Sin él la sesión no llega a establecerse; solo
+    /// responde el pedido de login del propio destino y nunca envía comandos.
+    pub fn set_read_only(&self, id: &str, on: bool) {
+        let mut set = lock(&self.read_only);
+        if on {
+            set.insert(id.to_string());
+        } else {
+            set.remove(id);
+        }
+    }
+
+    pub fn is_read_only(&self, id: &str) -> bool {
+        lock(&self.read_only).contains(id)
+    }
+
+    fn ensure_writable(&self, id: &str) -> Result<(), String> {
+        if self.is_read_only(id) {
+            return Err(READ_ONLY.into());
+        }
+        Ok(())
+    }
+
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), String> {
+        self.ensure_writable(id)?;
         let map = lock(&self.conns);
         let conn = map.get(id).ok_or("Sesión no conectada")?;
         // La primera línea que el usuario envía desarma el autocompletado (el del propio
@@ -636,6 +678,7 @@ impl ConnectionManager {
     }
 
     pub fn send_break(&self, id: &str) -> Result<(), String> {
+        self.ensure_writable(id)?;
         // El lock se suelta antes de esperar: un Break serial tarda 300 ms.
         let port = {
             let map = lock(&self.conns);
@@ -701,11 +744,12 @@ impl ConnectionManager {
     }
 
     pub fn list(&self) -> Vec<ConnInfo> {
+        let ro = lock(&self.read_only).clone();
         let map = lock(&self.conns);
         let mut list: Vec<_> = map
             .iter()
             .filter(|(_, c)| !c.sink.exited.load(Ordering::SeqCst))
-            .map(|(id, c)| c.info(id))
+            .map(|(id, c)| c.info(id, ro.contains(id)))
             .collect();
         list.sort_by(|a, b| a.id.cmp(&b.id));
         list
@@ -713,9 +757,10 @@ impl ConnectionManager {
 
     /// Búsqueda directa (antes armaba y recorría la lista completa en cada llamada).
     pub fn info(&self, id: &str) -> Option<(ConnInfo, Session)> {
+        let ro = self.is_read_only(id);
         let map = lock(&self.conns);
         let c = map.get(id).filter(|c| !c.sink.exited.load(Ordering::SeqCst))?;
-        Some((c.info(id), c.session.clone()))
+        Some((c.info(id, ro), c.session.clone()))
     }
 
     /// Últimos `max` caracteres de salida en texto limpio.
@@ -733,7 +778,13 @@ impl ConnectionManager {
         Some(rx)
     }
 
+    /// Cierre definitivo de la conexión: también olvida su marca de solo lectura.
     pub fn disconnect(&self, id: &str) {
+        self.close(id);
+        lock(&self.read_only).remove(id);
+    }
+
+    fn close(&self, id: &str) {
         let Some(conn) = lock(&self.conns).remove(id) else {
             return;
         };
@@ -1992,6 +2043,78 @@ mod tests {
             assert!(screen.windows(5).any(|w| w == b"dix\x08 "), "eco \\b \\b intacto y en orden");
             mgr.disconnect("c1");
         }
+    }
+
+    /// Solo lectura en el backend: `write`, `send_break` y las contraseñas pedidas por scripts fallan con
+    /// el mismo error claro; el autocompletado de la contraseña al conectar sigue permitido y la marca
+    /// vale antes de conectar, sobrevive al cierre por reconexión y se borra en `disconnect`.
+    #[test]
+    fn read_only_blocks_writes_but_not_login_autofill() {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.write_all(b"Password: ").unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(1500))).unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 64];
+            // Lee hasta ver el fin de línea de la contraseña; lo que llegue después también se anota.
+            while let Ok(n) = s.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+            }
+            got
+        });
+        let session: crate::models::Session = serde_json::from_value(serde_json::json!({
+            "name": "ro", "type": "telnet", "host": "127.0.0.1", "port": port
+        }))
+        .unwrap();
+        let mgr = super::ConnectionManager::default();
+        // La marca se puede poner antes de que exista la conexión (la interfaz lo hace antes de conectar).
+        mgr.set_read_only("c1", true);
+        let data = tauri::ipc::Channel::new(|_| Ok(()));
+        let fill = super::FillSpec { secret: zeroize::Zeroizing::new("S3cret".into()), user: None, only_host: None };
+        mgr.connect("c1".into(), &session, 80, 24, data, Some(fill)).unwrap();
+        assert!(mgr.is_read_only("c1"), "la reconexión (close interno) no borra la marca");
+
+        // Escrituras rechazadas con el mensaje claro, sin tocar el equipo.
+        assert_eq!(mgr.write("c1", b"reload\r").unwrap_err(), super::READ_ONLY);
+        assert_eq!(mgr.write("c1", b"x").unwrap_err(), "La pestaña está en solo lectura");
+        assert_eq!(mgr.send_break("c1").unwrap_err(), super::READ_ONLY);
+        let fill = || super::FillSpec { secret: zeroize::Zeroizing::new("Otra".into()), user: None, only_host: None };
+        assert_eq!(mgr.type_saved("c1", fill(), None, false).unwrap_err(), super::READ_ONLY);
+        assert_eq!(mgr.type_hop("c1", "x", "192.0.2.1", "ssh 192.0.2.1", "t").unwrap_err(), super::READ_ONLY);
+        // Lo que lee sigue funcionando.
+        assert!(mgr.history("c1", 100).is_some());
+        assert!(mgr.tap("c1").is_some());
+        assert_eq!(mgr.list().len(), 1);
+        // Otra conexión no se ve afectada.
+        assert!(!mgr.is_read_only("c2"));
+        assert_eq!(mgr.write("c2", b"x").unwrap_err(), "Sesión no conectada");
+
+        // Desactivar el modo vuelve a permitir escribir.
+        mgr.set_read_only("c1", false);
+        mgr.write("c1", b"show clock\r").unwrap();
+        // Y reactivarlo lo bloquea en la siguiente escritura (un trabajo en curso se detiene ahí).
+        mgr.set_read_only("c1", true);
+        assert_eq!(mgr.write("c1", b"reload\r").unwrap_err(), super::READ_ONLY);
+
+        let t = Instant::now();
+        while !mgr.history("c1", 100).unwrap().contains("Password:") && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        mgr.disconnect("c1");
+        assert!(!mgr.is_read_only("c1"), "disconnect olvida la marca");
+        let received = server.join().unwrap();
+        let text = String::from_utf8_lossy(&received).to_string();
+        assert!(text.starts_with("S3cret\r"), "el autocompletado de login llega aunque sea solo lectura: {text:?}");
+        assert!(text.contains("show clock"), "tras desactivar el modo se escribe de nuevo");
+        assert!(!text.contains("reload") && !text.contains("Otra"), "nada bloqueado llegó al equipo: {text:?}");
     }
 
     #[test]

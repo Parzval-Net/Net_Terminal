@@ -222,7 +222,7 @@ export function MarksDialog({ tabName, items, autoMark, onAutoMark, onGoto, onRe
   return (
     <Frame title="Marcadores" icon={<Bookmark size={15} />} onClose={onClose} wide initialFocus='[role="dialog"]'>
       <p className="text-[12px] text-muted mb-3">
-        Marcas de <b className="font-medium text-fg">{tabName}</b> en el historial de la terminal. Se van al limpiar el historial o al salir de él.
+        Marcadores de <b className="font-medium text-fg">{tabName}</b> en el historial de la terminal. Se van al limpiar el historial o al salir de él.
       </p>
       <div className="flex items-center justify-between gap-4 mb-3 text-[12px]">
         <span id="automark-label">

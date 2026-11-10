@@ -403,6 +403,9 @@ export function SettingsModal({
                 <Item label="Pegar con clic derecho">
                   <Switch checked={s.rightClickPaste} onChange={(v) => onChange({ rightClickPaste: v })} />
                 </Item>
+                <Item label="Marcar cada comando al enviarlo" hint="Deja un marcador en la terminal al ejecutar cada comando, para saltar entre ellos. Vale para todas las pestañas">
+                  <Switch checked={s.autoMarkCommands} onChange={(v) => onChange({ autoMarkCommands: v })} />
+                </Item>
                 <Item label="Confirmar al cerrar" hint="Pide confirmación antes de cortar una sesión remota activa">
                   <Switch checked={s.confirmClose} onChange={(v) => onChange({ confirmClose: v })} />
                 </Item>
@@ -475,9 +478,6 @@ export function SettingsModal({
                 <div className="pt-2 text-[12px] font-medium text-muted">Notas</div>
                 <Item label="Confirmar envío de varias líneas" hint="Muestra un resumen antes de enviar o pegar un bloque en un equipo remoto">
                   <Switch checked={s.confirmSend} onChange={(v) => onChange({ confirmSend: v })} />
-                </Item>
-                <Item label="Marcar cada comando al enviarlo" hint="Deja un marcador en la terminal al ejecutar cada comando, para saltar entre ellos">
-                  <Switch checked={s.autoMarkCommands} onChange={(v) => onChange({ autoMarkCommands: v })} />
                 </Item>
                 <Item label="Barra de botones" hint="Comandos rápidos y scripts sobre la barra de estado. Se oculta sola si no hay botones; «Nuevo botón» y los scripts siguen en la paleta (⌘K)">
                   <Switch checked={s.showButtonBar} onChange={(v) => onChange({ showButtonBar: v })} />

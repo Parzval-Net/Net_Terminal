@@ -91,7 +91,7 @@ export interface TermController {
 }
 
 /** Aviso al intentar escribir en una pestaña de solo lectura. */
-export const READ_ONLY_MSG = "Pestaña en solo lectura";
+export const READ_ONLY_MSG = "La pestaña está en solo lectura";
 
 /** Coincidencias que cuenta la búsqueda (tope del addon: protege el rendimiento con historial grande). */
 const FIND_LIMIT = 1000;
@@ -221,6 +221,8 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
   const [pasteAsk, setPasteAsk] = useState<{ text: string; a: PasteAnalysis; d: PasteDecision } | null>(null);
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  /** La conexión actual ya tiene la marca de solo lectura del backend (set_read_only). */
+  const roSent = useRef(false);
   const onAutoMarkRef = useRef(onAutoMark);
   onAutoMarkRef.current = onAutoMark;
   const [query, setQuery] = useState("");
@@ -428,8 +430,13 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       tail = "";
       tracker.clear();
       lastDataAt = 0;
+      const prevConn = connIdRef.current;
       const connId = `${id}#${++attempt}`;
       connIdRef.current = connId;
+      // Solo lectura también en el backend (MCP, scripts, CLI Lab, difusión): la marca va por conexión y se pone antes de conectar.
+      if (prevConn && roSent.current) invoke("set_read_only", { id: prevConn, on: false }).catch(() => {});
+      roSent.current = readOnlyRef.current;
+      if (roSent.current) invoke("set_read_only", { id: connId, on: true }).catch(() => {});
       setStatus("connecting");
       const s = sessionRef.current;
       if (s.type !== "local") term.write(dim(`Conectando a ${s.name}…\r\n`));
@@ -1331,6 +1338,12 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
   useEffect(() => {
     suggestRef.current?.reset();
   }, [settings.commandSuggest, readOnly]);
+  // Al activar o desactivar el modo, el backend rechaza (o vuelve a aceptar) las escrituras de la conexión actual.
+  useEffect(() => {
+    if (!connIdRef.current || roSent.current === readOnly) return;
+    roSent.current = readOnly;
+    invoke("set_read_only", { id: connIdRef.current, on: readOnly }).catch(() => {});
+  }, [readOnly]);
   useEffect(() => {
     suggestRef.current?.refresh();
   }, [active, visible, settings.commandSuggest, session.platform, catalog, theme, settings.fontFamily, settings.fontSize, settings.lineHeight, settings.suggestColor, settings.suggestStyle, settings.suggestTip, settings.suggestTabAccept]);

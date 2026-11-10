@@ -1116,7 +1116,7 @@ function Workspace({
       });
     },
     typeCommand: (cmd: string) => {
-      if (activeTab?.readOnly) return toast("Pestaña en solo lectura: no se escribe nada en el equipo", "error");
+      if (activeTab?.readOnly) return toast("La pestaña está en solo lectura: no se escribe nada en el equipo", "error");
       const type = (text: string) => activeCtrl()?.type(text);
       if (templateVars(cmd).length) setTemplate({ text: cmd, then: type });
       else type(cmd);
@@ -1148,7 +1148,7 @@ function Workspace({
     sendBreak: (id: string | undefined = activeId ?? undefined) => {
       const ctrl = id ? controllers.current.get(id) : undefined;
       if (!ctrl) return;
-      if (tabs.find((t) => t.id === id)?.readOnly) return toast("Pestaña en solo lectura: no se envía el Break", "error");
+      if (tabs.find((t) => t.id === id)?.readOnly) return toast("La pestaña está en solo lectura: no se envía el Break", "error");
       sendBreak(ctrl.connId()).catch((e) => toastFail("enviar Break", e));
       ctrl.focus();
     },
@@ -1176,11 +1176,11 @@ function Workspace({
       if (!t) return;
       const on = !t.readOnly;
       setTabs((ts) => ts.map((x) => (x.id === t.id ? { ...x, readOnly: on || undefined } : x)));
-      // Lo que ya está en marcha (scripts, CLI Lab, difusión) y el servidor MCP escriben desde el backend: no pasan por este bloqueo.
+      // El backend también rechaza la escritura (MCP, scripts, CLI Lab, difusión, transferencias): lo que ya está en marcha se detiene en su siguiente escritura.
       const running = scriptRun || isLabRunning() || isBroadcastRunning();
       toast(
         on
-          ? `${tabTitle(t)} en solo lectura: la interfaz no envía nada a esta pestaña${running ? ". Lo que ya está en ejecución (script, CLI Lab o difusión) puede seguir escribiendo" : ""}${settings.mcpEnabled ? ". El servidor MCP no respeta este modo" : ""}`
+          ? `${tabTitle(t)} en solo lectura: no se envía nada a esta pestaña${running ? ". Lo que ya está en ejecución (script, CLI Lab o difusión) se detiene en su siguiente escritura" : ""}`
           : `Solo lectura desactivada en ${tabTitle(t)}`,
         running && on ? "error" : "info",
       );
