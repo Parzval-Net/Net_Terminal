@@ -80,10 +80,7 @@ pub fn decrypt(key: &[u8; 32], nonce: &[u8; 24], ct: &[u8], aad: &[u8]) -> Resul
 /// (se sincroniza el archivo antes del rename y la carpeta después).
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    let unique: [u8; 8] = random();
-    name.push(format!(".{}.tmp", unique.iter().map(|b| format!("{b:02x}")).collect::<String>()));
-    let tmp = path.with_file_name(name);
+    let tmp = path.with_file_name(temp_name(path.file_name().unwrap_or_default()));
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -107,6 +104,44 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// Nombre del temporal de una escritura: `<archivo>.<16 hex en minúsculas>.tmp`.
+fn temp_name(base: &std::ffi::OsStr) -> std::ffi::OsString {
+    let mut name = base.to_os_string();
+    let unique: [u8; 8] = random();
+    name.push(format!(".{}.tmp", unique.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+    name
+}
+
+/// Un nombre es un temporal de `write_atomic`: `<archivo>.<16 hex en minúsculas>.tmp` con `<archivo>`
+/// no vacío. Cualquier otro patrón (un `.tmp` del usuario) no calza.
+fn is_atomic_temp(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".tmp") else { return false };
+    let Some((base, hex)) = rest.rsplit_once('.') else { return false };
+    !base.is_empty() && hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Borra los temporales huérfanos de `write_atomic` (un corte entre crear y renombrar) con más de
+/// `min_age` de antigüedad, solo en las carpetas dadas y sin recorrer subcarpetas. Nunca toca un
+/// archivo que no calce exactamente con el patrón ni un enlace simbólico. Devuelve cuántos borró.
+pub fn cleanup_orphan_temps(dirs: &[&Path], min_age: Duration) -> usize {
+    let mut removed = 0;
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            if !name.to_str().is_some_and(is_atomic_temp) {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(e.path()) else { continue };
+            let old = meta.modified().ok().and_then(|m| m.elapsed().ok()).is_some_and(|age| age >= min_age);
+            if meta.is_file() && old && std::fs::remove_file(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 /// Espera exponencial tras intentos fallidos de contraseña (1, 2, 4… hasta 60 s).
@@ -246,6 +281,61 @@ pub(crate) mod tests {
         let tmps = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
         assert_eq!(tmps, 0);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cleanup_removes_only_old_orphan_temps() {
+        let dir = std::env::temp_dir().join(format!("nt-orphan-{}", uuid::Uuid::new_v4()));
+        let sub = dir.join("notes");
+        std::fs::create_dir_all(&sub).unwrap();
+        let hex = "0123456789abcdef";
+        let old = [dir.join(format!("settings.json.{hex}.tmp")), sub.join(format!("nota.txt.{hex}.tmp"))];
+        let recent = dir.join(format!("sessions.json.{hex}.tmp"));
+        let keep = [
+            dir.join("usuario.tmp"),
+            dir.join("backup.tmp"),
+            dir.join(format!("x.{}.tmp", "0123456789abcde")),
+            dir.join(format!("x.{}.tmp", "0123456789abcdef0")),
+            dir.join(format!("x.{}.tmp", "0123456789ABCDEF")),
+            dir.join(format!("x.{}.tmpx", hex)),
+            dir.join(format!(".{hex}.tmp")),
+            dir.join("datos.json"),
+        ];
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
+        for f in old.iter().chain(keep.iter()) {
+            std::fs::write(f, b"x").unwrap();
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(long_ago).unwrap();
+        }
+        std::fs::write(&recent, b"x").unwrap();
+        // Una carpeta con nombre de temporal no se borra.
+        let fake_dir = dir.join(format!("carpeta.{hex}.tmp"));
+        std::fs::create_dir_all(&fake_dir).unwrap();
+        std::fs::File::open(&fake_dir).unwrap().set_modified(long_ago).unwrap();
+
+        let n = cleanup_orphan_temps(&[&dir, &sub, &dir.join("no-existe")], Duration::from_secs(3600));
+        assert_eq!(n, 2);
+        assert!(old.iter().all(|f| !f.exists()));
+        assert!(recent.exists(), "reciente: puede ser una escritura en curso");
+        assert!(keep.iter().all(|f| f.exists()));
+        assert!(fake_dir.exists());
+        // Sin recursión: un huérfano en una subcarpeta no listada se conserva.
+        let deep = sub.join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        let f = deep.join(format!("a.{hex}.tmp"));
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(long_ago).unwrap();
+        assert_eq!(cleanup_orphan_temps(&[&dir, &sub], Duration::from_secs(3600)), 0);
+        assert!(f.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn temp_pattern_matches_what_write_atomic_creates() {
+        for _ in 0..50 {
+            let n = temp_name(std::ffi::OsStr::new("a.json"));
+            assert!(is_atomic_temp(n.to_str().unwrap()), "{n:?}");
+        }
+        assert!(!is_atomic_temp("a.json"));
     }
 
     #[test]

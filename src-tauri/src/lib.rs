@@ -1279,6 +1279,14 @@ pub fn run() {
             for f in ["settings.json", "sessions.json", TOPOLOGY_FILE] {
                 session_store::restrict(&data_dir.join(f));
             }
+            // Temporales huérfanos de `write_atomic` (corte entre crear y renombrar): se limpian en
+            // un hilo aparte para no demorar el arranque. Solo donde escribe `write_atomic`.
+            {
+                let (data, notes, packs) = (data_dir.clone(), data_dir.join("notes"), data_dir.join("command-packs"));
+                std::thread::spawn(move || {
+                    seal::cleanup_orphan_temps(&[&data, &notes, &packs], std::time::Duration::from_secs(3600));
+                });
+            }
             app.manage(updates::Pending::default());
             app.manage(AppState {
                 store: SessionStore::new(&data_dir),

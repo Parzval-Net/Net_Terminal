@@ -127,6 +127,16 @@ impl Mirror {
         }
     }
 
+    /// El usuario envió Enter hacia la conexión: ver `AutoFill::user_enter`.
+    fn user_enter(&mut self) {
+        if let Some((af, _)) = self.autofill.as_mut() {
+            af.user_enter();
+            if af.done() {
+                self.autofill = None;
+            }
+        }
+    }
+
     /// Suelta el autocompletado (y con él la contraseña): no responde ningún pedido más.
     fn disarm_autofill(&mut self) -> bool {
         match self.autofill.take() {
@@ -586,6 +596,11 @@ impl ConnectionManager {
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), String> {
         let map = lock(&self.conns);
         let conn = map.get(id).ok_or("Sesión no conectada")?;
+        // La primera línea que el usuario envía desarma el autocompletado (el del propio
+        // autocompletado va por `Outgoing::Secret`, no por aquí). Se avisa antes de enviar.
+        if data.iter().any(|b| matches!(b, b'\r' | b'\n')) {
+            lock(&conn.sink.mirror).user_enter();
+        }
         conn.input
             .send(Outgoing::Data(data.to_vec()))
             .map_err(|_| "La conexión se cerró".to_string())
@@ -2180,6 +2195,33 @@ mod tests {
         // La del vecino sigue llegando solo por type_hop_secret, a pedido.
         assert_eq!(m.type_hop_secret(&tx, "V3cino", "\r", "192.0.2.11", "ssh -l noc 192.0.2.11", "t|0"), Ok(()));
         assert!(matches!(rx.try_recv(), Ok(super::Outgoing::Secret(s)) if &s[..] == b"V3cino\r"));
+    }
+
+    /// SSH con llave y contraseña guardada: la primera línea que el usuario envía (un `ssh` manual a
+    /// otro equipo) desarma el autocompletado; lo que el propio autocompletado envía no cuenta.
+    #[test]
+    fn first_user_enter_disarms_but_own_secret_does_not() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let armed = |m: &mut super::Mirror, user: Option<&str>| {
+            let af = crate::autofill::AutoFill::new(zeroize::Zeroizing::new("S3cret".into()), user.map(Into::into), "\r", std::time::Instant::now());
+            m.autofill = Some((af, tx.clone()));
+        };
+        let mut m = super::Mirror::default();
+        armed(&mut m, None);
+        m.push(b"Welcome to srv01\r\n");
+        m.user_enter();
+        assert!(m.autofill.is_none());
+        m.push(b"ssh other\r\nnoc@other's password: ");
+        assert!(rx.try_recv().is_err());
+        // Telnet con usuario guardado: el autocompletado responde usuario y contraseña en secuencia
+        // (por Secret, sin pasar por user_enter) y sigue armado entre ambos.
+        let mut m = super::Mirror::default();
+        armed(&mut m, Some("noc"));
+        m.push(b"Username: ");
+        assert!(matches!(rx.try_recv(), Ok(super::Outgoing::Secret(s)) if &s[..] == b"noc\r"));
+        assert!(m.autofill.is_some());
+        m.push(b"\r\nPassword: ");
+        assert!(matches!(rx.try_recv(), Ok(super::Outgoing::Secret(s)) if &s[..] == b"S3cret\r"));
     }
 
     /// Contraseña de un salto: solo tras el eco del comando de salto, una vez por paso y sin llegar

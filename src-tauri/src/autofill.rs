@@ -25,6 +25,9 @@ const ABORT: [&str; 8] = [
 /// Prompts de contraseña que no son el login: cambio de clave vencida, confirmaciones.
 const NOT_LOGIN: [&str; 6] = ["new ", "old ", "current", "retype", "again", "confirm"];
 
+/// Pedidos de usuario (en minúsculas) que el autocompletado responde o que el operador puede teclear.
+const LOGIN_PROMPTS: [&str; 4] = ["username:", "login:", "user name:", "usuario:"];
+
 const HOSTKEY: &str = "are you sure you want to continue connecting";
 
 pub struct AutoFill {
@@ -65,6 +68,30 @@ impl AutoFill {
         self.stop();
     }
 
+    /// El usuario envió Enter hacia la conexión (no cuenta lo que escribe el propio autocompletado).
+    /// Lo que escribe el operador no lo ve este módulo, así que ante cualquier duda se desarma:
+    /// sin llave SSH la primera línea tecleada puede ser un `ssh` a otro equipo cuyo "Password:" no
+    /// debe recibir la contraseña guardada. Se mantiene armado solo en dos casos de login a mano:
+    /// 1) la línea pendiente es un pedido de usuario con lo tecleado ("Username: noc", "srv login: noc"):
+    ///    el usuario se tecleó a mano y se espera la contraseña autocompletada; el usuario ya cuenta
+    ///    como enviado (si vuelve a pedirlo, el login falló y se detiene);
+    /// 2) hay usuario guardado (Telnet/Raw/Serial), aún no se envió y la línea pendiente está vacía:
+    ///    un Enter para despertar la consola, antes de que aparezca "Username:".
+    pub fn user_enter(&mut self) {
+        if self.done {
+            return;
+        }
+        let line = self.line.trim();
+        if login_prompt_with_typed(line) && !self.user_sent {
+            self.user_sent = true;
+            return;
+        }
+        if line.is_empty() && self.user.is_some() && !self.user_sent {
+            return;
+        }
+        self.stop();
+    }
+
     fn stop(&mut self) {
         self.done = true;
         self.line.clear();
@@ -81,7 +108,9 @@ impl AutoFill {
         }
         for c in text.chars() {
             if c == '\n' {
-                if aborts(&self.line) {
+                // Línea completa: un abort o el prompt de comandos (también "prompt + Password:" en
+                // el mismo bloque) desarma antes de mirar el pedido que viene detrás.
+                if aborts(&self.line) || is_cli_prompt(&self.line) {
                     self.stop();
                     return None;
                 }
@@ -198,13 +227,27 @@ fn names_host(line: &str, host: &str) -> bool {
         || (line.starts_with('(') && line.ends_with("password:") && line.contains(&format!("@{host}) ")))
 }
 
+/// La línea pendiente es un pedido de usuario seguido de lo tecleado a mano ("username: noc",
+/// "srv01 login: noc"): a lo sumo una palabra antes del pedido y una después, sin espacios.
+fn login_prompt_with_typed(line: &str) -> bool {
+    LOGIN_PROMPTS.iter().any(|p| {
+        line.find(p).is_some_and(|i| {
+            let (before, after) = (line[..i].trim(), line[i + p.len()..].trim());
+            !before.contains(char::is_whitespace) && !after.contains(char::is_whitespace) && after.len() <= 64
+        })
+    })
+}
+
 /// Prompt de comandos de un equipo o shell ya logueado ("router#", "sw01>", "<HUAWEI>", "[~SW]",
-/// "noc@srv:~$"): una sola palabra, que empieza con letra o dígito (o "<" / "[") y termina en el
-/// carácter de prompt. Conservador: un banner con espacios, "####" o un pedido que termina en ":" no cuenta.
+/// "noc@srv:~$", "[noc@srv01 ~]$", "FGT60E (root) #", "[admin@MikroTik] >"). Conservador: un banner,
+/// "####", un pedido que termina en ":" o una pregunta que termina en "?" no cuentan.
 fn is_cli_prompt(line: &str) -> bool {
     let l = line.trim();
-    if l.len() < 2 || l.len() > 80 || l.contains(char::is_whitespace) || l.ends_with(':') {
+    if l.len() < 2 || l.len() > 80 || l.ends_with(':') || l.ends_with('?') {
         return false;
+    }
+    if l.contains(char::is_whitespace) {
+        return spaced_prompt(l);
     }
     let first = l.chars().next().unwrap_or(' ');
     let last = l.chars().last().unwrap_or(' ');
@@ -214,6 +257,34 @@ fn is_cli_prompt(line: &str) -> bool {
         c if c.is_alphanumeric() => matches!(last, '#' | '>' | '$') && l[..l.len() - 1].chars().any(char::is_alphanumeric),
         _ => false,
     }
+}
+
+/// Palabra de usuario, host o ruta corta: letras, dígitos y `- _ .`.
+fn word(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Prompts con espacios, de 2 o 3 partes:
+/// - FortiOS: "HOST #", "HOST $", "HOST (vdom) #".
+/// - Con usuario@host: "[noc@srv01 ~]$", "noc@srv01 ~ %" (bash/zsh), "[admin@MikroTik] >",
+///   "[admin@mt] /ip/address>" (MikroTik) y "user@host >" / "user@host #".
+fn spaced_prompt(l: &str) -> bool {
+    let t: Vec<&str> = l.split_whitespace().collect();
+    if !(2..=3).contains(&t.len()) {
+        return false;
+    }
+    let last = t[t.len() - 1];
+    let paren = |s: &str| s.len() > 2 && s.starts_with('(') && s.ends_with(')') && !s.contains('@');
+    if matches!(last, "#" | "$") && word(t[0]) && (t.len() == 2 || paren(t[1])) {
+        return true;
+    }
+    let head = t[0].trim_start_matches('[').trim_end_matches(']');
+    let Some((user, host)) = head.split_once('@') else { return false };
+    if !word(user) || !word(host) || !matches!(last.chars().last(), Some('#' | '$' | '%' | '>')) {
+        return false;
+    }
+    // Parte del medio (ruta o directorio): sin "@" ni ":" final.
+    t.len() == 2 || !(t[1].contains('@') || t[1].ends_with(':'))
 }
 
 fn aborts(line: &str) -> bool {
@@ -383,5 +454,137 @@ mod tests {
         let (mut a, t) = af(None);
         assert_eq!(sent(a.feed("Username: ", t)), None);
         assert!(!a.done());
+    }
+
+    #[test]
+    fn spaced_prompts_are_recognized() {
+        for p in [
+            "[noc@srv01 ~]$",
+            "[noc@srv01 ~]# ",
+            "noc@srv01 ~ %",
+            "noc@srv01:~$ ",
+            "FGT60E #",
+            "FGT60E (root) # ",
+            "fw-edge01 (vdom1) #",
+            "FGT60E $",
+            "[admin@MikroTik] > ",
+            "[admin@mt] /ip/address> ",
+            "user@junos> ",
+            "user@junos# ",
+            "user@host >",
+            "<HUAWEI-core>",
+            "[~HUAWEI-core]",
+            "[HUAWEI-GigabitEthernet0/0/1]",
+            "core-sw01#",
+            "core-sw01(config)#",
+            "core-sw01(config-if)#",
+        ] {
+            assert!(is_cli_prompt(p), "{p:?}");
+        }
+        // Pedidos de login, preguntas y texto que no es un prompt.
+        for p in [
+            "Password:",
+            "Username:",
+            "login:",
+            "srv01 login:",
+            "noc@10.0.0.1's password:",
+            "(noc@10.0.0.1) Password:",
+            "[sudo] password for noc:",
+            "Enter passphrase for key '/home/u/.ssh/id_ed25519':",
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])?",
+            "Continue (yes/no)?",
+            "Last login: Mon Jan 1 from 10.0.0.2",
+            "Authorized access only >",
+            "Press any key to continue #",
+            "ping noc@srv01 now >",
+            "##########",
+            "-->",
+            "",
+        ] {
+            assert!(!is_cli_prompt(p), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn spaced_prompt_disarms_before_a_neighbor_asks() {
+        for prompt in ["[noc@srv01 ~]$ ", "FGT60E # ", "FGT60E (root) # ", "[admin@MikroTik] > ", "user@junos> "] {
+            let (mut a, t) = af(None);
+            assert_eq!(sent(a.feed(&format!("Last login: Mon\r\n{prompt}"), t)), None, "{prompt:?}");
+            assert!(a.done(), "{prompt:?}");
+            assert_eq!(sent(a.feed("ssh -l noc 192.0.2.11\r\nPassword: ", t)), None, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_and_password_in_the_same_block_is_not_answered() {
+        for block in [
+            "Last login: Mon\r\n[noc@srv01 ~]$ \r\nPassword: ",
+            "FGT60E # \nPassword: ",
+            "core-sw01#\r\nPassword: ",
+            "[admin@MikroTik] > \nPassword: ",
+        ] {
+            let (mut a, t) = af(None);
+            assert_eq!(sent(a.feed(block, t)), None, "{block:?}");
+            assert!(a.done(), "{block:?}");
+        }
+        // Sin prompt antes, el mismo bloque con banner sí responde.
+        let (mut a, t) = af(None);
+        assert_eq!(sent(a.feed("Authorized access only\r\nPassword: ", t)).as_deref(), Some("S3cret\r"));
+    }
+
+    #[test]
+    fn first_user_line_disarms() {
+        // Entró con llave SSH (sin prompt reconocible) y el usuario teclea un ssh a otro equipo.
+        let (mut a, t) = af(None);
+        assert_eq!(sent(a.feed("Welcome to srv01\r\n", t)), None);
+        a.user_enter();
+        assert!(a.done());
+        assert_eq!(sent(a.feed("ssh other\r\nnoc@other's password: ", t)), None);
+        // Texto tecleado fuera de un pedido de usuario, aun con usuario guardado: desarma.
+        let (mut a, t) = af(Some("noc"));
+        a.feed("banner\nuser", t);
+        a.user_enter();
+        assert!(a.done());
+        // Un Enter con el pedido de contraseña a la vista (carrera con el autocompletado): no escribe.
+        let (mut a, t) = af(Some("noc"));
+        a.feed("Username: noc\n", t);
+        a.feed("Pass", t);
+        a.user_enter();
+        assert!(a.done());
+        assert_eq!(sent(a.feed("word: ", t)), None);
+    }
+
+    #[test]
+    fn user_typed_login_keeps_the_documented_password_fill() {
+        // Telnet sin usuario guardado: el operador teclea el usuario y espera la contraseña.
+        for prompt in ["Username: ", "srv01 login: ", "login: "] {
+            let (mut a, t) = af(None);
+            a.feed(prompt, t);
+            a.feed("noc", t); // eco
+            a.user_enter();
+            assert!(!a.done(), "{prompt:?}");
+            assert_eq!(sent(a.feed("\r\nPassword: ", t)).as_deref(), Some("S3cret\r"), "{prompt:?}");
+        }
+        // Con usuario guardado: tecleó el usuario a mano; si vuelve a pedirlo, el login falló.
+        let (mut a, t) = af(Some("noc"));
+        a.feed("Username: noc", t);
+        a.user_enter();
+        assert_eq!(sent(a.feed("\r\nUsername: ", t)), None);
+        assert!(a.done());
+        // Enter para despertar la consola serial antes del pedido de usuario: sigue armado.
+        let (mut a, t) = af(Some("noc"));
+        a.user_enter();
+        assert!(!a.done());
+        assert_eq!(sent(a.feed("\r\nUsername: ", t)).as_deref(), Some("noc\r"));
+        assert_eq!(sent(a.feed("noc\r\nPassword: ", t)).as_deref(), Some("S3cret\r"));
+        // Sin usuario guardado, el mismo Enter en vacío desarma (SSH).
+        let (mut a, _) = af(None);
+        a.user_enter();
+        assert!(a.done());
+        // Una línea con espacios que no es un pedido de usuario ("Last login: ...") desarma.
+        let (mut a, t) = af(Some("noc"));
+        a.feed("Last login: Mon Jan 1", t);
+        a.user_enter();
+        assert!(a.done());
     }
 }
