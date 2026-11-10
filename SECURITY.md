@@ -28,6 +28,24 @@ Plazos de referencia: confirmación de recepción en 5 días hábiles y una eval
 
 Si sospechas que la clave de firma o un Release fueron comprometidos, repórtalo de inmediato por el canal privado indicado arriba.
 
+## Modo portable cifrado (opcional)
+
+En la edición portable se puede cifrar la carpeta de datos con la contraseña maestra (Ajustes › Credenciales). Viene apagado. Detalle técnico en [docs/TECNICO.md](docs/TECNICO.md#modo-portable-cifrado).
+
+**Qué protege.** Un pendrive perdido o copiado: sesiones, ajustes, topología, notas, historial, respaldos de configuración (con sus huellas de secretos), logs de sesión, auditoría de agentes y todas sus copias de respaldo quedan cifrados (XChaCha20-Poly1305, llave de datos aleatoria envuelta con Argon2id). Un archivo alterado, cortado, reordenado o mezclado con otro no se acepta. Sin la contraseña la app no muestra nada.
+
+**Qué no protege.**
+
+- **Sin recuperación.** Si olvidas la contraseña maestra, los datos no se pueden abrir: ni la app ni el mantenedor pueden recuperarlos. Tampoco sin `datakey.ntk`.
+- **Ataque fuera de línea.** Quien tenga una copia de la carpeta puede probar contraseñas sin límite de intentos; cada intento cuesta un Argon2id de 64 MiB (igual que la bóveda, que usa la misma contraseña). Usa una frase larga y única.
+- **Equipo comprometido mientras está desbloqueada.** Con la app abierta y desbloqueada, un programa malicioso con tus permisos puede leer la memoria del proceso, capturar el teclado o la pantalla. El cifrado protege los datos en reposo, no un equipo comprometido.
+- **Memoria y swap.** Las llaves se borran de memoria al bloquear y al salir, pero el contenido ya descifrado (sesiones, ajustes, salida de las terminales) sigue en la memoria de la app y de la interfaz mientras corre, y el sistema operativo puede llevar memoria al archivo de intercambio o de hibernación del equipo anfitrión. Bloquear oculta la app y el backend deja de leer y escribir datos, pero no borra lo que ya está cargado.
+- **Logs en curso al bloquear.** Por defecto siguen grabándose cifrados con la llave de su propio archivo (que queda en memoria mientras graban, nunca la de la carpeta). El ajuste «Detener las grabaciones de log al bloquear» los detiene.
+- **Borrado en memoria flash.** Al activar el modo, cada original en claro se borra después de verificar su copia cifrada, pero en un pendrive, tarjeta o SSD el borrado no garantiza la eliminación física (nivelación de desgaste, sectores reasignados). Si la carpeta estuvo en claro, puede quedar rastro en el dispositivo: para datos sensibles, activa el modo en un pendrive nuevo o usa además cifrado del dispositivo.
+- **Lo que queda fuera.** La carpeta compartida (TFTP, HTTP y FTP), los scripts, los plugins, los packs de comandos propios y los mensajes de Syslog guardados no se cifran. Los nombres, tamaños y fechas de los archivos siguen visibles (por ejemplo, el nombre de un equipo en la carpeta de respaldos o de la sesión en el nombre de un log). Un archivo exportado descifrado queda en claro donde lo guardes.
+- **Versiones anteriores.** No abren la carpeta cifrada: muestran una sola sesión que lo explica y no modifican los datos cifrados, pero lo que creen (ajustes, notas o logs nuevos) queda en claro. La versión actual lo detecta, no lo lee y ofrece cifrarlo.
+- **Dos instancias.** Abrir la misma carpeta desde dos copias de la app a la vez no está soportado (tampoco en claro).
+
 ## Limitaciones conocidas
 
 Estos puntos son conocidos y no se consideran vulnerabilidades. Evalúalos antes de distribuir la app en tu organización.
