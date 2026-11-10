@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 7,
+  "topology": {
+    "nodes": [{ "id": "n1", "name": "core-sw", "x": 1, "y": 2 }],
+    "links": []
+  },
+  "topoSnapshots": [],
+  "topoCapas": [{ "id": "l1", "nombre": "WAN", "nodos": ["n1"] }]
+}

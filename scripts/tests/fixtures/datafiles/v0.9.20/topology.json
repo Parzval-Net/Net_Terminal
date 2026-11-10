@@ -1,0 +1,24 @@
+{
+  "topology": {
+    "nodes": [
+      { "id": "n1", "name": "core-sw", "x": 100, "y": 80 },
+      { "id": "n2", "name": "edge-rt", "x": 300, "y": 80 },
+      { "id": "n3", "name": "dist-sw", "x": 200, "y": 200 }
+    ],
+    "links": [
+      { "a": "n1", "b": "n2", "aPort": "Gi0/1", "bPort": "Gi0/0", "proto": "lldp" },
+      { "a": "n1", "b": "n3", "aPort": "Gi0/2", "bPort": "Gi1/0/1", "proto": "cdp" }
+    ]
+  },
+  "topoSnapshots": [
+    {
+      "id": "s1",
+      "name": "Auditoría trimestral",
+      "ts": 1765000000000,
+      "topo": {
+        "nodes": [{ "id": "n1", "name": "core-sw", "x": 100, "y": 80 }],
+        "links": []
+      }
+    }
+  ]
+}

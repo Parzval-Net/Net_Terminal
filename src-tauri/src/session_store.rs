@@ -11,6 +11,9 @@ pub struct SessionStore {
     /// sessions.json existe pero no se pudo leer (permisos, error de disco): no se escribe
     /// encima para no reemplazar las sesiones del usuario por las de ejemplo.
     load_error: Option<String>,
+    /// Qué pasó al abrir sessions.json (restaurado desde el respaldo, entradas descartadas); se
+    /// entrega una sola vez a la interfaz con `take_notice`.
+    notice: Mutex<Option<crate::datafiles::FileNotice>>,
 }
 
 /// Carpeta "visible" donde vive la app, para el modo portable:
@@ -87,6 +90,7 @@ impl SessionStore {
         // Al abrir solo se escribe si hace falta (archivo nuevo o entradas descartadas): un
         // archivo sano queda tal cual, también los campos que agregue una versión más nueva.
         let mut rewrite = false;
+        let mut notice = crate::datafiles::FileNotice::default();
         let sessions = match fs::read(&file_path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 rewrite = true;
@@ -118,9 +122,36 @@ impl SessionStore {
                 if lost {
                     // Respaldo del archivo original antes de reescribirlo.
                     backup_corrupt(&file_path);
+                    notice.corrupt = parsed.is_err();
+                    if let Ok(items) = &parsed {
+                        notice.dropped = items
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, v)| serde_json::from_value::<Session>((*v).clone()).is_err())
+                            .take(20)
+                            .map(|(i, _)| format!("sesión {}", i + 1))
+                            .collect();
+                    }
                 }
                 if parsed.is_err() {
-                    Self::default_sessions()
+                    // Ni siquiera es un arreglo JSON: se intenta el último respaldo válido antes de
+                    // caer en las sesiones de ejemplo.
+                    match crate::datafiles::first_valid_backup(&file_path, &crate::datafiles::valid_sessions) {
+                        Some((name, bytes)) => {
+                            let restored: Vec<Session> = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter_map(|v| serde_json::from_value(v).ok())
+                                .collect();
+                            if restored.is_empty() {
+                                Self::default_sessions()
+                            } else {
+                                notice.restored_from = Some(name);
+                                restored
+                            }
+                        }
+                        None => Self::default_sessions(),
+                    }
                 } else {
                     valid
                 }
@@ -131,6 +162,7 @@ impl SessionStore {
             file_path,
             sessions: Mutex::new(sessions),
             load_error,
+            notice: Mutex::new((notice.corrupt || notice.restored_from.is_some() || !notice.dropped.is_empty()).then_some(notice)),
         };
         if rewrite {
             let _ = store.persist(&store.sessions.lock().unwrap());
@@ -170,6 +202,11 @@ impl SessionStore {
             save_password: None,
             created_at: Utc::now().to_rfc3339(),
         }]
+    }
+
+    /// Aviso de la apertura de sessions.json (una sola vez); None si no hubo nada que informar.
+    pub fn take_notice(&self) -> Option<crate::datafiles::FileNotice> {
+        self.notice.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub fn list(&self) -> Vec<Session> {
@@ -250,16 +287,55 @@ impl SessionStore {
 
 
 
-/// Copia un archivo de datos que no se pudo leer completo a `<nombre>.corrupt-<unix>.json`.
-pub fn backup_corrupt(path: &Path) {
+/// Destino de la copia de un archivo ilegible: `<nombre>.corrupt-<unix>.json`.
+fn corrupt_dest(path: &Path) -> PathBuf {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("datos");
-    let dest = path.with_file_name(format!("{stem}.corrupt-{ts}.json"));
+    path.with_file_name(format!("{stem}.corrupt-{ts}.json"))
+}
+
+/// Copia un archivo de datos que no se pudo leer completo a `<nombre>.corrupt-<unix>.json`.
+/// Se conservan las últimas `KEEP_CORRUPT` copias por archivo y no se copia lo que pasa del
+/// tope de tamaño (ese se aparta con `set_aside`).
+pub fn backup_corrupt(path: &Path) {
+    if fs::metadata(path).is_ok_and(|m| m.len() > crate::datafiles::MAX_TOPOLOGY_BYTES as u64) {
+        return set_aside(path);
+    }
+    let dest = corrupt_dest(path);
     if fs::copy(path, &dest).is_ok() {
         restrict(&dest);
+    }
+    prune_corrupt(path);
+}
+
+/// Aparta (renombra, sin copiar) un archivo demasiado grande para leerlo: el original no se pierde
+/// y la app arranca con valores por defecto.
+pub fn set_aside(path: &Path) {
+    if fs::rename(path, corrupt_dest(path)).is_ok() {
+        prune_corrupt(path);
+    }
+}
+
+/// Borra las copias `<nombre>.corrupt-<unix>.json` más antiguas por encima de `KEEP_CORRUPT`.
+fn prune_corrupt(path: &Path) {
+    let Some(dir) = path.parent() else { return };
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("datos");
+    let prefix = format!("{stem}.corrupt-");
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut copies: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let ts = name.strip_prefix(&prefix)?.strip_suffix(".json")?.parse::<u64>().ok()?;
+            Some((ts, e.path()))
+        })
+        .collect();
+    copies.sort_by_key(|c| std::cmp::Reverse(c.0));
+    for (_, old) in copies.into_iter().skip(crate::datafiles::KEEP_CORRUPT) {
+        let _ = fs::remove_file(old);
     }
 }
 
@@ -443,6 +519,52 @@ mod tests {
         assert!(store.save(s).is_err());
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// sessions.json ilegible con respaldo: se restauran las sesiones del último estado válido y
+    /// se avisa una sola vez; sin respaldo se parte de la sesión local, como antes.
+    #[test]
+    fn unreadable_file_is_restored_from_backup() {
+        const SESSIONS: &str = include_str!("../../scripts/tests/fixtures/datafiles/v0.9.11/sessions.json");
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sessions.json");
+        std::fs::write(&file, SESSIONS).unwrap();
+        let r = crate::datafiles::rotate_backup(&file, &crate::datafiles::valid_sessions, std::time::SystemTime::now(), std::time::Duration::from_secs(1));
+        assert_eq!(r, crate::datafiles::Rotation::Rotated);
+        // Lo que se escribió es JSON de otra cosa (una edición a mano, un disco con fallas).
+        std::fs::write(&file, "{ esto no es una lista").unwrap();
+        let store = super::SessionStore::new(&dir);
+        let names: Vec<String> = store.list().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["Terminal local", "core-sw"]);
+        let n = store.take_notice().expect("aviso de restauración");
+        assert_eq!(n.restored_from.as_deref(), Some("sessions.json.bak"));
+        assert!(store.take_notice().is_none(), "una sola vez");
+        assert_eq!(corrupt_backups(&dir), 1);
+        // El archivo quedó reescrito con las sesiones restauradas.
+        assert_eq!(super::SessionStore::new(&dir).list().len(), 2);
+
+        // Sin respaldo válido: sesión de ejemplo, y el aviso dice que estaba dañado.
+        let d2 = temp_dir();
+        std::fs::create_dir_all(&d2).unwrap();
+        std::fs::write(d2.join("sessions.json"), "{ roto").unwrap();
+        std::fs::write(d2.join("sessions.json.bak"), "también roto").unwrap();
+        let s2 = super::SessionStore::new(&d2);
+        assert_eq!(s2.list().len(), 1);
+        let n2 = s2.take_notice().unwrap();
+        assert!(n2.corrupt && n2.restored_from.is_none());
+        // Entradas inválidas sueltas: se descartan solo esas y se informan.
+        let d3 = temp_dir();
+        std::fs::create_dir_all(&d3).unwrap();
+        std::fs::write(d3.join("sessions.json"), r#"[{"id":"a","name":"ok","type":"ssh"},{"name":"x","type":"nada"}]"#).unwrap();
+        let s3 = super::SessionStore::new(&d3);
+        assert_eq!(s3.list().len(), 1);
+        assert_eq!(s3.take_notice().unwrap().dropped, vec!["sesión 2"]);
+        // Un archivo sano no genera aviso.
+        assert!(super::SessionStore::new(&d3).take_notice().is_none());
+        for d in [dir, d2, d3] {
+            std::fs::remove_dir_all(&d).unwrap();
+        }
     }
 
     #[test]
