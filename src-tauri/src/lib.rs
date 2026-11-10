@@ -3,6 +3,7 @@ mod backups;
 mod bundle;
 mod cmdpacks;
 mod connection;
+mod datacrypt;
 mod datafiles;
 mod credentials;
 mod expect;
