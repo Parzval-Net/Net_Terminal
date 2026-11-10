@@ -83,6 +83,7 @@ Las capturas usan datos ficticios.
 - **CLI Lab**: envía procedimientos línea a línea a una o varias sesiones y se detiene ante errores.
 - **Scripts Python, plugins y agentes de IA (MCP)**, de solo lectura por defecto.
 - **Bóveda cifrada** de credenciales, con bloqueo automático, y **ciclo de vida del equipo** (opcional).
+- **Carpeta portable cifrada** (opcional): sesiones, ajustes, notas, historial, topología, respaldos y logs cifrados con tu contraseña maestra.
 - **Archivo cifrado (.ntx)** para respaldar o llevar tus sesiones y ajustes a otro equipo; las contraseñas guardadas solo se incluyen si lo eliges.
 
 ---
