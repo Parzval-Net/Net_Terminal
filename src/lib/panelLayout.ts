@@ -75,3 +75,21 @@ export function panelLayout(i: PanelLayoutIn): PanelLayout {
   const termWidth = panelOpen && !panelOverlay ? free - sb - panelWidth : free - sb;
   return { sidebarAutoHidden, sidebarHiddenBy, sidebarShown, panelOverlay, panelWidth, termWidth };
 }
+
+/** Límites del ancho de la barra de sesiones al arrastrar su borde. */
+export const SIDEBAR_MIN = 180;
+export const SIDEBAR_MAX = 480;
+
+/**
+ * Ancho máximo al arrastrar el borde de la barra de sesiones. Con un panel derecho acoplado, la barra
+ * llega hasta donde el panel todavía cabe con su mínimo: más allá la app la ocultaría al soltar.
+ */
+export function sidebarDragMax(i: PanelLayoutIn): number {
+  const l = panelLayout(i);
+  if (!l.sidebarShown || i.focusMode || !i.panelOpen) return SIDEBAR_MAX;
+  const free = i.rootW - ACTIVITY_W - i.vtabsW;
+  return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.max(i.sidebarW, free - i.minTerm - PANEL_MIN)));
+}
+
+/** Ancho máximo con que se dibujaría el panel derecho (el reparto lo limita aunque el usuario pida más). */
+export const panelDragMax = (i: PanelLayoutIn): number => panelLayout({ ...i, panelW: Number.MAX_SAFE_INTEGER }).panelWidth;

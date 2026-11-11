@@ -63,6 +63,9 @@ interface Props {
   /** Ancho en px de la barra (lo arrastra el usuario por su borde derecho). */
   width: number;
   onResize: (w: number) => void;
+  /** Ancho máximo del arrastre y vista previa de lo que depende del ancho (panel derecho, barra flotante). */
+  resizeMax?: () => number;
+  onResizePreview?: (w: number | null) => void;
   /** Orden manual por carpeta: carpetas y sesiones intercaladas (p. ej. "Shell local" arriba). */
   order: SidebarOrder;
   onSetOrder: (order: SidebarOrder) => void;
@@ -811,7 +814,7 @@ export const Sidebar = memo(function Sidebar(p: Props) {
       </nav>
 
       {menu && <ContextMenu menu={menu} onClose={closeMenu} />}
-      <PanelResize side="right" width={p.width} onResize={p.onResize} />
+      <PanelResize side="right" width={p.width} onResize={p.onResize} max={p.resizeMax} preview={p.onResizePreview} />
     </aside>
   );
 });

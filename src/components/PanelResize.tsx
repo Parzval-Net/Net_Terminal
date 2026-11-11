@@ -6,29 +6,37 @@ export function PanelResize({
   width,
   onResize,
   side = "left",
+  max,
+  preview,
 }: {
   width: number;
   onResize: (w: number) => void;
   side?: "left" | "right";
+  /** Ancho máximo según el reparto actual de la ventana (se consulta al empezar el arrastre). */
+  max?: () => number;
+  /** Cada cuadro del arrastre con el ancho nuevo, y `null` al soltar: ajusta lo que depende de este ancho. */
+  preview?: (w: number | null) => void;
 }) {
   const startDrag = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     // Mientras se arrastra, el ancho se aplica directo al panel (una vez por cuadro) y recién al soltar
-    // se avisa a la app: así cada movimiento del mouse no vuelve a dibujar toda la interfaz.
+    // se avisa a la app: así cada movimiento del mouse no vuelve a dibujar toda la interfaz. Los límites
+    // son los mismos que aplicará la app, para que al soltar el panel quede donde se ve.
     const panel = e.currentTarget.parentElement;
     const min = side === "left" ? 260 : 180;
-    const max = side === "left" ? window.innerWidth * 0.7 : 480;
+    const limit = Math.max(width, max?.() ?? (side === "left" ? window.innerWidth * 0.7 : 480));
     let next = width;
     let frame = 0;
     // Panel a la derecha: arrastrar hacia la izquierda lo achica. Barra a la izquierda: al revés.
     const move = (ev: MouseEvent) => {
       const w = side === "left" ? width + (startX - ev.clientX) : width + (ev.clientX - startX);
-      next = Math.max(min, Math.min(w, max));
+      next = Math.round(Math.max(min, Math.min(w, limit)));
       if (!frame)
         frame = requestAnimationFrame(() => {
           frame = 0;
           if (panel) panel.style.width = `${next}px`;
+          preview?.(next);
         });
     };
     const up = () => {
@@ -36,8 +44,9 @@ export function PanelResize({
       window.removeEventListener("mouseup", up);
       cancelAnimationFrame(frame);
       document.body.style.cursor = "";
-      // La app aplica sus propios límites; si el ancho final no cambia, se repone el que tenía.
+      // Se repone el ancho que conoce React (si el final no cambia, React no lo volvería a escribir).
       if (panel) panel.style.width = `${width}px`;
+      preview?.(null);
       if (next !== width) onResize(next);
     };
     document.body.style.cursor = "col-resize";
