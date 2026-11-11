@@ -46,6 +46,12 @@ export function allFolders(sessions: Session[], extra: string[]): string[] {
   return [...set].sort((a, b) => a.localeCompare(b));
 }
 
+/**
+ * Orden natural ("sw2" antes que "sw10"). Un solo comparador: `localeCompare` con opciones crea uno por
+ * llamada, y con miles de sesiones el árbol tardaba decenas de ms en cada tecla del filtro.
+ */
+const NATURAL = new Intl.Collator(undefined, { numeric: true });
+
 export function buildTree(sessions: Session[], extra: string[]): FolderNode {
   const root: FolderNode = { name: "", path: "", children: [], sessions: [], total: 0 };
   const index = new Map<string, FolderNode>([["", root]]);
@@ -64,8 +70,8 @@ export function buildTree(sessions: Session[], extra: string[]): FolderNode {
   for (const s of sessions) ensure(normPath(s.folder)).sessions.push(s);
 
   const finish = (n: FolderNode): number => {
-    n.children.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    n.sessions.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    n.children.sort((a, b) => NATURAL.compare(a.name, b.name));
+    n.sessions.sort((a, b) => NATURAL.compare(a.name, b.name));
     n.total = n.sessions.length + n.children.reduce((acc, c) => acc + finish(c), 0);
     return n.total;
   };
