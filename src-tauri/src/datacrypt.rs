@@ -485,6 +485,12 @@ struct AppendState {
     /// `FLUSH_EVERY` esperando (un hilo lo revisa), al bloquear y al cerrar.
     pending: Vec<u8>,
     since: Option<Instant>,
+    /// Escritores vivos (`Appender`). El cierre lo decide esta cuenta, no la vida del `Arc`: el hilo de
+    /// vaciado toma referencias fuertes mientras vacía y no debe demorar el cierre ni hacer reutilizable
+    /// un estado cuyo último escritor ya se soltó.
+    writers: usize,
+    /// Ya se escribió el bloque de cierre: nada más se escribe y `open_append` no lo reutiliza.
+    closed: bool,
 }
 
 /// Tope del búfer de un log cifrado antes de escribir un bloque.
@@ -520,9 +526,13 @@ impl AppendState {
     }
 }
 
-impl Drop for AppendState {
-    /// Al soltar el último escritor del archivo se escribe lo pendiente y el bloque de cierre.
-    fn drop(&mut self) {
+impl AppendState {
+    /// Escribe lo pendiente y el bloque de cierre (una sola vez).
+    fn close(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
         let _ = self.flush_pending();
         if self.push(&[], true).is_ok() {
             let _ = self.file.sync_data();
@@ -530,10 +540,34 @@ impl Drop for AppendState {
     }
 }
 
+impl Drop for AppendState {
+    /// Red de seguridad: normalmente ya lo cerró el último `Appender`.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// Escritor en modo anexar de un archivo cifrado. Dos escritores del mismo archivo (dos pestañas
-/// que anexan al mismo log) comparten el estado: los bloques quedan en orden y numerados.
-#[derive(Clone)]
+/// que anexan al mismo log) comparten el estado: los bloques quedan en orden y numerados. Al soltar
+/// el último se cierra el archivo en ese mismo momento (ver `AppendState::writers`).
 pub struct Appender(Arc<Mutex<AppendState>>);
+
+impl Clone for Appender {
+    fn clone(&self) -> Self {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).writers += 1;
+        Appender(self.0.clone())
+    }
+}
+
+impl Drop for Appender {
+    fn drop(&mut self) {
+        let mut st = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        st.writers = st.writers.saturating_sub(1);
+        if st.writers == 0 {
+            st.close();
+        }
+    }
+}
 
 impl Appender {
     /// Escribe ya (un bloque por llamada): auditoría, donde cada evento debe quedar en disco.
@@ -580,6 +614,10 @@ pub fn flush_all(older: Option<std::time::Duration>) {
     let open: Vec<_> = appenders().lock().unwrap_or_else(|e| e.into_inner()).values().filter_map(Weak::upgrade).collect();
     for st in open {
         let mut st = st.lock().unwrap_or_else(|e| e.into_inner());
+        // Un archivo cerrado no recibe nada después de su bloque de cierre.
+        if st.closed {
+            continue;
+        }
         if older.is_none_or(|d| st.since.is_some_and(|s| s.elapsed() >= d)) {
             let _ = st.flush_pending();
         }
@@ -683,8 +721,15 @@ pub fn open_append(phys: &Path, dk: Option<&DataKey>, mode: OpenMode) -> io::Res
     if mode != OpenMode::CreateNew {
         if let Ok(canon) = phys.canonicalize() {
             if let Some(st) = map.get(&canon).and_then(Weak::upgrade) {
-                let had = st.lock().unwrap_or_else(|e| e.into_inner()).counter > 0;
-                return Ok((Appender(st), had));
+                // Solo se comparte un estado con escritores vivos; uno cerrado (que el hilo de vaciado
+                // todavía tiene tomado) no se reutiliza: su archivo pudo renombrarse o reemplazarse.
+                let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
+                if !g.closed {
+                    g.writers += 1;
+                    let had = g.counter > 0;
+                    drop(g);
+                    return Ok((Appender(st), had));
+                }
             }
         }
     }
@@ -712,7 +757,7 @@ pub fn open_append(phys: &Path, dk: Option<&DataKey>, mode: OpenMode) -> io::Res
             file.write_all(&h)?;
             let mut head = [0u8; AAD_HEAD];
             head.copy_from_slice(&h[..AAD_HEAD]);
-            AppendState { file, fk, head, counter: 0, len: HEADER_LEN as u64, pending: Vec::new(), since: None }
+            AppendState { file, fk, head, counter: 0, len: HEADER_LEN as u64, pending: Vec::new(), since: None, writers: 1, closed: false }
         }
     };
     let had = st.counter > 0;
@@ -812,7 +857,7 @@ fn resume_state(mut file: File, flen: u64, dk: &DataKey) -> io::Result<Option<Ap
     };
     file.set_len(cut_at)?;
     file.seek(SeekFrom::Start(cut_at))?;
-    Ok(Some(AppendState { file, fk, head, counter, len: cut_at, pending: Vec::new(), since: None }))
+    Ok(Some(AppendState { file, fk, head, counter, len: cut_at, pending: Vec::new(), since: None, writers: 1, closed: false }))
 }
 
 // ---------- Estado de la carpeta cifrada ----------

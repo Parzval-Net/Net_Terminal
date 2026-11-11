@@ -761,14 +761,20 @@ fn buffered_log_keeps_size_close_to_the_text() {
     let dk = DataKey::generate();
     let p = d.join("eco.log.nte");
     let text: Vec<u8> = b"show interfaces status\r\n".iter().copied().cycle().take(64 * 1024).collect();
+    let t0 = Instant::now();
     {
         let (mut a, _) = open_append(&p, Some(&dk), OpenMode::CreateNew).unwrap();
         for b in &text {
             a.write_all(std::slice::from_ref(b)).unwrap();
         }
     }
-    let size = fs::metadata(&p).unwrap().len();
-    assert!((size as f64) < text.len() as f64 * 1.05, "{size} bytes para {}", text.len());
+    // Bloques posibles: uno cada 16 KiB más los que vacía el hilo (como mucho uno por vuelta, cada
+    // FLUSH_EVERY / 2) mientras se escribe, más el último y el cierre. Sin búfer serían 64 Ki bloques.
+    let rounds = (t0.elapsed().as_millis() / (FLUSH_EVERY / 2).as_millis()) as usize + 1;
+    let blocks = text.len() / BUF_MAX + rounds + 2;
+    let size = fs::metadata(&p).unwrap().len() as usize;
+    assert!(size <= HEADER_LEN + text.len() + blocks * (REC_HEAD + TAG), "{size} bytes para {} ({blocks} bloques posibles)", text.len());
+    assert!(blocks < text.len() / 100, "la cota sigue siendo de bloques agrupados");
     assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), text);
     // Lo pendiente llega al disco por el hilo de vaciado (sin cerrar) y al bloquear (flush_all).
     let q = d.join("vivo.log.nte");
@@ -779,12 +785,46 @@ fn buffered_log_keeps_size_close_to_the_text() {
         let _ = EncReader::new(File::open(q).unwrap(), &dk, false).unwrap().read_to_end(&mut out);
         out
     };
-    std::thread::sleep(FLUSH_EVERY * 3);
+    // El hilo de vaciado lo escribe sin cerrar el archivo (se espera lo necesario, con tope).
+    let t = Instant::now();
+    while read_now(&q) != b"pendiente\n" && t.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(FLUSH_EVERY / 5);
+    }
     assert_eq!(read_now(&q), b"pendiente\n", "vaciado por tiempo");
     a.write_all(b"otro\n").unwrap();
     flush_all(None);
     assert_eq!(read_now(&q), b"pendiente\notro\n", "vaciado al bloquear");
     drop(a);
+    let _ = fs::remove_dir_all(d);
+}
+
+/// Causa de las pruebas inestables: el hilo de vaciado toma una referencia fuerte al estado de cada
+/// escritor mientras vacía. Si el último escritor se suelta en ese momento, el cierre no puede
+/// quedar para después (en otro hilo) ni un nuevo `open_append` del mismo nombre puede reutilizar
+/// ese estado viejo (con su archivo, ya renombrado o reemplazado). Se reproduce sosteniendo la
+/// referencia como lo hace `flush_all`.
+#[test]
+fn close_is_not_delayed_by_a_flush_in_progress() {
+    let d = tmp("cierre");
+    let dk = DataKey::generate();
+    let p = d.join("audit.jsonl.nte");
+    let (a, _) = open_append(&p, Some(&dk), OpenMode::CreateNew).unwrap();
+    a.append_buffered(b"uno\n").unwrap();
+    let canon = p.canonicalize().unwrap();
+    // Lo que hace el hilo de vaciado: una referencia fuerte tomada del mapa.
+    let held = appenders().lock().unwrap().get(&canon).and_then(Weak::upgrade).unwrap();
+    drop(a);
+    assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), b"uno\n", "cerrado al soltar el último escritor");
+    // Rotación (como la auditoría): el archivo se renombra y se vuelve a abrir el mismo nombre.
+    let rotated = d.join("audit.1.jsonl.nte");
+    fs::rename(&p, &rotated).unwrap();
+    let (b, had) = open_append(&p, Some(&dk), OpenMode::Append).unwrap();
+    assert!(!had, "archivo nuevo, no el estado viejo");
+    b.append(b"dos\n").unwrap();
+    drop(b);
+    drop(held);
+    assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), b"dos\n");
+    assert_eq!(decrypt_all(&dk, &fs::read(&rotated).unwrap()).unwrap(), b"uno\n", "el rotado no recibe nada después");
     let _ = fs::remove_dir_all(d);
 }
 
