@@ -26,7 +26,10 @@ function load(key: string): Box {
 export function useDragResize<T extends HTMLElement = HTMLDivElement>(key: string, resizable = true) {
   const ref = useRef<T>(null);
   const [box, setBox] = useState<Box>(() => load(key));
-  const drag = useRef<{ sx: number; sy: number; x: number; y: number } | null>(null);
+  // Arrastre en curso: origen, límites y última posición. La ventana se mueve escribiendo el transform
+  // directo en el elemento, una vez por cuadro; el estado (y el guardado) se actualizan al soltar. Así
+  // mover una ventana con mucho contenido no la vuelve a dibujar en cada movimiento del mouse.
+  const drag = useRef<{ sx: number; sy: number; x: number; y: number; maxX: number; maxY: number; nx: number; ny: number; frame: number } | null>(null);
   const sizeAtDown = useRef<{ w: number; h: number } | null>(null);
 
   useEffect(() => {
@@ -54,8 +57,12 @@ export function useDragResize<T extends HTMLElement = HTMLDivElement>(key: strin
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
-      if (e.button !== 0 || (e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
-      drag.current = { sx: e.clientX, sy: e.clientY, x: box.x, y: box.y };
+      const el = ref.current;
+      if (!el || e.button !== 0 || (e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
+      // Siempre queda parte de la ventana visible para poder recuperarla.
+      const maxX = window.innerWidth / 2 + el.offsetWidth / 2 - 80;
+      const maxY = window.innerHeight / 2 + el.offsetHeight / 2 - 48;
+      drag.current = { sx: e.clientX, sy: e.clientY, x: box.x, y: box.y, maxX, maxY, nx: box.x, ny: box.y, frame: 0 };
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     },
     [box.x, box.y],
@@ -63,18 +70,23 @@ export function useDragResize<T extends HTMLElement = HTMLDivElement>(key: strin
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     const d = drag.current;
-    const el = ref.current;
-    if (!d || !el) return;
-    // Siempre queda parte de la ventana visible para poder recuperarla.
-    const maxX = window.innerWidth / 2 + el.offsetWidth / 2 - 80;
-    const maxY = window.innerHeight / 2 + el.offsetHeight / 2 - 48;
-    const x = Math.max(-maxX, Math.min(maxX, d.x + e.clientX - d.sx));
-    const y = Math.max(-maxY, Math.min(maxY, d.y + e.clientY - d.sy));
-    setBox((b) => ({ ...b, x, y }));
+    if (!d) return;
+    d.nx = Math.max(-d.maxX, Math.min(d.maxX, d.x + e.clientX - d.sx));
+    d.ny = Math.max(-d.maxY, Math.min(d.maxY, d.y + e.clientY - d.sy));
+    if (!d.frame)
+      d.frame = requestAnimationFrame(() => {
+        d.frame = 0;
+        if (drag.current === d && ref.current) ref.current.style.transform = `translate(${d.nx}px, ${d.ny}px)`;
+      });
   }, []);
 
   const onPointerUp = useCallback(() => {
+    const d = drag.current;
     drag.current = null;
+    if (!d) return;
+    cancelAnimationFrame(d.frame);
+    if (ref.current) ref.current.style.transform = `translate(${d.nx}px, ${d.ny}px)`;
+    if (d.nx !== d.x || d.ny !== d.y) setBox((b) => ({ ...b, x: d.nx, y: d.ny }));
   }, []);
 
   const reset = useCallback(() => setBox(EMPTY), []);
@@ -98,6 +110,8 @@ export function useDragResize<T extends HTMLElement = HTMLDivElement>(key: strin
       onPointerDown,
       onPointerMove,
       onPointerUp,
+      onPointerCancel: onPointerUp,
+      onLostPointerCapture: onPointerUp,
       onDoubleClick: reset,
       style: { cursor: "move", touchAction: "none" } as React.CSSProperties,
       title: "Arrastra para mover · doble clic para restaurar",

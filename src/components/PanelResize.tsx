@@ -14,13 +14,31 @@ export function PanelResize({
   const startDrag = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
+    // Mientras se arrastra, el ancho se aplica directo al panel (una vez por cuadro) y recién al soltar
+    // se avisa a la app: así cada movimiento del mouse no vuelve a dibujar toda la interfaz.
+    const panel = e.currentTarget.parentElement;
+    const min = side === "left" ? 260 : 180;
+    const max = side === "left" ? window.innerWidth * 0.7 : 480;
+    let next = width;
+    let frame = 0;
     // Panel a la derecha: arrastrar hacia la izquierda lo achica. Barra a la izquierda: al revés.
-    const move = (ev: MouseEvent) =>
-      onResize(side === "left" ? width + (startX - ev.clientX) : width + (ev.clientX - startX));
+    const move = (ev: MouseEvent) => {
+      const w = side === "left" ? width + (startX - ev.clientX) : width + (ev.clientX - startX);
+      next = Math.max(min, Math.min(w, max));
+      if (!frame)
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          if (panel) panel.style.width = `${next}px`;
+        });
+    };
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
+      cancelAnimationFrame(frame);
       document.body.style.cursor = "";
+      // La app aplica sus propios límites; si el ancho final no cambia, se repone el que tenía.
+      if (panel) panel.style.width = `${width}px`;
+      if (next !== width) onResize(next);
     };
     document.body.style.cursor = "col-resize";
     window.addEventListener("mousemove", move);

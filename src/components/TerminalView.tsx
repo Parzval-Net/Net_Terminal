@@ -181,6 +181,10 @@ const NOOP = () => {};
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
+/** ¿El bloque trae algo que se vea (no solo secuencias de escape, controles o espacios)? */
+export const hasVisibleText = (text: string) =>
+  /\S/.test(text.replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_]|[()][0-9A-Za-z])/g, "").replace(/[\x00-\x1f\x7f]/g, " "));
+
 export const TerminalView = memo(function TerminalView({ id, session, active, visible = active, rect, onFocusPane, settings, theme, onStatus, onLog, logPath, onActivity, onEnableLegacy, onScreenHint, register, onFindState, catalog, readOnly = false, onAutoMark }: Props) {
   const screenHintRef = useRef(onScreenHint);
   screenHintRef.current = onScreenHint;
@@ -460,7 +464,9 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         tail = (tail + text).slice(-400);
         if (tracking()) tracker.output(text, cleanTail);
         hl.push(text);
-        if (!activeRef.current) onActivity(id);
+        // Solo cuenta como salida nueva el texto visible: keepalives, movimientos de cursor o un prompt
+        // que se redibuja no marcan la pestaña.
+        if (!activeRef.current && hasVisibleText(text)) onActivity(id);
       };
       channels = [onData as Channel<unknown>];
       const onExit = (reason: string) => {

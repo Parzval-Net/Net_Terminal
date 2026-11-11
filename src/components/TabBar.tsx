@@ -311,9 +311,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                   ▲
                 </span>
               ) : activity.has(t.id) && !active && (
-                <span aria-hidden className="text-[11px] font-semibold text-accent shrink-0" title="Salida nueva">
-                  ●
-                </span>
+                <span aria-hidden className="w-[3px] h-3.5 rounded-full bg-accent shrink-0" title="Salida nueva sin ver" />
               )}
               <TabEnd status={status} active={active} tabIndex={focusId === t.id ? 0 : -1} title={tabTitle(t)} onClose={() => onClose(t.id)} />
             </div>

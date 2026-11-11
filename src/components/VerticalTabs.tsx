@@ -223,8 +223,8 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                   {t.readOnly && <ReadOnlyMark size={10} className="absolute top-0 left-0.5" />}
                   {marker && (
                     <span
-                      className={`absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full ${marker === "alert" ? "bg-danger" : "bg-accent"}`}
-                      title={marker === "alert" ? "Alerta por palabra clave" : "Salida nueva"}
+                      className={marker === "alert" ? "absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-danger" : "absolute top-1 right-0 w-[3px] h-3 rounded-full bg-accent"}
+                      title={marker === "alert" ? "Alerta por palabra clave" : "Salida nueva sin ver"}
                     />
                   )}
                 </>
@@ -260,9 +260,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                       ▲
                     </span>
                   ) : marker === "activity" ? (
-                    <span aria-hidden className="text-[11px] font-semibold text-accent shrink-0" title="Salida nueva">
-                      ●
-                    </span>
+                    <span aria-hidden className="w-[3px] h-3.5 rounded-full bg-accent shrink-0" title="Salida nueva sin ver" />
                   ) : null}
                   <TabEnd status={status} active={active} tabIndex={focusId === t.id ? 0 : -1} title={title} onClose={() => onClose(t.id)} />
                 </>
