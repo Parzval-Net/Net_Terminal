@@ -197,7 +197,7 @@ fn appender_survives_reopen_crash_and_shares_state() {
             a.append(b"cuatro\n").unwrap();
         }
         assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), b"uno\ndos\ntres\ncuatro\n", "corte de {cut} bytes");
-        assert!(damaged_list().iter().all(|x| !x.contains("a.dañado")), "una cola cortada no es daño");
+        assert!(damaged_list().iter().all(|x| !x.contains("a.danado")), "una cola cortada no es daño");
     }
     // Bloqueada (sin DEK) no se puede abrir un archivo que nadie tiene abierto.
     assert_eq!(open_append(&p, None, OpenMode::Append).err().unwrap().kind(), io::ErrorKind::PermissionDenied);
@@ -206,7 +206,7 @@ fn appender_survives_reopen_crash_and_shares_state() {
 
 /// Un daño que no es la cola cortada de una escritura (un bloque del medio, el último, un largo
 /// imposible, la cabecera): no se trunca ni se escribe encima. El archivo se aparta como
-/// `.dañado-<fecha>` (cifrado, recuperable hasta el daño), se avisa y se sigue en uno nuevo.
+/// `.danado-<fecha>` (cifrado, recuperable hasta el daño), se avisa y se sigue en uno nuevo.
 #[test]
 fn damaged_append_file_is_set_aside_never_truncated() {
     let dk = DataKey::generate();
@@ -240,7 +240,7 @@ fn damaged_append_file_is_set_aside_never_truncated() {
         a.append(b"nuevo\n").unwrap();
         drop(a);
         assert_eq!(decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap(), b"nuevo\n", "{what}");
-        let aside: Vec<PathBuf> = fs::read_dir(&d).unwrap().flatten().map(|e| e.path()).filter(|x| x.to_string_lossy().contains(".dañado-")).collect();
+        let aside: Vec<PathBuf> = fs::read_dir(&d).unwrap().flatten().map(|e| e.path()).filter(|x| x.to_string_lossy().contains(".danado-")).collect();
         assert_eq!(aside.len(), 1, "{what}");
         assert_eq!(fs::read(&aside[0]).unwrap(), before, "{what}: el apartado queda intacto");
         assert!(aside[0].to_string_lossy().ends_with(".log.nte"), "sigue siendo un log cifrado");
@@ -564,7 +564,7 @@ fn plaintext_found_in_encrypted_folder_is_reported_and_fixed_without_loss() {
     sh.set_key(Some(KeyFile::read(&d).unwrap().unwrap().unwrap("maestra-de-prueba").unwrap().0));
     assert_eq!(read(&d.join("settings.json")).unwrap(), br#"{"fontSize":13,"mcpToken":""}"#);
     unregister(&sh);
-    let rep = fix_plaintext(&layout, &dk).unwrap();
+    let rep = fix_plaintext(&layout, &dk, &[]).unwrap();
     assert_eq!(rep.converted, 2);
     assert_eq!(rep.aside.len(), 1, "settings.json chocaba con el cifrado: queda apartado");
     assert!(plaintext_found(&layout).is_empty());
@@ -611,14 +611,33 @@ fn custom_logs_folder_is_converted_too() {
     fs::write(ext.join("sub/y.txt"), b"y").unwrap();
     fs::write(ext.join("z.bin"), b"no es log").unwrap();
     fs::write(ext.join("Informe (copia).log"), b"ajeno").unwrap();
-    fs::create_dir_all(ext.join("Clientes")).unwrap();
-    fs::write(ext.join("Clientes/core_sw_20260101-101010.log"), b"de la app").unwrap();
-    let layout = Layout::new(&d, std::slice::from_ref(&ext));
+    for ajeno in ["debug.log", "install.log", "core_sw_20260101-101010.log"] {
+        fs::write(ext.join(ajeno), b"ajeno").unwrap();
+    }
+    fs::create_dir_all(ext.join("Clientes/Sitio_A")).unwrap();
+    fs::write(ext.join("Clientes/Sitio_A/core_sw_20260101-101010.log"), b"de la app").unwrap();
+    fs::write(ext.join("Clientes/Sitio_A/core_sw_20260101-101010-2.log"), b"de la app 2").unwrap();
+    // B6: nombre en NFD (macOS en FAT/exFAT/HFS+): «Señal» con la tilde como marca combinante.
+    let nfd = "Sen\u{303}al_20260101-101010.log";
+    fs::write(ext.join("Clientes").join(nfd), b"nfd").unwrap();
+    let layout = Layout::new(&d, std::slice::from_ref(&ext)).with_log_pattern(Some("{folder}/{session}_{date}-{time}"), false);
     let (dk, rep) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
-    // En una carpeta elegida por el usuario solo se cifran los nombres que genera la app.
-    assert_eq!(rep.converted, 2);
+    // M3: en una carpeta elegida por el usuario solo se cifra lo que calza con el patrón de la app.
+    assert_eq!(rep.converted, 4, "los tres de Clientes y el de la raíz con el patrón predeterminado");
+    assert!(ext.join("Clientes/Sitio_A/core_sw_20260101-101010.log.nte").exists());
+    assert!(ext.join("Clientes/Sitio_A/core_sw_20260101-101010-2.log.nte").exists());
+    assert!(ext.join("Clientes").join(format!("{nfd}.nte")).exists(), "NFD");
+    assert!(ext.join("core_sw_20260101-101010.log.nte").exists(), "patrón predeterminado");
+    for ajeno in ["debug.log", "install.log", "x.log"] {
+        assert!(ext.join(ajeno).exists() && !ext.join(format!("{ajeno}.nte")).exists(), "{ajeno} no se toca");
+    }
+    // Lo que no calza se informa como "no cifrado" y el usuario puede decidir cifrarlo.
+    let unc: Vec<String> = uncertain(&layout).into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    assert!(unc.iter().any(|p| p.ends_with("debug.log")) && unc.iter().any(|p| p.ends_with("sub/y.txt")) && unc.iter().any(|p| p.ends_with("x.log")), "{unc:?}");
+    let pick: Vec<String> = unc.iter().filter(|p| p.ends_with("x.log")).cloned().collect();
+    fix_plaintext(&layout, &dk, &pick).unwrap();
     assert_eq!(decrypt_all(&dk, &fs::read(ext.join("x.log.nte")).unwrap()).unwrap(), b"externo");
-    assert!(ext.join("Clientes/core_sw_20260101-101010.log.nte").exists());
+    assert!(ext.join("debug.log").exists(), "solo lo elegido");
     assert_eq!(fs::read(ext.join("sub/y.txt")).unwrap(), b"y", "un .txt ajeno no se toca");
     assert_eq!(fs::read(ext.join("Informe (copia).log")).unwrap(), b"ajeno", "un .log con nombre ajeno no se toca");
     assert_eq!(fs::read(ext.join("z.bin")).unwrap(), b"no es log");
@@ -666,14 +685,14 @@ fn coverage_roots_and_loss_check() {
     let now = tmp("cov-now");
     add_roots(&d, std::slice::from_ref(&now)).unwrap();
     let layout = Layout::new(&d, &read_roots(&d));
-    assert!(loss_check(&layout).is_empty(), "{:?}", loss_check(&layout));
+    assert!(loss_check(&layout, Some(&dk)).is_empty(), "{:?}", loss_check(&layout, Some(&dk)));
     // Un .nte que la conversión no cubre y una carpeta de logs que no está: se nombran y no se toca nada.
     fs::write(d.join("tftp/huerfano.bin.nte"), b"x").unwrap();
     let gone = tmp("cov-gone");
     add_roots(&d, std::slice::from_ref(&gone)).unwrap();
     fs::remove_dir_all(&gone).unwrap();
     let layout = Layout::new(&d, &read_roots(&d));
-    let loss = loss_check(&layout);
+    let loss = loss_check(&layout, Some(&dk));
     assert_eq!(loss.len(), 2, "{loss:?}");
     assert!(loss.iter().any(|l| l.contains("no disponible")) && loss.iter().any(|l| l.contains("huerfano.bin.nte")));
     let e = disable(&layout, &dk, &[], &no_hook, &mut |_| {}).unwrap_err();
@@ -722,10 +741,16 @@ fn orphan_encrypted_folder_is_detected() {
     en(&Layout::new(&d, &[]), "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
     fs::remove_file(d.join(KEY_FILE)).unwrap();
     assert!(orphan_markers(&d));
-    fs::remove_file(d.join(README_FILE)).unwrap();
-    fs::remove_file(d.join("sessions.json")).unwrap();
-    assert!(orphan_markers(&d), "basta con los archivos de datos cifrados");
-    let _ = fs::remove_dir_all(d);
+    // B4: el aviso o el sessions.json de aviso solos (carpeta ya en claro) no bastan.
+    let e = tmp("orph-claro");
+    fs::write(e.join(README_FILE), b"x").unwrap();
+    fs::write(e.join("sessions.json"), stub_bytes()).unwrap();
+    assert!(!orphan_markers(&e), "sin datos cifrados reales no es huérfana");
+    fs::write(e.join("settings.json.nte"), b"x").unwrap();
+    assert!(orphan_markers(&e));
+    for x in [d, e] {
+        let _ = fs::remove_dir_all(x);
+    }
 }
 
 /// Logs con eco carácter a carácter: el búfer agrupa en bloques (antes cada tecla era un bloque y
@@ -761,4 +786,158 @@ fn buffered_log_keeps_size_close_to_the_text() {
     assert_eq!(read_now(&q), b"pendiente\notro\n", "vaciado al bloquear");
     drop(a);
     let _ = fs::remove_dir_all(d);
+}
+
+
+/// M1: el apartado por dañado usa una marca ASCII; las marcas con «ñ» (NFC y NFD) de antes se
+/// siguen reconociendo, y desactivar con un apartado en NFD funciona.
+#[test]
+fn damaged_marks_are_ascii_and_old_forms_are_recognized() {
+    assert!(DAMAGED.is_ascii());
+    for n in ["a.danado-1.log", "a.da\u{f1}ado-1.log", "a.dan\u{303}ado-1.log"] {
+        assert!(is_damaged(Path::new(n)), "{n}");
+    }
+    assert!(!is_damaged(Path::new("a.log")));
+    // Ningún nombre que genera el modo cifrado lleva caracteres no ASCII.
+    for n in [KEY_FILE, JOURNAL_FILE, README_FILE, ROOTS_FILE, LOCK_FILE, ROOT_MARK, ASIDE, DAMAGED, DOT_EXT] {
+        assert!(n.is_ascii(), "{n}");
+    }
+    let d = tmp("nfd");
+    fixture(&d);
+    let layout = Layout::new(&d, &[]);
+    let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+    // Un apartado de una versión anterior, en NFD y con un bloque dañado.
+    let src = d.join("logs/b.txt.nte");
+    let mut raw = fs::read(&src).unwrap();
+    let n = raw.len();
+    raw[n - 30] ^= 1;
+    fs::write(d.join("logs/b.dan\u{303}ado-1.txt.nte"), &raw).unwrap();
+    disable(&layout, &dk, &[], &no_hook, &mut |_| {}).unwrap();
+    assert!(!d.join(KEY_FILE).exists());
+    let _ = fs::remove_dir_all(d);
+}
+
+/// M2: un apartado con la cabecera ilegible (corto o de otra llave) se declara como pérdida antes de
+/// empezar; aceptada, la conversión no se corta a mitad.
+#[test]
+fn damaged_file_with_unreadable_header_is_a_declared_loss() {
+    for (what, body) in [("corto", vec![1u8; 20]), ("otra llave", encrypt_all(&DataKey::generate(), b"ajeno").unwrap())] {
+        let d = tmp("hdr");
+        fixture(&d);
+        let layout = Layout::new(&d, &[]);
+        let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+        let bad = d.join("logs/x.danado-1.log.nte");
+        fs::write(&bad, &body).unwrap();
+        let e = disable(&layout, &dk, &[], &no_hook, &mut |_| {}).unwrap_err();
+        assert_eq!(e.loss.len(), 1, "{what}: {:?}", e.loss);
+        assert!(e.loss[0].contains("cabecera") && !d.join(JOURNAL_FILE).exists(), "{what}: antes de empezar");
+        disable(&layout, &dk, &e.loss, &no_hook, &mut |_| {}).unwrap();
+        assert!(!d.join(KEY_FILE).exists() && bad.exists(), "{what}");
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+/// B2: una carpeta de logs registrada sin su marca (punto de montaje vacío) o un `datakey.roots`
+/// que falta o no se lee son pérdida declarada; la llave no se borra sin aceptarla.
+#[test]
+fn unmounted_log_root_and_bad_roots_file_are_losses() {
+    let d = tmp("mnt");
+    fixture(&d);
+    let ext = tmp("mnt-ext");
+    fs::write(ext.join("core_sw_20260101-101010.log"), b"log").unwrap();
+    let layout = Layout::new(&d, std::slice::from_ref(&ext));
+    let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+    assert!(loss_check(&layout, Some(&dk)).is_empty());
+    // El disco no está montado: queda la carpeta vacía del punto de montaje.
+    let real = tmp("mnt-real");
+    fs::rename(&ext, real.join("guardado")).unwrap();
+    fs::create_dir_all(&ext).unwrap();
+    let loss = loss_check(&layout, Some(&dk));
+    assert_eq!(loss.len(), 1, "{loss:?}");
+    assert!(loss[0].contains("sin su marca"));
+    assert!(disable(&layout, &dk, &[], &no_hook, &mut |_| {}).is_err() && d.join(KEY_FILE).exists());
+    // Vuelve el disco: sin pérdida.
+    fs::remove_dir_all(&ext).unwrap();
+    fs::rename(real.join("guardado"), &ext).unwrap();
+    assert!(loss_check(&layout, Some(&dk)).is_empty());
+    // datakey.roots dañado o ausente.
+    fs::write(d.join(ROOTS_FILE), b"{roto").unwrap();
+    assert!(loss_check(&layout, Some(&dk)).iter().any(|l| l.contains("No se puede leer")));
+    fs::remove_file(d.join(ROOTS_FILE)).unwrap();
+    let loss = loss_check(&layout, Some(&dk));
+    assert!(loss.iter().any(|l| l.starts_with("Falta")), "{loss:?}");
+    disable(&layout, &dk, &loss, &no_hook, &mut |_| {}).unwrap();
+    assert!(!ext.join(ROOT_MARK).exists(), "la marca se quita al desactivar");
+    for x in [d, ext, real] {
+        let _ = fs::remove_dir_all(x);
+    }
+}
+
+/// B3: recorridos con la misma profundidad; lo que está más abajo se informa como pérdida.
+#[test]
+fn deeper_than_limit_is_reported() {
+    let d = tmp("deep");
+    fixture(&d);
+    let layout = Layout::new(&d, &[]);
+    let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+    let mut p = d.join("logs");
+    for i in 0..MAX_DEPTH {
+        p = p.join(format!("n{i}"));
+    }
+    fs::create_dir_all(&p).unwrap();
+    fs::write(p.join("hondo.log.nte"), b"x").unwrap();
+    let loss = loss_check(&layout, Some(&dk));
+    assert!(loss.iter().any(|l| l.contains("niveles")), "{loss:?}");
+    assert!(disable(&layout, &dk, &[], &no_hook, &mut |_| {}).is_err());
+    let _ = fs::remove_dir_all(d);
+}
+
+/// B4: al desactivar, el aviso se borra antes que la llave (un corte deja la llave para retomar).
+#[test]
+fn readme_goes_before_the_key() {
+    let d = tmp("orden");
+    fixture(&d);
+    let layout = Layout::new(&d, &[]);
+    let (dk, _) = en(&layout, "maestra-de-prueba", &no_hook, &mut |_| {}).unwrap();
+    let hook = |s: Step| if s == Step::Finish { Err(io::Error::other("corte")) } else { Ok(()) };
+    assert!(disable(&layout, &dk, &[], &hook, &mut |_| {}).is_err());
+    assert!(!d.join(README_FILE).exists() && !d.join(KEY_FILE).exists() && !orphan_markers(&d));
+    let _ = fs::remove_dir_all(d);
+}
+
+/// B5: tras un corte en FAT, ceros hasta el final (o un último bloque con el largo y el resto en
+/// ceros) se recortan; basura real se aparta.
+#[test]
+fn zero_tail_is_trimmed_not_set_aside() {
+    let dk = DataKey::generate();
+    for (what, tail_zeros, set_aside) in [("ceros", 3000usize, false), ("largo y ceros", 0, false), ("basura", 0, true)] {
+        let d = tmp("zeros");
+        let p = d.join(format!("z{tail_zeros}.log.nte"));
+        {
+            let (a, _) = open_append(&p, Some(&dk), OpenMode::CreateNew).unwrap();
+            a.append(b"uno\n").unwrap();
+            a.append(b"dos\n").unwrap();
+        }
+        let full = fs::read(&p).unwrap();
+        let fin = chunks_of(&full).last().unwrap().0;
+        let mut raw = full[..fin].to_vec();
+        match what {
+            "ceros" => raw.extend(std::iter::repeat_n(0u8, tail_zeros)),
+            "largo y ceros" => {
+                raw.extend_from_slice(&(40u32).to_le_bytes());
+                raw.extend(std::iter::repeat_n(0u8, REC_HEAD - 4 + 40));
+            }
+            _ => raw.extend_from_slice(&[7u8; 100]),
+        }
+        fs::write(&p, &raw).unwrap();
+        {
+            let (a, _) = open_append(&p, Some(&dk), OpenMode::Append).unwrap();
+            a.append(b"tres\n").unwrap();
+        }
+        let aside = fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains(DAMAGED));
+        assert_eq!(aside, set_aside, "{what}");
+        let text = decrypt_all(&dk, &fs::read(&p).unwrap()).unwrap();
+        assert_eq!(text, if set_aside { b"tres\n".to_vec() } else { b"uno\ndos\ntres\n".to_vec() }, "{what}");
+        let _ = fs::remove_dir_all(d);
+    }
 }

@@ -114,7 +114,8 @@ export const datacryptEnable = (master: string) => invoke<DataReport>("datacrypt
 export const datacryptDisable = (master: string, acceptLoss?: string[]) => invoke<DataReport>("datacrypt_disable", { master, acceptLoss });
 export const datacryptResume = (op: DataOp, acceptLoss?: string[]) => invoke<DataReport>("datacrypt_resume", { op, acceptLoss });
 export const datacryptAckDamaged = () => invoke("datacrypt_ack_damaged");
-export const datacryptFixPlaintext = () => invoke<DataReport>("datacrypt_fix_plaintext");
+/** `include`: logs que no calzaban con los nombres de la app y el usuario eligió cifrar igual. */
+export const datacryptFixPlaintext = (include?: string[]) => invoke<DataReport>("datacrypt_fix_plaintext", { include });
 export const vaultCreate = (master: string) => invoke("vault_create", { master });
 
 /** Archivo de Buscar en logs o de Respaldos para el visor de la app (descifrado en memoria si está cifrado). */
