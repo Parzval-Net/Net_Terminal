@@ -141,6 +141,11 @@ export function UnlockScreen({ st, onDone, overlay }: { st: DataStatus; onDone: 
             {error}
           </p>
         )}
+        {st.warning && (
+          <p role="status" className="text-[12px] text-warn">
+            {st.warning}
+          </p>
+        )}
         {note && (
           <p role="status" className="text-[12px] text-warn">
             {note}

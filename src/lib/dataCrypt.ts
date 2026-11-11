@@ -22,8 +22,12 @@ export interface DataStatus {
   vaultMaster: boolean;
   logsActive: number;
   dataDir: string;
-  /** Archivos cifrados dañados que se apartaron (`.dañado-<fecha>`) en esta ejecución. */
+  /** Archivos cifrados dañados que se apartaron (`.danado-<fecha>`) en esta ejecución. */
   damaged: string[];
+  /** Logs en claro de carpetas propias que no calzan con los nombres de la app: no se cifraron. */
+  uncertain: string[];
+  /** Aviso que no impide abrir (bloqueo de instancia única no disponible). */
+  warning: string | null;
 }
 
 export interface DataProgress {
@@ -60,6 +64,8 @@ export const PLAIN_STATUS: DataStatus = {
   logsActive: 0,
   dataDir: "",
   damaged: [],
+  uncertain: [],
+  warning: null,
 };
 
 /** Error de una conversión: el motivo y, si desactivar dejaría archivos sin llave, la lista exacta. */

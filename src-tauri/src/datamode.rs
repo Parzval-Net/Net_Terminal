@@ -25,6 +25,8 @@ pub struct DataMode {
     stop_logs: AtomicBool,
     /// Bloqueo de instancia única mientras la carpeta está cifrada (se suelta al salir o al desactivar).
     lock_file: Mutex<Option<File>>,
+    /// Aviso visible que no impide abrir (p. ej. no se pudo tomar el bloqueo de instancia única).
+    warning: Mutex<Option<String>>,
 }
 
 fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -36,15 +38,34 @@ pub const ANOTHER_INSTANCE: &str =
 
 pub const MISSING_KEY: &str = "Falta la llave de datos (datakey.ntk): la carpeta tiene datos cifrados pero no su llave, y sin ella no se pueden abrir. No se leyó ni escribió nada. Si moviste o borraste datakey.ntk, devuélvelo a la carpeta de datos y vuelve a abrir la app.";
 
+/// Resultado de intentar el bloqueo de instancia única.
+enum Lock {
+    Held(File),
+    /// Otra instancia lo tiene: no se abre.
+    Taken,
+    /// El sistema no permite el bloqueo (sin soporte, carpeta de solo lectura, permisos): se sigue
+    /// sin bloqueo y con un aviso visible, para no dejar al usuario fuera de sus datos.
+    Unavailable(String),
+}
+
 /// Toma el bloqueo de instancia única de la carpeta (`datakey.lock`, bloqueo del sistema sobre el
-/// archivo: se suelta solo si la app se cierra o se cae). Err si otra instancia lo tiene.
-fn take_lock(data_dir: &Path) -> Result<File, String> {
-    let f = File::options().create(true).truncate(false).write(true).open(data_dir.join(datacrypt::LOCK_FILE)).map_err(|e| e.to_string())?;
+/// archivo: se suelta solo si la app se cierra o se cae).
+fn take_lock(data_dir: &Path) -> Lock {
+    let readonly = |e: &std::io::Error| e.kind() == std::io::ErrorKind::ReadOnlyFilesystem || e.kind() == std::io::ErrorKind::PermissionDenied;
+    let f = match File::options().create(true).truncate(false).write(true).open(data_dir.join(datacrypt::LOCK_FILE)) {
+        Ok(f) => f,
+        Err(e) if readonly(&e) => return Lock::Unavailable(lock_warning(&format!("la carpeta parece de solo lectura ({e}); los cambios no se podrán guardar"))),
+        Err(e) => return Lock::Unavailable(lock_warning(&e.to_string())),
+    };
     match f.try_lock() {
-        Ok(()) => Ok(f),
-        Err(std::fs::TryLockError::WouldBlock) => Err(ANOTHER_INSTANCE.into()),
-        Err(std::fs::TryLockError::Error(e)) => Err(e.to_string()),
+        Ok(()) => Lock::Held(f),
+        Err(std::fs::TryLockError::WouldBlock) => Lock::Taken,
+        Err(std::fs::TryLockError::Error(e)) => Lock::Unavailable(lock_warning(&e.to_string())),
     }
+}
+
+fn lock_warning(why: &str) -> String {
+    format!("No se pudo tomar el bloqueo de instancia única de la carpeta cifrada ({why}). Se abre igual: no abras esta carpeta en otra ventana de NetTerminal a la vez.")
 }
 
 impl DataMode {
@@ -70,11 +91,15 @@ impl DataMode {
             Some(MISSING_KEY.to_string())
         } else {
             match take_lock(data_dir) {
-                Ok(f) => {
+                Lock::Held(f) => {
                     *lk(&mode.lock_file) = Some(f);
                     datacrypt::KeyFile::read(data_dir).err()
                 }
-                Err(e) => Some(e),
+                Lock::Taken => Some(ANOTHER_INSTANCE.into()),
+                Lock::Unavailable(w) => {
+                    *lk(&mode.warning) = Some(w);
+                    datacrypt::KeyFile::read(data_dir).err()
+                }
             }
         };
         *lk(&mode.error) = error;
@@ -104,7 +129,11 @@ fn layout(state: &AppState) -> datacrypt::Layout {
     let mut extra = datacrypt::read_roots(&state.data_dir);
     extra.extend(state.logs_root.lock().unwrap_or_else(|e| e.into_inner()).clone());
     extra.extend(datacrypt::read_journal(&state.data_dir).and_then(|j| j.logs));
-    datacrypt::Layout::new(&state.data_dir, &extra)
+    // Patrón de nombre de log configurado: en una carpeta del usuario solo se cifra lo que calza.
+    let peek = if datacrypt::unavailable(&state.data_dir).is_none() { state.files.peek_settings() } else { None };
+    let pattern = peek.as_ref().and_then(|m| m.get("logPattern")).and_then(serde_json::Value::as_str).map(str::to_string);
+    let rotate = peek.as_ref().and_then(|m| m.get("logRotateDaily")).and_then(serde_json::Value::as_bool).unwrap_or(false);
+    datacrypt::Layout::new(&state.data_dir, &extra).with_log_pattern(pattern.as_deref(), rotate)
 }
 
 #[derive(Serialize)]
@@ -125,8 +154,12 @@ pub struct Status {
     /// Pestañas grabando log (cifrar o descifrar exige detenerlas).
     pub logs_active: usize,
     pub data_dir: String,
-    /// Archivos cifrados dañados que se apartaron (`.dañado-<fecha>`) en esta ejecución.
+    /// Archivos cifrados dañados que se apartaron (`.danado-<fecha>`) en esta ejecución.
     pub damaged: Vec<String>,
+    /// Logs en claro de carpetas propias que no calzan con los nombres de la app: no se cifraron.
+    pub uncertain: Vec<String>,
+    /// Aviso que no impide abrir (bloqueo de instancia única no disponible).
+    pub warning: Option<String>,
 }
 
 pub fn status_of(state: &AppState) -> Status {
@@ -135,12 +168,15 @@ pub fn status_of(state: &AppState) -> Status {
     let unlocked = sh.as_ref().is_some_and(|s| s.unlocked());
     let busy = sh.as_ref().is_some_and(|s| s.busy());
     let journal = encrypted.then(|| datacrypt::read_journal(&state.data_dir).map(|j| j.op)).flatten();
-    let plaintext = if encrypted && unlocked && !busy && journal.is_none() {
-        let mut v = datacrypt::plaintext_found(&layout(state));
+    let (plaintext, uncertain) = if encrypted && unlocked && !busy && journal.is_none() {
+        let l = layout(state);
+        let mut v = datacrypt::plaintext_found(&l);
         v.truncate(200);
-        v
+        let mut u: Vec<String> = datacrypt::uncertain(&l).into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        u.truncate(200);
+        (v, u)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let vs = state.creds.status();
     Status {
@@ -156,6 +192,8 @@ pub fn status_of(state: &AppState) -> Status {
         logs_active: state.conns.logging_count(),
         data_dir: state.data_dir.to_string_lossy().into_owned(),
         damaged: datacrypt::damaged_list(),
+        uncertain,
+        warning: lk(&state.crypt.warning).clone(),
     }
 }
 
@@ -186,6 +224,8 @@ pub fn after_unlock(app: &tauri::AppHandle) {
         return;
     }
     st.store.load();
+    // Carpetas de logs anotadas antes de que existieran las marcas: se marcan si tienen logs cifrados.
+    datacrypt::adopt_root_marks(&layout(&st));
     if !st.crypt.started.swap(true, Ordering::SeqCst) {
         crate::datafiles::spawn_rotation(st.data_dir.clone());
         let peek = st.files.peek_settings();
@@ -298,7 +338,14 @@ pub fn datacrypt_enable(master: String, app: tauri::AppHandle, state: State<'_, 
 }
 
 pub(crate) fn enable_with(app: &tauri::AppHandle, state: &AppState, master: &str) -> Result<datacrypt::Report, String> {
-    let lock = take_lock(&state.data_dir)?;
+    let lock = match take_lock(&state.data_dir) {
+        Lock::Held(f) => Some(f),
+        Lock::Taken => return Err(ANOTHER_INSTANCE.into()),
+        Lock::Unavailable(w) => {
+            *lk(&state.crypt.warning) = Some(w);
+            None
+        }
+    };
     let layout = layout(state);
     let sh = Shared::new();
     sh.set_busy(true);
@@ -316,7 +363,7 @@ pub(crate) fn enable_with(app: &tauri::AppHandle, state: &AppState, master: &str
             let _ = std::fs::remove_file(state.data_dir.join(datacrypt::LOCK_FILE));
         }
         Some(dk) => {
-            *lk(&state.crypt.lock_file) = Some(lock);
+            *lk(&state.crypt.lock_file) = lock;
             sh.set_key(Some(dk));
             state.creds.attach_data(sh.clone());
             state.crypt.mark_started();
@@ -381,12 +428,13 @@ pub fn datacrypt_disable(master: String, accept_loss: Option<Vec<String>>, app: 
 
 /// Cifra los archivos en claro encontrados en la carpeta cifrada (los que chocan con uno cifrado se
 /// guardan aparte con `.encontrado-<fecha>`).
+/// `include`: logs en claro que no calzaban con los nombres de la app y el usuario decidió cifrar.
 #[tauri::command(async)]
-pub fn datacrypt_fix_plaintext(state: State<'_, AppState>) -> Result<datacrypt::Report, String> {
+pub fn datacrypt_fix_plaintext(include: Option<Vec<String>>, state: State<'_, AppState>) -> Result<datacrypt::Report, String> {
     let sh = state.crypt.shared().ok_or("La carpeta no está cifrada")?;
     let dk = sh.key().map_err(|e| e.to_string())?;
     sh.set_busy(true);
-    let r = datacrypt::fix_plaintext(&layout(&state), &dk);
+    let r = datacrypt::fix_plaintext(&layout(&state), &dk, &include.unwrap_or_default());
     sh.set_busy(false);
     r
 }
@@ -463,6 +511,28 @@ mod tests {
         let third = DataMode::detect(&d);
         assert!(lk(&third.error).is_none(), "el bloqueo se suelta al cerrar");
         release(&third);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Sin bloqueo posible (carpeta de solo lectura, sistema sin soporte) se abre igual, con un aviso
+    /// visible: el usuario no queda fuera de sus datos.
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_lock_opens_with_a_warning() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = encrypted_folder("ro");
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::write(d.join("prueba"), b"x").is_ok() {
+            // Como root los permisos no aplican: nada que probar.
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let _ = std::fs::remove_dir_all(d);
+            return;
+        }
+        let m = DataMode::detect(&d);
+        assert!(lk(&m.error).is_none(), "{:?}", lk(&m.error));
+        assert!(lk(&m.warning).as_deref().is_some_and(|w| w.contains("solo lectura")), "{:?}", lk(&m.warning));
+        release(&m);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _ = std::fs::remove_dir_all(d);
     }
 

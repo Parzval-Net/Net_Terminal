@@ -102,6 +102,9 @@ assert.deepEqual(D.convError({ message: "m", loss: ["a", 3, "b"] }), { message: 
 assert.deepEqual(D.convError({ message: "m" }), { message: "m", loss: [] });
 assert.deepEqual(D.convError(null), { message: "null", loss: [] });
 assert.deepEqual(D.PLAIN_STATUS.damaged, []);
+assert.deepEqual(D.PLAIN_STATUS.uncertain, []);
+assert.equal(D.PLAIN_STATUS.warning, null);
+assert.match(api, /"datacrypt_fix_plaintext", \{ include \}/, "cifrar los marcados envía solo la lista");
 assert.ok(!/master/.test(JSON.stringify(D.PLAIN_STATUS)), "el estado no trae contraseñas");
 
 console.log("dataCrypt: OK");

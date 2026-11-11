@@ -860,6 +860,8 @@ const handlers = {
     logsActive: 0,
     dataDir: "/Volumes/PENDRIVE/NetTerminal/data",
     damaged: [],
+    uncertain: [],
+    warning: null,
   }),
   datacrypt_ack_damaged: () => null,
   data_unlock: ({ master }) => {

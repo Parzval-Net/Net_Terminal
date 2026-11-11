@@ -21,7 +21,7 @@ export function DataCryptSettings({ settings, onChange, onVaultChanged }: { sett
   const [loss, setLoss] = useState<string[]>([]);
   const refresh = () =>
     datacryptStatus()
-      .then((s) => setSt(s ? { ...s, damaged: s.damaged ?? [] } : null))
+      .then((s) => setSt(s ? { ...s, damaged: s.damaged ?? [], uncertain: s.uncertain ?? [] } : null))
       .catch(() => setSt(null));
   useEffect(() => {
     refresh();
@@ -118,11 +118,23 @@ export function DataCryptSettings({ settings, onChange, onVaultChanged }: { sett
           {loss.length > 0 && <LossConfirm loss={loss} busy={!!fixing} onAccept={() => resume("decrypt", loss)} />}
         </div>
       )}
+      {st.warning && (
+        <p role="status" className="text-[12px] text-warn">
+          {st.warning}
+        </p>
+      )}
+      {st.uncertain.length > 0 && <Uncertain list={st.uncertain} busy={!!fixing} onPick={(pick) => {
+        setFixing("fix");
+        datacryptFixPlaintext(pick)
+          .then((r) => done(r, "encrypt"))
+          .catch(fail)
+          .finally(() => setFixing(null));
+      }} />}
       {st.damaged.length > 0 && (
         <div className="rounded-lg border border-warn p-3 space-y-2" role="status">
           <p className="text-[12px]">
             {st.damaged.length === 1 ? "Un archivo cifrado estaba dañado" : `${st.damaged.length} archivos cifrados estaban dañados`} y se apartaron (siguen cifrados,
-            con «.dañado-» en el nombre); la app siguió en archivos nuevos. Al desactivar el cifrado se recupera lo que tenían de íntegro.
+            con «.danado-» en el nombre); la app siguió en archivos nuevos. Al desactivar el cifrado se recupera lo que tenían de íntegro.
           </p>
           <ul className="text-[11.5px] font-mono break-all text-muted">
             {st.damaged.map((p) => (
@@ -216,6 +228,38 @@ export function DataCryptSettings({ settings, onChange, onVaultChanged }: { sett
         />
       )}
     </>
+  );
+}
+
+/**
+ * Logs en claro de una carpeta de logs propia cuyo nombre no calza con los que genera la app (por
+ * ejemplo `debug.log` en Documentos): no se cifraron. El usuario elige cuáles cifrar igual.
+ */
+function Uncertain({ list, busy, onPick }: { list: string[]; busy: boolean; onPick: (pick: string[]) => void }) {
+  const [pick, setPick] = useState<string[]>([]);
+  const toggle = (p: string) => setPick((s) => (s.includes(p) ? s.filter((x) => x !== p) : [...s, p]));
+  return (
+    <div className="rounded-lg border border-line p-3 space-y-2">
+      <p className="text-[12px]">
+        No cifrado: {list.length === 1 ? "1 archivo" : `${list.length} archivos`} de la carpeta de logs no {list.length === 1 ? "parece" : "parecen"} logs de la app (su
+        nombre no calza con el patrón de logs) y quedaron en claro. Marca los que quieras cifrar igual.
+      </p>
+      <ul className="max-h-32 overflow-auto text-[11.5px] font-mono break-all space-y-0.5">
+        {list.map((p) => (
+          <li key={p}>
+            <label className="flex items-start gap-2">
+              <input type="checkbox" className="mt-0.5" checked={pick.includes(p)} onChange={() => toggle(p)} />
+              <span>{p}</span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <div className="flex justify-end">
+        <button disabled={busy || pick.length === 0} onClick={() => onPick(pick)} className="px-3 h-7 rounded-md border border-line hover:bg-hover disabled:opacity-50">
+          Cifrar los marcados
+        </button>
+      </div>
+    </div>
   );
 }
 

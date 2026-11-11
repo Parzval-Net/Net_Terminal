@@ -42,6 +42,11 @@ pub const README_FILE: &str = "LEEME-DATOS-CIFRADOS.txt";
 pub const ROOTS_FILE: &str = "datakey.roots";
 /// Bloqueo de instancia única (una sola app sobre la carpeta cifrada).
 pub const LOCK_FILE: &str = "datakey.lock";
+/// Marca en cada carpeta de logs registrada (con el identificador de la llave): una carpeta sin ella
+/// (por ejemplo, un punto de montaje vacío) no es la que tiene los logs cifrados.
+pub const ROOT_MARK: &str = ".netterminal-logs-cifrados";
+/// Profundidad máxima de los recorridos (logs y búsqueda de `.nte`); lo más profundo se informa.
+const MAX_DEPTH: usize = 8;
 pub const VAULT_FILE: &str = "credentials.vault";
 pub const LOCKED: &str = "Los datos están cifrados y bloqueados: desbloquéalos con la contraseña maestra";
 pub const BUSY: &str = "Hay una conversión de datos en curso: espera a que termine";
@@ -134,6 +139,11 @@ impl KeyFile {
 
     pub fn slots(&self) -> usize {
         self.slots.len()
+    }
+
+    /// Identificador público de la DEK, en hexadecimal (va en la marca de cada carpeta de logs).
+    pub fn id_hex(&self) -> String {
+        self.id.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Abre la DEK con la contraseña probando cada ranura. Devuelve la llave y la ranura que abrió.
@@ -616,14 +626,17 @@ pub fn damaged_clear() {
     damaged().lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
-/// `x.log.nte` → `x.dañado-<fecha>.log.nte` (sigue cifrado y en la carpeta, con un nombre que los
-/// recorridos reconocen y que la conversión descifra en modo rescate).
+/// `x.log.nte` → `x.danado-<fecha>.log.nte` (sigue cifrado y en la carpeta, con un nombre que los
+/// recorridos reconocen y que la conversión descifra en modo rescate). Los nombres que genera el modo
+/// cifrado son solo ASCII: en FAT, exFAT o HFS+ desde macOS un nombre con «ñ» vuelve en NFD.
 fn damaged_name(phys: &Path) -> PathBuf {
     let logical = phys.to_str().and_then(|s| s.strip_suffix(DOT_EXT)).map(PathBuf::from).unwrap_or_else(|| phys.to_path_buf());
     with_ext(&aside_name(&logical, DAMAGED))
 }
 
-pub const DAMAGED: &str = ".dañado-";
+pub const DAMAGED: &str = ".danado-";
+/// Marca con «ñ» de la versión anterior, en NFC y en NFD: se sigue reconociendo al leer.
+const DAMAGED_OLD: [&str; 2] = [".da\u{f1}ado-", ".dan\u{303}ado-"];
 
 fn appenders() -> &'static Mutex<HashMap<PathBuf, Weak<Mutex<AppendState>>>> {
     static M: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<AppendState>>>>> = OnceLock::new();
@@ -711,6 +724,28 @@ pub fn open_append(phys: &Path, dk: Option<&DataKey>, mode: OpenMode) -> io::Res
     Ok((Appender(arc), had))
 }
 
+/// Todo lo que hay desde `from` hasta `flen` son ceros (lo que deja un corte en FAT o exFAT).
+fn zero_tail(f: &mut File, from: u64, flen: u64) -> io::Result<bool> {
+    if from >= flen {
+        return Ok(true);
+    }
+    f.seek(SeekFrom::Start(from))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut left = flen - from;
+    while left > 0 {
+        let cap = buf.len() as u64;
+        let n = f.read(&mut buf[..left.min(cap) as usize])?;
+        if n == 0 {
+            break;
+        }
+        if buf[..n].iter().any(|&b| b != 0) {
+            return Ok(false);
+        }
+        left -= n as u64;
+    }
+    Ok(true)
+}
+
 /// Retoma un archivo cifrado para anexar. Verifica todos sus bloques: solo la cola incompleta de una
 /// escritura cortada (largo que pasa el fin del archivo o menos de 4 bytes) se recorta. Cualquier
 /// otro daño (cabecera, un bloque del medio o el último, un cierre fuera de lugar) devuelve `None`:
@@ -724,6 +759,8 @@ fn resume_state(mut file: File, flen: u64, dk: &DataKey) -> io::Result<Option<Ap
     let Ok(fk) = open_header(dk, &h) else { return Ok(None) };
     let mut head = [0u8; AAD_HEAD];
     head.copy_from_slice(&h[..AAD_HEAD]);
+    // Para mirar la cola sin perder la posición del lector.
+    let mut probe = file.try_clone()?;
     let mut r = BufReader::new(&mut file);
     let mut pos = HEADER_LEN as u64;
     let mut idx = 0u64;
@@ -739,7 +776,12 @@ fn resume_state(mut file: File, flen: u64, dk: &DataKey) -> io::Result<Option<Ap
         let len = (raw & !FINAL_BIT) as usize;
         let last = raw & FINAL_BIT != 0;
         if !(TAG..=CHUNK_MAX + TAG).contains(&len) || fin_at.is_some() {
-            return Ok(None); // largo imposible o algo después del cierre: daño
+            // Ceros hasta el final (FAT extiende el archivo antes de escribir): cola de un corte. Si
+            // no, es daño (largo imposible o algo después del cierre).
+            if zero_tail(&mut probe, pos, flen)? {
+                break;
+            }
+            return Ok(None);
         }
         let end = pos + (REC_HEAD + len) as u64;
         if end > flen {
@@ -751,6 +793,10 @@ fn resume_state(mut file: File, flen: u64, dk: &DataKey) -> io::Result<Option<Ap
         r.read_exact(&mut ct)?;
         let ok = seal::decrypt(&fk, &nonce, &ct, &chunk_aad(&head, idx, last)).is_ok_and(|p| !last || p.is_empty());
         if !ok {
+            // Último bloque con el largo escrito y el resto en ceros, o todo en ceros: corte al escribir.
+            if zero_tail(&mut probe, pos, flen)? || (end == flen && zero_tail(&mut probe, pos + 4, flen)?) {
+                break;
+            }
             return Ok(None);
         }
         if last {
@@ -875,7 +921,7 @@ pub fn shared_for(p: &Path) -> Option<Arc<Shared>> {
 /// `.nte` y temporales.
 fn exempt(p: &Path) -> bool {
     let Some(name) = p.file_name().and_then(|n| n.to_str()) else { return true };
-    matches!(name, KEY_FILE | JOURNAL_FILE | README_FILE | VAULT_FILE | ROOTS_FILE | LOCK_FILE) || name.ends_with(DOT_EXT) || name.ends_with(".ntenc") || name.ends_with(".tmp")
+    matches!(name, KEY_FILE | JOURNAL_FILE | README_FILE | VAULT_FILE | ROOTS_FILE | LOCK_FILE | ROOT_MARK) || name.ends_with(DOT_EXT) || name.ends_with(".ntenc") || name.ends_with(".tmp")
 }
 
 fn with_ext(p: &Path) -> PathBuf {
@@ -1054,6 +1100,8 @@ pub fn wrap_reader(file: File, dk: &DataKey) -> io::Result<EncReader<File>> {
 /// Carpetas de la app que cubre el modo cifrado.
 #[derive(Clone, Debug)]
 pub struct Layout {
+    /// Nombres de log que genera la app (patrón configurado y el predeterminado).
+    pub names: LogNames,
     pub data: PathBuf,
     /// Carpetas de logs: la primera es la predeterminada `data/logs` (de la app); las demás las eligió
     /// el usuario (la actual y las usadas antes con el modo activo, de `datakey.roots`).
@@ -1068,7 +1116,14 @@ impl Layout {
                 logs.push(x.clone());
             }
         }
-        Layout { data: data.to_path_buf(), logs }
+        Layout { data: data.to_path_buf(), logs, names: LogNames::new(&[], false) }
+    }
+
+    /// Patrón de nombre de log configurado (`logPattern`, `logRotateDaily`): en una carpeta de logs
+    /// elegida por el usuario solo se cifran en claro los archivos que calzan con él o con el predeterminado.
+    pub fn with_log_pattern(mut self, pattern: Option<&str>, rotate_daily: bool) -> Layout {
+        self.names = LogNames::new(&pattern.into_iter().map(str::to_string).collect::<Vec<_>>(), rotate_daily);
+        self
     }
 
     /// Carpetas de logs elegidas por el usuario (no la de la app).
@@ -1087,8 +1142,50 @@ pub fn read_roots(data: &Path) -> Vec<PathBuf> {
     fs::read(data.join(ROOTS_FILE)).ok().and_then(|b| serde_json::from_slice::<RootsFile>(&b).ok()).map(|r| r.logs).unwrap_or_default()
 }
 
-/// Agrega carpetas de logs a `datakey.roots` (sin duplicados).
+/// Lectura estricta para desactivar: falta o no se puede leer `datakey.roots` (en una carpeta
+/// cifrada siempre existe) es un error, porque no se sabría qué carpetas de logs tienen datos cifrados.
+pub fn read_roots_checked(data: &Path) -> Result<Vec<PathBuf>, String> {
+    match fs::read(data.join(ROOTS_FILE)) {
+        Ok(b) => serde_json::from_slice::<RootsFile>(&b).map(|r| r.logs).map_err(|_| format!("No se puede leer {ROOTS_FILE}: no se sabe qué carpetas de logs propias tienen logs cifrados")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(format!("Falta {ROOTS_FILE}: no se sabe qué carpetas de logs propias tienen logs cifrados")),
+        Err(e) => Err(format!("No se puede leer {ROOTS_FILE}: {e}")),
+    }
+}
+
+fn key_id(data: &Path) -> Option<String> {
+    KeyFile::read(data).ok().flatten().map(|k| k.id_hex())
+}
+
+/// La carpeta de logs tiene la marca de esta carpeta cifrada.
+fn root_mark_ok(root: &Path, id: &str) -> bool {
+    fs::read_to_string(root.join(ROOT_MARK)).is_ok_and(|s| s.trim() == id)
+}
+
+fn write_root_mark(root: &Path, id: &str) -> Result<(), String> {
+    seal::write_atomic(&root.join(ROOT_MARK), id.as_bytes()).map_err(|e| format!("No se pudo marcar la carpeta de logs {}: {e}", root.display()))
+}
+
+/// Carpetas registradas sin marca (de una versión anterior) que tienen logs cifrados: se marcan.
+/// Una carpeta vacía o un punto de montaje sin montar no se marca.
+pub fn adopt_root_marks(layout: &Layout) {
+    let Some(id) = key_id(&layout.data) else { return };
+    for r in layout.user_logs() {
+        if r.is_dir() && !r.join(ROOT_MARK).exists() {
+            let one = Layout { names: layout.names.clone(), data: layout.data.clone(), logs: vec![r.clone()] };
+            if !all_nte(&one).0.is_empty() {
+                let _ = write_root_mark(r, &id);
+            }
+        }
+    }
+}
+
+/// Agrega carpetas de logs a `datakey.roots` (sin duplicados) y deja su marca en cada una.
 pub fn add_roots(data: &Path, extra: &[PathBuf]) -> Result<(), String> {
+    let id = key_id(data).ok_or("Falta la llave de datos")?;
+    for x in extra {
+        fs::create_dir_all(x).map_err(|e| e.to_string())?;
+        write_root_mark(x, &id)?;
+    }
     let mut r = RootsFile { logs: read_roots(data) };
     let before = r.logs.len();
     for x in extra {
@@ -1160,12 +1257,75 @@ pub struct Found {
 
 type Accept<'a> = &'a dyn Fn(&str, bool) -> bool;
 
-/// Nombre que genera la app para un log (`logfile::render` + `.log`): letras, dígitos, `-`, `_` y
-/// `.`, sin punto inicial. En una carpeta de logs elegida por el usuario solo se convierten estos en
-/// claro: un `.txt` o un `.log` ajeno con otros caracteres no se toca.
-fn app_log_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".log") else { return false };
-    !stem.is_empty() && !stem.starts_with('.') && stem.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+/// Nombres de log que genera la app con un patrón (`logfile::render`): ruta relativa a la carpeta de
+/// logs con `{folder}` como subcarpetas, `{date}` de 8 dígitos, `{time}` de 6, `{session}` y `{host}`
+/// saneados, sufijo `-N` opcional y `.log`. Admite marcas combinantes (nombres en NFD de macOS en FAT,
+/// exFAT o HFS+). Lo que no calza no se toca: se informa como "no cifrado" para que el usuario decida.
+#[derive(Clone, Debug)]
+pub struct LogNames(regex::Regex);
+
+const NAME_PART: &str = r"[\p{L}\p{M}\p{N}._-]+";
+
+fn pattern_regex(pattern: &str, rotate_daily: bool) -> String {
+    let mut pat = if pattern.trim().is_empty() { crate::logfile::DEFAULT_PATTERN.to_string() } else { pattern.to_string() };
+    if rotate_daily && !pat.contains("{date}") {
+        pat.push_str("_{date}");
+    }
+    let mut out = String::new();
+    let mut rest = pat.as_str();
+    while let Some(c) = rest.chars().next() {
+        if c == '{' {
+            if let Some(end) = rest.find('}') {
+                let token = match &rest[1..end] {
+                    "session" | "host" => Some(NAME_PART),
+                    "date" => Some(r"\d{8}"),
+                    "time" => Some(r"\d{6}"),
+                    "folder" => Some(r"(?:[^/]+/)*"),
+                    _ => None,
+                };
+                if let Some(t) = token {
+                    out.push_str(t);
+                    let folder = &rest[1..end] == "folder";
+                    rest = &rest[end + 1..];
+                    if folder {
+                        rest = rest.strip_prefix(['/', '\\']).unwrap_or(rest);
+                    }
+                    continue;
+                }
+            }
+        }
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            out.push_str(&regex::escape(&c.to_string()));
+        } else if c.is_alphanumeric() {
+            // Letra no ASCII: en disco puede venir descompuesta (NFD).
+            out.push_str(r"[\p{L}\p{M}\p{N}]{1,4}");
+        } else {
+            out.push('_');
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+impl LogNames {
+    pub fn new(patterns: &[String], rotate_daily: bool) -> LogNames {
+        let mut alts: Vec<String> = Vec::new();
+        for p in patterns.iter().map(String::as_str).chain([crate::logfile::DEFAULT_PATTERN]) {
+            for rot in [false, rotate_daily] {
+                let r = pattern_regex(p, rot);
+                if !alts.contains(&r) {
+                    alts.push(r);
+                }
+            }
+        }
+        let re = format!(r"^(?:{})(?:-\d{{1,3}})?\.log$", alts.join("|"));
+        LogNames(regex::Regex::new(&re).unwrap_or_else(|_| regex::Regex::new(r"^\b$").expect("regex vacía")))
+    }
+
+    /// `rel`: ruta dentro de la carpeta de logs, con "/".
+    pub fn matches(&self, rel: &str) -> bool {
+        self.0.is_match(rel)
+    }
 }
 
 fn consider(dir: &Path, e: &fs::DirEntry, accept: Accept, out: &mut Vec<Found>) {
@@ -1194,27 +1354,78 @@ fn scan_dir(dir: &Path, accept: Accept, out: &mut Vec<Found>) {
     }
 }
 
-fn scan_logs(dir: &Path, depth: usize, skip: &[PathBuf], user: bool, out: &mut Vec<Found>) {
+/// Resultado de un recorrido: lo cubierto, los logs en claro de carpetas del usuario cuyo nombre no
+/// calza con los de la app (no se tocan) y las carpetas más profundas que el límite.
+#[derive(Default)]
+pub struct Walked {
+    pub found: Vec<Found>,
+    pub uncertain: Vec<PathBuf>,
+    pub deep: Vec<PathBuf>,
+}
+
+struct LogScan<'a> {
+    skip: &'a [PathBuf],
+    /// Carpeta elegida por el usuario: en claro solo se toman los nombres de la app.
+    user: Option<&'a LogNames>,
+}
+
+fn scan_logs(dir: &Path, rel: &str, depth: usize, ls: &LogScan, w: &mut Walked) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let Ok(ft) = e.file_type() else { continue };
-        if ft.is_dir() && depth < 8 {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if ft.is_dir() {
             let p = e.path();
-            if p.canonicalize().map(|c| skip.contains(&c)).unwrap_or(true) {
+            if p.canonicalize().map(|c| ls.skip.contains(&c)).unwrap_or(true) {
                 continue;
             }
-            scan_logs(&p, depth + 1, skip, user, out);
-        } else {
-            // Cifrados: todos los de log (solo la app escribe `.nte`). En claro, en una carpeta del
-            // usuario, solo los nombres que genera la app.
-            consider(dir, &e, &|n, enc| if user && !enc { app_log_name(&strip_aside(n)) } else { ext_is(n, &["log", "txt"]) }, out);
+            if depth + 1 >= MAX_DEPTH {
+                w.deep.push(p);
+                continue;
+            }
+            scan_logs(&p, &format!("{rel}{name}/"), depth + 1, ls, w);
+            continue;
+        }
+        let names = ls.user;
+        let mut odd = false;
+        consider(
+            dir,
+            &e,
+            &|n, enc| {
+                if !ext_is(n, &["log", "txt"]) {
+                    return false;
+                }
+                // Cifrados: todos (solo la app escribe `.nte`). En claro, en una carpeta del usuario,
+                // solo lo que calza con los nombres que genera la app.
+                match names {
+                    Some(nm) if !enc => nm.matches(&format!("{rel}{}", strip_aside(n))),
+                    _ => true,
+                }
+            },
+            &mut w.found,
+        );
+        if names.is_some() && ft.is_file() && !name.ends_with(DOT_EXT) && ext_is(&name, &["log", "txt"]) && !w.found.last().is_some_and(|f| f.phys == e.path()) {
+            odd = true;
+        }
+        if odd {
+            w.uncertain.push(e.path());
         }
     }
 }
 
 /// Todos los archivos cubiertos (en claro y cifrados) de la carpeta. No sigue enlaces simbólicos.
 pub fn walk(layout: &Layout) -> Vec<Found> {
-    let mut out = Vec::new();
+    walk_full(layout).found
+}
+
+/// Logs en claro de carpetas del usuario que no calzan con los nombres de la app (no se cifran).
+pub fn uncertain(layout: &Layout) -> Vec<PathBuf> {
+    walk_full(layout).uncertain
+}
+
+pub fn walk_full(layout: &Layout) -> Walked {
+    let mut w = Walked::default();
+    let mut out: Vec<Found> = Vec::new();
     let d = &layout.data;
     scan_dir(d, &|n, _| data_root_file(n), &mut out);
     scan_dir(&d.join("notes"), &|n, _| ext_is(n, &["txt"]), &mut out);
@@ -1235,6 +1446,7 @@ pub fn walk(layout: &Layout) -> Vec<Found> {
             }
         }
     }
+    w.found.append(&mut out);
     // Una carpeta de logs no recorre las otras carpetas de la app que pueda contener.
     let canon = |p: &Path| p.canonicalize().ok();
     let skip: Vec<PathBuf> = ["notes", "backups", "mcp-audit", "tftp", "scripts", "plugins", "command-packs", "syslog"]
@@ -1254,11 +1466,14 @@ pub fn walk(layout: &Layout) -> Vec<Found> {
         if skip.contains(&c) {
             continue;
         }
-        scan_logs(l, 0, &skip, i > 0, &mut out);
+        let ls = LogScan { skip: &skip, user: (i > 0).then_some(&layout.names) };
+        scan_logs(l, "", 0, &ls, &mut w);
     }
-    out.sort_by(|a, b| a.phys.cmp(&b.phys));
-    out.dedup_by(|a, b| a.phys == b.phys);
-    out
+    w.found.sort_by(|a, b| a.phys.cmp(&b.phys));
+    w.found.dedup_by(|a, b| a.phys == b.phys);
+    w.uncertain.sort();
+    w.uncertain.dedup();
+    w
 }
 
 // ---------- Aviso para versiones anteriores ----------
@@ -1640,7 +1855,9 @@ pub fn convert(layout: &Layout, op: Op, dk: &DataKey, hook: Hook, progress: &mut
         .into_iter()
         .filter(|f| match op {
             Op::Encrypt => !f.encrypted && !is_stub_file(&f.phys),
-            Op::Decrypt => f.encrypted,
+            // Un apartado por dañado cuya cabecera no abre no tiene nada que rescatar: `loss_check`
+            // lo declaró como pérdida antes de empezar y no corta la conversión.
+            Op::Decrypt => f.encrypted && !(is_damaged(&f.logical) && !header_opens(&f.phys, dk)),
         })
         .collect();
     let mut p = Progress { total: todo.len(), total_bytes: todo.iter().filter_map(|f| fs::metadata(&f.phys).ok()).map(|m| m.len()).sum(), ..Default::default() };
@@ -1669,7 +1886,7 @@ pub fn convert(layout: &Layout, op: Op, dk: &DataKey, hook: Hook, progress: &mut
 }
 
 /// Verifica todos los archivos cifrados (antes de descifrar). Err con la lista de los alterados. Los
-/// apartados por dañados (`.dañado-`) no cuentan: se descifra lo que tienen de íntegro.
+/// apartados por dañados (`.danado-`) no cuentan: se descifra lo que tienen de íntegro.
 pub fn verify_all(layout: &Layout, dk: &DataKey) -> Result<(), String> {
     let bad: Vec<String> = walk(layout)
         .into_iter()
@@ -1696,15 +1913,21 @@ fn finish(layout: &Layout, op: Op, hook: Hook) -> Result<(), String> {
                 // Sin sesiones cifradas que lo reemplazaran: queda la lista vacía de una carpeta nueva.
                 let _ = fs::remove_file(d.join("sessions.json"));
             }
-            match fs::remove_file(d.join(KEY_FILE)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.to_string()),
+            // El aviso y la lista de carpetas se borran antes que la llave: un corte deja la llave
+            // (se retoma) o una carpeta en claro sin señales de cifrado.
+            let gone = |name: &str| match fs::remove_file(d.join(name)) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("{name}: {e}")),
+            };
+            gone(README_FILE)?;
+            for r in layout.user_logs() {
+                let _ = fs::remove_file(r.join(ROOT_MARK));
             }
+            gone(ROOTS_FILE)?;
+            gone(KEY_FILE)?;
             sync_dir(&d.join(KEY_FILE));
             hook(Step::Finish).map_err(|e| e.to_string())?;
-            let _ = fs::remove_file(d.join(README_FILE));
-            let _ = fs::remove_file(d.join(ROOTS_FILE));
         }
     }
     let _ = fs::remove_file(d.join(JOURNAL_FILE));
@@ -1748,35 +1971,67 @@ pub fn resume(layout: &Layout, op: Op, dk: &DataKey, hook: Hook, progress: &mut 
     Ok(rep)
 }
 
-/// Todos los `.nte` bajo la carpeta de datos y las de logs (recursivo, sin seguir enlaces).
-fn all_nte(layout: &Layout) -> Vec<PathBuf> {
-    fn rec(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+/// Todos los `.nte` bajo la carpeta de datos y las de logs (recursivo, sin seguir enlaces, hasta
+/// `MAX_DEPTH`, igual que los recorridos) y las carpetas más profundas, que no se revisan.
+fn all_nte(layout: &Layout) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    fn rec(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, deep: &mut Vec<PathBuf>) {
         let Ok(rd) = fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let Ok(ft) = e.file_type() else { continue };
-            if ft.is_dir() && depth < 10 {
-                rec(&e.path(), depth + 1, out);
+            if ft.is_dir() {
+                if depth + 1 >= MAX_DEPTH {
+                    deep.push(e.path());
+                } else {
+                    rec(&e.path(), depth + 1, out, deep);
+                }
             } else if ft.is_file() && e.file_name().to_string_lossy().ends_with(DOT_EXT) {
                 out.push(e.path());
             }
         }
     }
-    let mut out = Vec::new();
+    let (mut out, mut deep) = (Vec::new(), Vec::new());
     for root in std::iter::once(&layout.data).chain(layout.logs.iter()) {
-        rec(root, 0, &mut out);
+        rec(root, 0, &mut out, &mut deep);
     }
     out.sort();
     out.dedup();
-    out
+    deep.sort();
+    deep.dedup();
+    (out, deep)
 }
 
 /// Lo que se perdería al desactivar (borrar `datakey.ntk` deja irrecuperable todo `.nte` que quede):
 /// carpetas de logs usadas con el modo activo que no están accesibles y archivos cifrados que la
 /// conversión no cubre. Vacío: se puede desactivar sin perder nada.
-pub fn loss_check(layout: &Layout) -> Vec<String> {
-    let mut out: Vec<String> = layout.user_logs().iter().filter(|r| !r.is_dir()).map(|r| format!("Carpeta de logs no disponible: {}", r.display())).collect();
-    let covered: std::collections::HashSet<PathBuf> = walk(layout).into_iter().filter(|f| f.encrypted).map(|f| f.phys).collect();
-    out.extend(all_nte(layout).into_iter().filter(|p| !covered.contains(p)).map(|p| format!("Archivo cifrado fuera de lo que se convierte: {}", p.display())));
+/// También: `datakey.roots` que falta o no se lee, una carpeta registrada sin su marca (por ejemplo un
+/// punto de montaje vacío), carpetas más profundas que el límite y apartados por dañados cuya cabecera
+/// no abre (con `dk`).
+pub fn loss_check(layout: &Layout, dk: Option<&DataKey>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Err(e) = read_roots_checked(&layout.data) {
+        out.push(e);
+    }
+    let id = key_id(&layout.data).unwrap_or_default();
+    for r in layout.user_logs() {
+        if !r.is_dir() {
+            out.push(format!("Carpeta de logs no disponible: {}", r.display()));
+        } else if !root_mark_ok(r, &id) {
+            out.push(format!("Carpeta de logs sin su marca (¿no está conectada o montada?): {}", r.display()));
+        }
+    }
+    let found = walk(layout);
+    let covered: std::collections::HashSet<PathBuf> = found.iter().filter(|f| f.encrypted).map(|f| f.phys.clone()).collect();
+    let (nte, deep) = all_nte(layout);
+    out.extend(deep.into_iter().map(|p| format!("Carpeta a más de {MAX_DEPTH} niveles (no se revisa ni se convierte): {}", p.display())));
+    out.extend(nte.into_iter().filter(|p| !covered.contains(p)).map(|p| format!("Archivo cifrado fuera de lo que se convierte: {}", p.display())));
+    if let Some(dk) = dk {
+        out.extend(
+            found
+                .iter()
+                .filter(|f| f.encrypted && is_damaged(&f.logical) && !header_opens(&f.phys, dk))
+                .map(|f| format!("Archivo dañado sin cabecera legible (no se puede recuperar): {}", f.phys.display())),
+        );
+    }
     out
 }
 
@@ -1800,7 +2055,7 @@ impl From<String> for ConvError {
 /// verifica todo, descifra y, antes de borrar la llave, vuelve a mirar que no quede ningún `.nte`
 /// fuera de lo aceptado.
 pub fn disable(layout: &Layout, dk: &DataKey, accept: &[String], hook: Hook, progress: &mut dyn FnMut(&Progress)) -> Result<Report, ConvError> {
-    let loss = loss_check(layout);
+    let loss = loss_check(layout, Some(dk));
     if !loss.is_empty() && loss != accept {
         return Err(ConvError {
             message: "Desactivar dejaría archivos cifrados sin su llave (no se podrían abrir nunca más). Revisa la lista: conecta la carpeta que falta o confirma que aceptas perderlos.".into(),
@@ -1810,7 +2065,13 @@ pub fn disable(layout: &Layout, dk: &DataKey, accept: &[String], hook: Hook, pro
     verify_all(layout, dk)?;
     write_journal(layout, Op::Decrypt)?;
     let rep = convert(layout, Op::Decrypt, dk, hook, progress)?;
-    let left: Vec<String> = all_nte(layout).into_iter().map(|p| format!("Archivo cifrado fuera de lo que se convierte: {}", p.display())).filter(|p| !accept.contains(p)).collect();
+    // Lo que quede tiene que estar en la lista aceptada (cualquiera de sus motivos).
+    let left: Vec<String> = all_nte(layout)
+        .0
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .filter(|p| !accept.iter().any(|a| a.ends_with(&format!(": {p}"))))
+        .collect();
     if !left.is_empty() {
         return Err(ConvError { message: format!("Quedaron archivos cifrados sin convertir; la llave no se borró: {}", left.join(", ")), loss: Vec::new() });
     }
@@ -1819,15 +2080,19 @@ pub fn disable(layout: &Layout, dk: &DataKey, accept: &[String], hook: Hook, pro
 }
 
 fn is_damaged(p: &Path) -> bool {
-    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(DAMAGED))
+    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(DAMAGED) || DAMAGED_OLD.iter().any(|m| n.contains(m)))
 }
 
-/// Carpeta sin `datakey.ntk` pero con señales de estar cifrada (el aviso, el sessions.json de aviso o
-/// los archivos de datos cifrados): no se abre en claro ni se escribe nada.
+/// La cabecera de un archivo cifrado abre con la DEK (sin ella no hay nada que rescatar).
+fn header_opens(phys: &Path, dk: &DataKey) -> bool {
+    File::open(phys).is_ok_and(|f| EncReader::new(f, dk, false).is_ok())
+}
+
+/// Carpeta sin `datakey.ntk` pero con datos cifrados reales (`sessions`, `settings` o `topology`
+/// cifrados): no se abre en claro ni se escribe nada. El aviso o el sessions.json de aviso solos no
+/// bastan (pueden quedar en una carpeta que ya está en claro).
 pub fn orphan_markers(data: &Path) -> bool {
-    data.join(README_FILE).exists()
-        || is_stub_file(&data.join("sessions.json"))
-        || DATA_STEMS.iter().any(|s| data.join(format!("{s}.json{DOT_EXT}")).exists())
+    DATA_STEMS.iter().any(|s| data.join(format!("{s}.json{DOT_EXT}")).is_file())
 }
 
 /// Archivos en claro dentro de una carpeta cifrada (los dejó una versión anterior u otra herramienta):
@@ -1837,8 +2102,15 @@ pub fn plaintext_found(layout: &Layout) -> Vec<String> {
 }
 
 /// Cifra los archivos en claro encontrados (con su apartado si chocan con uno cifrado).
-pub fn fix_plaintext(layout: &Layout, dk: &DataKey) -> Result<Report, String> {
-    convert(layout, Op::Encrypt, dk, &no_hook, &mut |_| {})
+/// `include`: logs en claro que no calzaban con los nombres de la app y el usuario decidió cifrar
+/// (solo se aceptan los que `uncertain` informa ahora).
+pub fn fix_plaintext(layout: &Layout, dk: &DataKey, include: &[String]) -> Result<Report, String> {
+    let mut rep = convert(layout, Op::Encrypt, dk, &no_hook, &mut |_| {})?;
+    for p in uncertain(layout).into_iter().filter(|p| include.contains(&p.to_string_lossy().into_owned())) {
+        let f = Found { logical: p.clone(), phys: p.clone(), encrypted: false };
+        encrypt_one(&f, dk, &no_hook, &mut rep, layout, &mut |_| {}).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(rep)
 }
 
 #[cfg(test)]
