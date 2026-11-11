@@ -24,6 +24,8 @@ import { PanelResize, panelClass } from "./PanelResize";
 interface Props {
   width: number;
   onResize: (w: number) => void;
+  /** Ancho máximo del arrastre según el reparto de la ventana. */
+  resizeMax?: () => number;
   /** Ventana angosta: el panel se superpone a la terminal. */
   overlay?: boolean;
   /** Por qué no se puede ejecutar ahora (Herramientas a la vista, sin conexión…); null si se puede. */
@@ -166,8 +168,8 @@ export const CommandsPanel = memo(function CommandsPanel(p: Props) {
   const platLabel = useCallback((id: string) => vendor?.platforms.find((x) => x.id === id)?.label ?? id, [vendor]);
 
   return (
-    <aside role="complementary" aria-label="Catálogo de comandos" className={panelClass(!!p.overlay)} style={{ width: p.width }}>
-      <PanelResize width={p.width} onResize={p.onResize} />
+    <aside data-side-panel role="complementary" aria-label="Catálogo de comandos" className={panelClass(!!p.overlay)} style={{ width: p.width }}>
+      <PanelResize width={p.width} onResize={p.onResize} max={p.resizeMax} />
       <header className="flex items-center gap-1 px-2 h-9 border-b border-line">
         {/* Lista agrupada: con equipos de red y sistemas operativos ya no caben como pestañas. */}
         <select

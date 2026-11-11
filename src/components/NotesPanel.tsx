@@ -64,6 +64,8 @@ function occurrences(text: string, find: string, matchCase: boolean): number[] {
 interface Props {
   width: number;
   onResize: (w: number) => void;
+  /** Ancho máximo del arrastre según el reparto de la ventana. */
+  resizeMax?: () => number;
   /** Ventana angosta: el panel se superpone a la terminal. */
   overlay?: boolean;
   /** Por qué no se puede enviar ahora (Herramientas a la vista, sin conexión…); null si se puede. */
@@ -451,6 +453,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
 
   return (
     <aside
+      data-side-panel
       role="complementary"
       aria-label="Notas"
       className={panelClass(!!p.overlay)}
@@ -461,7 +464,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
       onCopy={() => unlocked && flash("Copiado. Ojo: el portapapeles no está protegido")}
       onCut={() => unlocked && flash("Cortado. Ojo: el portapapeles no está protegido")}
     >
-      <PanelResize width={p.width} onResize={p.onResize} />
+      <PanelResize width={p.width} onResize={p.onResize} max={p.resizeMax} />
 
       <header className="flex items-center gap-1 h-9 px-2 border-b border-line">
         {renaming !== null ? (

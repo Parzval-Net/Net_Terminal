@@ -1281,6 +1281,8 @@ function Workspace({
           extraFolders={settings.extraFolders}
           width={sidebarWidth}
           onResize={h.resizeSidebar}
+          resizeMax={h.sidebarMax}
+          onResizePreview={h.previewSidebar}
           order={settings.sidebarOrder}
           onSetOrder={h.setSidebarOrder}
           live={live}
@@ -1488,6 +1490,7 @@ function Workspace({
             onReturn={returnToTerminal}
             returnLabel={lastTermTab ? tabTitle(lastTermTab) : undefined}
             onResize={h.resizeNotes}
+            resizeMax={h.panelMax}
             catalog={catalog}
             vendor={settings.catalogVendor}
             onVendor={h.setVendor}
@@ -1514,6 +1517,7 @@ function Workspace({
             onReturn={returnToTerminal}
             returnLabel={lastTermTab ? tabTitle(lastTermTab) : undefined}
             onResize={h.resizeNotes}
+            resizeMax={h.panelMax}
             onClose={h.closeNotes}
             compiled={notesRules}
             theme={preset.theme}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { minTermFor, panelLayout } from "./panelLayout";
+import { SIDEBAR_MAX, SIDEBAR_MIN, minTermFor, panelDragMax, panelLayout, sidebarDragMax } from "./panelLayout";
 import { persist, stored } from "./prefs";
 
 /**
@@ -76,7 +76,7 @@ export function useAppLayout({ fontSize, floatingSidebar, activeId }: { fontSize
     if (areaRef.current) ro.observe(areaRef.current);
     return () => ro.disconnect();
   }, []);
-  const { sidebarAutoHidden, sidebarHiddenBy, sidebarShown, panelOverlay, panelWidth } = panelLayout({
+  const layoutIn = {
     rootW,
     vtabsW,
     focusMode,
@@ -86,7 +86,8 @@ export function useAppLayout({ fontSize, floatingSidebar, activeId }: { fontSize
     panelOpen: commandsOpen || notesOpen,
     panelW: notesWidth,
     minTerm,
-  });
+  };
+  const { sidebarAutoHidden, sidebarHiddenBy, sidebarShown, panelOverlay, panelWidth } = panelLayout(layoutIn);
   useEffect(() => persist("notesOpen", notesOpen), [notesOpen]);
   useEffect(() => persist("notesWidth", notesWidth), [notesWidth]);
 
@@ -200,9 +201,21 @@ export function useAppLayout({ fontSize, floatingSidebar, activeId }: { fontSize
       setSidebarOpen(true);
     },
     resizeNotes: (w: number) => setNotesWidth(Math.max(260, Math.min(w, window.innerWidth * 0.7))),
+    /** Límites del arrastre: lo que el reparto dibujaría, para que al soltar nada salte a otro ancho. */
+    panelMax: () => Math.min(window.innerWidth * 0.7, panelDragMax(layoutIn)),
+    sidebarMax: () => sidebarDragMax(layoutIn),
+    /**
+     * Durante el arrastre del borde de la barra de sesiones (`null` al soltar): el panel derecho acoplado
+     * se achica o crece como lo hará el reparto, y la barra flotante lleva su contenedor con ella.
+     */
+    previewSidebar: (w: number | null) => {
+      if (peekRef.current) peekRef.current.style.width = `${w ?? sidebarWidth}px`;
+      const panel = rowRef.current?.querySelector<HTMLElement>("[data-side-panel]");
+      if (panel) panel.style.width = `${w === null ? panelWidth : panelLayout({ ...layoutIn, sidebarW: w }).panelWidth}px`;
+    },
     resizeSidebar: (w: number) => {
       const first = sidebarPending.current === null;
-      sidebarPending.current = Math.max(180, Math.min(w, 480));
+      sidebarPending.current = Math.max(SIDEBAR_MIN, Math.min(w, SIDEBAR_MAX));
       if (first)
         requestAnimationFrame(() => {
           if (sidebarPending.current !== null) setSidebarWidth(sidebarPending.current);

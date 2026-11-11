@@ -1,7 +1,7 @@
 // Pruebas del reparto de ancho entre barra de sesiones, terminal y panel derecho:
 // `node scripts/tests/panelLayout.test.mjs` (Node 22.15+).
 import assert from "node:assert/strict";
-const { panelLayout, minTermFor, PANEL_MIN, TOOLS_NARROW } = await import("../../src/lib/panelLayout.ts");
+const { panelLayout, minTermFor, PANEL_MIN, TOOLS_NARROW, sidebarDragMax, panelDragMax, SIDEBAR_MAX } = await import("../../src/lib/panelLayout.ts");
 
 const base = { rootW: 1024, vtabsW: 0, focusMode: false, sidebarOpen: true, sidebarW: 256, panelOpen: true, panelW: 307, minTerm: minTermFor(13) };
 const L = (o) => panelLayout({ ...base, ...o });
@@ -85,5 +85,23 @@ assert.equal(L({ rootW: 720, toolsActive: true }).sidebarHiddenBy, "tools");
 assert.equal(L({ rootW: 1024 }).sidebarHiddenBy, "panel");
 // La preferencia no cambia: fuera de Herramientas la barra vuelve sola.
 assert.equal(L({ rootW: 720, panelOpen: false, toolsActive: false }).sidebarShown, true);
+
+// Límites del arrastre: al soltar dentro de ellos el reparto deja todo donde se veía.
+// 1280 px con panel: la barra llega hasta donde el panel aún cabe con 260 (1236 - 500 - 260 = 476).
+assert.equal(sidebarDragMax({ ...base, rootW: 1280 }), 476);
+assert.equal(L({ rootW: 1280, sidebarW: 476 }).sidebarShown, true);
+assert.equal(L({ rootW: 1280, sidebarW: 477 }).sidebarShown, false);
+// Sin panel, con la barra flotante o en ventana ancha: el máximo de siempre.
+assert.equal(sidebarDragMax({ ...base, rootW: 1280, panelOpen: false }), SIDEBAR_MAX);
+assert.equal(sidebarDragMax({ ...base, rootW: 1024, sidebarOpen: false }), SIDEBAR_MAX);
+assert.equal(sidebarDragMax({ ...base, rootW: 1920 }), SIDEBAR_MAX);
+// Nunca bajo el ancho actual (no se achica sola al tomar el borde).
+assert.ok(sidebarDragMax({ ...base, rootW: 1280, sidebarW: 300 }) >= 300);
+// Panel: el máximo es lo que el reparto dibujaría con cualquier ancho pedido.
+for (const o of [{ rootW: 1440 }, { rootW: 1280 }, { rootW: 1024 }, { rootW: 800, sidebarOpen: false }, { rootW: 720 }]) {
+  const max = panelDragMax({ ...base, ...o });
+  assert.equal(L({ ...o, panelW: max }).panelWidth, max, JSON.stringify(o));
+  assert.equal(L({ ...o, panelW: max + 300 }).panelWidth, max, JSON.stringify(o));
+}
 
 console.log("panelLayout: ok");

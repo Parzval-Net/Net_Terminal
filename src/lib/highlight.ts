@@ -543,6 +543,15 @@ const MAX_LINE = 1000;
 const MAX_PENDING = 4096;
 
 /**
+ * Ráfagas: el backend junta hasta 256 KB por entrega y resaltarlos de una vez era una tarea de
+ * decenas de ms (cientos en equipos lentos). Se resalta por tramos de líneas completas de hasta
+ * `SLICE` caracteres y, pasado `BUDGET` ms, lo que queda sigue en otra tarea: la interfaz responde
+ * entre tramos. El orden de salida no cambia (lo nuevo espera detrás de lo pendiente).
+ */
+const SLICE = 32 * 1024;
+const BUDGET = 8;
+
+/**
  * Procesa el flujo por líneas completas. Una línea incompleta (prompt, eco de teclas)
  * espera unos milisegundos por si llega el resto, y luego se escribe igual.
  */
@@ -551,6 +560,8 @@ export class StreamHighlighter {
   /** Lo último escrito no terminó en salto de línea. */
   private midLine = false;
   private timer: number | undefined;
+  /** Continuación programada de una ráfaga a medio resaltar. */
+  private later: number | undefined;
   private write: (s: string) => void;
   private rules: () => Compiled[];
   private bypass: () => boolean;
@@ -565,7 +576,7 @@ export class StreamHighlighter {
     const rules = this.rules();
     if (!rules.length || this.bypass()) {
       this.flush();
-      this.out(text);
+      this.outRaw(text);
       return;
     }
     // Eco de teclas y redibujo de línea (\b, \x1b[K): sin espera para que escribir se sienta
@@ -576,10 +587,31 @@ export class StreamHighlighter {
       return;
     }
     this.pending += text;
-    const cut = this.pending.lastIndexOf("\n");
-    if (cut >= 0) {
-      this.out(highlightText(this.pending.slice(0, cut + 1), rules, this.midLine));
-      this.pending = this.pending.slice(cut + 1);
+    // Con una ráfaga a medio resaltar, lo nuevo espera su turno en la continuación ya programada.
+    if (this.later !== undefined) return;
+    this.drain();
+  }
+
+  /** Resalta las líneas completas pendientes por tramos; si se acaba el tiempo, sigue en otra tarea. */
+  private drain() {
+    this.later = undefined;
+    const rules = this.rules();
+    const t0 = performance.now();
+    for (;;) {
+      const cut = this.pending.lastIndexOf("\n");
+      if (cut < 0) break;
+      // Hasta el último salto dentro del tramo (o el primero después, si la línea es más larga).
+      let end = cut + 1;
+      if (end > SLICE) {
+        const inSlice = this.pending.lastIndexOf("\n", SLICE);
+        end = (inSlice >= 0 ? inSlice : this.pending.indexOf("\n", SLICE)) + 1;
+      }
+      this.out(highlightText(this.pending.slice(0, end), rules, this.midLine));
+      this.pending = this.pending.slice(end);
+      if (this.pending.includes("\n") && performance.now() - t0 >= BUDGET) {
+        this.later = window.setTimeout(() => this.drain(), 0);
+        return;
+      }
     }
     // Salida continua sin saltos de línea (barras de progreso, líneas enormes): no se
     // retiene indefinidamente ni se acumula a costo cuadrático. El plazo es fijo desde
@@ -594,6 +626,8 @@ export class StreamHighlighter {
   flush() {
     window.clearTimeout(this.timer);
     this.timer = undefined;
+    window.clearTimeout(this.later);
+    this.later = undefined;
     if (!this.pending) return;
     const text = this.pending;
     this.pending = "";
@@ -606,8 +640,18 @@ export class StreamHighlighter {
     this.write(text);
   }
 
+  /**
+   * Sin resaltado, una ráfaga iría entera: xterm revisa el reloj solo entre escrituras, así que se le
+   * entrega en trozos para que ceda entre ellos (su parser conserva el estado de un trozo al otro).
+   */
+  private outRaw(text: string) {
+    if (text.length <= SLICE) return this.out(text);
+    for (let i = 0; i < text.length; i += SLICE) this.out(text.slice(i, i + SLICE));
+  }
+
   dispose() {
     window.clearTimeout(this.timer);
+    window.clearTimeout(this.later);
   }
 }
 
