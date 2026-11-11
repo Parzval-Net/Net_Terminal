@@ -2115,6 +2115,14 @@ mod tests {
         assert!(!mgr.is_read_only("c2"));
         assert_eq!(mgr.write("c2", b"x").unwrap_err(), "Sesión no conectada");
 
+        // Antes de escribir a mano se espera el pedido de contraseña y su autocompletado: una escritura del
+        // usuario lo desarma, y en una máquina lenta "show clock" podía adelantarse al prompt.
+        let t = Instant::now();
+        while !mgr.history("c1", 100).unwrap().contains("Password:") && t.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+
         // Desactivar el modo vuelve a permitir escribir.
         mgr.set_read_only("c1", false);
         mgr.write("c1", b"show clock\r").unwrap();
@@ -2122,10 +2130,6 @@ mod tests {
         mgr.set_read_only("c1", true);
         assert_eq!(mgr.write("c1", b"reload\r").unwrap_err(), super::READ_ONLY);
 
-        let t = Instant::now();
-        while !mgr.history("c1", 100).unwrap().contains("Password:") && t.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
         std::thread::sleep(Duration::from_millis(300));
         mgr.disconnect("c1");
         assert!(!mgr.is_read_only("c1"), "disconnect olvida la marca");
