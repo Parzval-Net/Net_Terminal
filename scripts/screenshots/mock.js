@@ -562,8 +562,8 @@ const handlers = {
   get_settings: () => settings,
   save_settings: () => null,
   save_topology: () => null,
-  app_version: () => "0.9.22",
-  update_check: () => ({ current: "0.9.22", latest: "0.9.22", newer: false, url: "", notes: "", published: "", supported: true, reason: null }),
+  app_version: () => "0.9.23",
+  update_check: () => ({ current: "0.9.23", latest: "0.9.23", newer: false, url: "", notes: "", published: "", supported: true, reason: null }),
   app_repo: () => "Parzval-Net/Net_Terminal",
   cmdpacks_list: () => [],
   list_notes: () => [
@@ -915,7 +915,7 @@ const handlers = {
   bundle_inspect: ({ password }) => {
     if (password !== "respaldo-de-prueba") throw "Contraseña incorrecta, o el archivo está dañado o fue modificado";
     return {
-      token: "tok1", app: "0.9.22", created: "2026-11-02T10:00:00Z",
+      token: "tok1", app: "0.9.23", created: "2026-11-02T10:00:00Z",
       sessions: [
         { id: "b1", name: "core-sw03", type: "ssh", host: "192.0.2.3", username: "admin", folder: "Sitio Central/Core", created_at: "" },
         { id: "b2", name: "sw-acceso-norte", type: "telnet", host: "203.0.113.99", folder: "Sucursales/Norte", created_at: "" },
