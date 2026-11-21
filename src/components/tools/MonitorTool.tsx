@@ -1,6 +1,6 @@
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { BellOff, Pause, Pencil, Play, Plus, RotateCcw, Trash2, Volume2, VolumeX } from "lucide-react";
-import { MonitorStatus, MonitorTarget, Sample, fmtDuration, stats } from "../../lib/monitors";
+import { MonitorStatus, MonitorTarget, Sample, fmtDuration, stats, targetErrors } from "../../lib/monitors";
 import { LineChart } from "./LineChart";
 import { Btn, Label, Metric, Section, StatusPill, ToolHeader, Toggle, fmtMs } from "./ui";
 import { Segmented } from "../controls";
@@ -41,7 +41,8 @@ export function MonitorTool({ targets, samples, status, onChange, onClear, onSil
 
   const save = (t: MonitorTarget) => {
     const name = t.name.trim() || `${t.host}${t.kind === "tcp" ? `:${t.port}` : ""}`;
-    const next = { ...t, name };
+    // "Guardar e iniciar" hace lo que dice: una sonda pausada queda activa al guardarla.
+    const next = { ...t, name, active: true };
     onChange(targets.some((x) => x.id === t.id) ? targets.map((x) => (x.id === t.id ? next : x)) : [...targets, next]);
     setEditing(null);
   };
@@ -77,7 +78,9 @@ export function MonitorTool({ targets, samples, status, onChange, onClear, onSil
         }
       />
 
-      {editing && <MonitorForm initial={editing} onSave={save} onCancel={() => setEditing(null)} />}
+      {/* key: al editar otra sonda (o pedir una nueva) el formulario se remonta con sus datos; sin
+          ella quedaban los campos y el id de la primera y se guardaba encima de esa. */}
+      {editing && <MonitorForm key={editing.id} initial={editing} onSave={save} onCancel={() => setEditing(null)} />}
 
       {targets.length === 0 && !editing && (
         <div className="rounded-xl border border-dashed border-line p-8 text-center text-body-sm text-muted">
@@ -128,6 +131,8 @@ const MonitorCard = memo(function MonitorCard(p: {
   const label =
     state === "stopped" ? "Pausada" : state === "up" ? "Arriba" : state === "down" ? "Caído" : "Esperando datos";
   const since = status && t.active && status.state !== "unknown" ? fmtDuration(Date.now() - status.since) : null;
+  const configError = t.active ? status?.configError : undefined;
+  const [confirmDel, setConfirmDel] = useState(false);
 
   return (
     // El estado y las acciones van en una fila propia bajo el título: a la derecha del encabezado le
@@ -135,35 +140,53 @@ const MonitorCard = memo(function MonitorCard(p: {
     // El espacio duro en "cada N s" evita que la unidad quede sola en otra línea.
     <Section title={t.name} hint={`${t.kind === "tcp" ? `TCP ${t.host}:${t.port}` : `ICMP ${t.host}`} · cada ${t.intervalMs / 1000}\u00a0s`}>
       <div className="flex items-center justify-between gap-2 -mt-1 mb-3">
-        <StatusPill state={state} label={since ? `${label} · ${since}` : label} />
-        <div className="flex items-center gap-1 shrink-0" role="group" aria-label={`Acciones de ${t.name}`}>
-          <Btn kind="ghost" className="!px-1.5" title={t.active ? "Pausar" : "Reanudar"} aria-label={t.active ? "Pausar" : "Reanudar"} onClick={() => a.toggle(t)}>
-            {t.active ? <Pause size={14} /> : <Play size={14} />}
-          </Btn>
-          <Btn
-            kind="ghost"
-            className="!px-1.5"
-            title={t.sound ? "Silenciar sonda" : "Activar sonido"}
-            aria-label={t.sound ? "Silenciar sonda" : "Activar sonido"}
-            onClick={() => a.sound(t)}
-          >
-            {t.sound ? <Volume2 size={14} /> : <VolumeX size={14} />}
-          </Btn>
-          {state === "down" && t.sound && (
-            <Btn kind="ghost" className="!px-1.5" title="Detener la alarma repetida" aria-label="Detener la alarma repetida" onClick={() => a.silence(t.id)}>
-              <BellOff size={14} />
+        {configError ? (
+          <StatusPill state="down" label="Error de configuración" />
+        ) : (
+          <StatusPill state={state} label={since ? `${label} · ${since}` : label} />
+        )}
+        {confirmDel ? (
+          <div className="flex items-center gap-2 shrink-0" role="group" aria-label={`Eliminar ${t.name}`}>
+            <span className="text-body-sm">¿Eliminar la sonda?</span>
+            <Btn autoFocus onClick={() => setConfirmDel(false)}>
+              Cancelar
             </Btn>
-          )}
-          <Btn kind="ghost" className="!px-1.5" title="Editar" aria-label="Editar" onClick={() => a.edit(t)}>
-            <Pencil size={13} />
-          </Btn>
-          <Btn kind="ghost" className="!px-1.5" title="Reiniciar estadísticas" aria-label="Reiniciar estadísticas" onClick={() => a.clear(t.id)}>
-            <RotateCcw size={13} />
-          </Btn>
-          <Btn kind="ghost" className="!px-1.5 hover:!text-danger" title="Eliminar" aria-label="Eliminar" onClick={() => a.remove(t.id)}>
-            <Trash2 size={13} />
-          </Btn>
-        </div>
+            <Btn kind="danger" onClick={() => a.remove(t.id)}>
+              Eliminar
+            </Btn>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 shrink-0" role="group" aria-label={`Acciones de ${t.name}`}>
+            {/* Conmutadores con nombre fijo y aria-pressed: el lector anuncia el estado, no solo el ícono. */}
+            <Btn kind="ghost" className="!px-1.5" title={t.active ? "Pausar" : "Reanudar"} aria-label="Pausar" aria-pressed={!t.active} onClick={() => a.toggle(t)}>
+              {t.active ? <Pause size={14} /> : <Play size={14} />}
+            </Btn>
+            <Btn
+              kind="ghost"
+              className="!px-1.5"
+              title={t.sound ? "Silenciar sonda" : "Activar sonido"}
+              aria-label="Silenciar sonda"
+              aria-pressed={!t.sound}
+              onClick={() => a.sound(t)}
+            >
+              {t.sound ? <Volume2 size={14} /> : <VolumeX size={14} />}
+            </Btn>
+            {state === "down" && t.sound && (
+              <Btn kind="ghost" className="!px-1.5" title="Detener la alarma repetida" aria-label="Detener la alarma repetida" onClick={() => a.silence(t.id)}>
+                <BellOff size={14} />
+              </Btn>
+            )}
+            <Btn kind="ghost" className="!px-1.5" title="Editar" aria-label="Editar" onClick={() => a.edit(t)}>
+              <Pencil size={13} />
+            </Btn>
+            <Btn kind="ghost" className="!px-1.5" title="Reiniciar estadísticas" aria-label="Reiniciar estadísticas" onClick={() => a.clear(t.id)}>
+              <RotateCcw size={13} />
+            </Btn>
+            <Btn kind="ghost" className="!px-1.5 hover:!text-danger" title="Eliminar" aria-label="Eliminar" onClick={() => setConfirmDel(true)}>
+              <Trash2 size={13} />
+            </Btn>
+          </div>
+        )}
       </div>
       {/* Indicadores sin marco propio (la tarjeta ya lo tiene) y sin truncar: si un valor no cabe, pasa a dos líneas. */}
       <div className="grid grid-cols-5 gap-x-3 gap-y-2 mb-3">
@@ -180,7 +203,8 @@ const MonitorCard = memo(function MonitorCard(p: {
         points={points}
         xLabel={timeLabel}
       />
-      {status?.state === "down" && status.lastError && (
+      {configError && <p className="mt-2 text-body-sm text-danger">✕ {configError}. Edita la sonda para corregirlo.</p>}
+      {!configError && status?.state === "down" && status.lastError && (
         <p className="mt-2 text-body-sm text-danger">✕ {status.lastError}</p>
       )}
       {status && status.downCount > 0 && (
@@ -201,7 +225,7 @@ function LossMetric({ lost, sent, loss }: { lost: number; sent: number; loss: nu
     <div className="min-w-0">
       <div className="text-caption text-muted leading-tight">Pérdida</div>
       <div className="mt-0.5 leading-snug tabular-nums [overflow-wrap:anywhere]">
-        <span className={`text-title font-semibold ${color}`}>{loss.toFixed(1)} %</span>{" "}
+        <span className={`text-title font-semibold ${color}`}>{sent ? `${loss.toFixed(1)} %` : "—"}</span>{" "}
         <span className="text-caption text-muted" title={`${lost} de ${sent} sin respuesta`}>
           {lost}/{sent}
         </span>
@@ -213,91 +237,124 @@ function LossMetric({ lost, sent, loss }: { lost: number; sent: number; loss: nu
 function MonitorForm({ initial, onSave, onCancel }: { initial: MonitorTarget; onSave: (t: MonitorTarget) => void; onCancel: () => void }) {
   const [t, setT] = useState(initial);
   const set = <K extends keyof MonitorTarget>(k: K, v: MonitorTarget[K]) => setT((p) => ({ ...p, [k]: v }));
-  const valid = t.host.trim() && (t.kind === "icmp" || (t.port && t.port > 0));
+  // Misma regla que el backend (validate_host y puerto u16): un valor inválido se explica aquí y no
+  // deja la tarjeta en "Esperando datos" con un error técnico de Tauri.
+  const errs = targetErrors(t);
+  const valid = !errs.host && !errs.port;
+  // El host vacío de una sonda nueva no se marca como error hasta que se escriba algo.
+  const hostMsg = t.host ? errs.host : undefined;
+  const portMsg = t.kind === "tcp" && t.port != null ? errs.port : undefined;
+  // El formulario se abre arriba de la lista: al editar una tarjeta de más abajo quedaba fuera de la vista.
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => box.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }), []);
   return (
-    <Section title={initial.name ? "Editar sonda" : "Nueva sonda"}>
-      <form
-        className="space-y-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (valid) onSave(t);
-        }}
-      >
-        <div className="grid grid-cols-[1fr_1fr_110px_90px] gap-3">
-          <Label text="Nombre">
-            <input className="field" value={t.name} placeholder="Core SCL" onChange={(e) => set("name", e.target.value)} />
-          </Label>
-          <Label text="Host o IP">
-            <input autoFocus className="field" value={t.host} placeholder="192.0.2.10" onChange={(e) => set("host", e.target.value.trim())} />
-          </Label>
-          <Label text="Tipo">
-            <select className="field" value={t.kind} onChange={(e) => set("kind", e.target.value as MonitorTarget["kind"])}>
-              <option value="icmp">ICMP (ping)</option>
-              <option value="tcp">TCP (puerto)</option>
-            </select>
-          </Label>
-          <Label text="Puerto">
-            <input
-              className="field"
-              type="number"
-              disabled={t.kind !== "tcp"}
-              value={t.port ?? ""}
-              placeholder="22"
-              onChange={(e) => set("port", Number(e.target.value) || undefined)}
-            />
-          </Label>
-        </div>
-        <div className="grid grid-cols-4 gap-3">
-          <Label text="Intervalo">
-            <select className="field" value={t.intervalMs} onChange={(e) => set("intervalMs", Number(e.target.value))}>
-              {[500, 1000, 2000, 5000, 10000, 30000, 60000].map((v) => (
-                <option key={v} value={v}>
-                  {v < 1000 ? `${v} ms` : `${v / 1000} s`}
-                </option>
-              ))}
-            </select>
-          </Label>
-          <Label text="Timeout">
-            <select className="field" value={t.timeoutMs} onChange={(e) => set("timeoutMs", Number(e.target.value))}>
-              {[500, 1000, 2000, 3000, 5000].map((v) => (
-                <option key={v} value={v}>
-                  {v} ms
-                </option>
-              ))}
-            </select>
-          </Label>
-          <Label text="Caído tras">
-            <select className="field" value={t.threshold} onChange={(e) => set("threshold", Number(e.target.value))}>
-              {[1, 2, 3, 5, 10].map((v) => (
-                <option key={v} value={v}>
-                  {v} {v === 1 ? "falla" : "fallas seguidas"}
-                </option>
-              ))}
-            </select>
-          </Label>
-          <Label text="Repetir alarma">
-            <select className="field" value={t.repeatSec} onChange={(e) => set("repeatSec", Number(e.target.value))}>
-              <option value={0}>No repetir</option>
-              {[10, 30, 60, 300].map((v) => (
-                <option key={v} value={v}>
-                  Cada {v < 60 ? `${v} s` : `${v / 60} min`}
-                </option>
-              ))}
-            </select>
-          </Label>
-        </div>
-        <div className="flex items-center justify-between">
-          <Toggle checked={t.sound} onChange={(v) => set("sound", v)} label="Alarma sonora" />
-          <div className="flex gap-2">
-            <Btn type="button" onClick={onCancel}>
-              Cancelar
-            </Btn>
-            <Btn type="submit" kind="primary" disabled={!valid}>
-              Guardar e iniciar
-            </Btn>
+    <div ref={box} className="scroll-mt-4">
+      <Section title={initial.name ? "Editar sonda" : "Nueva sonda"}>
+        <form
+          className="space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (valid) onSave(t);
+          }}
+        >
+          <div className="grid grid-cols-[1fr_1fr_110px_90px] gap-3">
+            <Label text="Nombre">
+              <input className="field" value={t.name} placeholder="Core SCL" onChange={(e) => set("name", e.target.value)} />
+            </Label>
+            <Label text="Host o IP">
+              <input
+                autoFocus
+                className="field"
+                value={t.host}
+                placeholder="192.0.2.10"
+                aria-invalid={!!hostMsg}
+                aria-describedby={hostMsg ? `${t.id}-host-err` : undefined}
+                onChange={(e) => set("host", e.target.value.trim())}
+              />
+              {hostMsg && (
+                <span id={`${t.id}-host-err`} className="block mt-1 text-body-sm text-danger">
+                  {hostMsg}
+                </span>
+              )}
+            </Label>
+            <Label text="Tipo">
+              <select className="field" value={t.kind} onChange={(e) => set("kind", e.target.value as MonitorTarget["kind"])}>
+                <option value="icmp">ICMP (ping)</option>
+                <option value="tcp">TCP (puerto)</option>
+              </select>
+            </Label>
+            <Label text="Puerto">
+              <input
+                className="field"
+                type="number"
+                disabled={t.kind !== "tcp"}
+                value={t.port ?? ""}
+                placeholder="22"
+                min={1}
+                max={65535}
+                aria-invalid={!!portMsg}
+                aria-describedby={portMsg ? `${t.id}-port-err` : undefined}
+                onChange={(e) => set("port", Number(e.target.value) || undefined)}
+              />
+              {portMsg && (
+                <span id={`${t.id}-port-err`} className="block mt-1 text-body-sm text-danger">
+                  {portMsg}
+                </span>
+              )}
+            </Label>
           </div>
-        </div>
-      </form>
-    </Section>
+          <div className="grid grid-cols-4 gap-3">
+            <Label text="Intervalo">
+              <select className="field" value={t.intervalMs} onChange={(e) => set("intervalMs", Number(e.target.value))}>
+                {[500, 1000, 2000, 5000, 10000, 30000, 60000].map((v) => (
+                  <option key={v} value={v}>
+                    {v < 1000 ? `${v} ms` : `${v / 1000} s`}
+                  </option>
+                ))}
+              </select>
+            </Label>
+            <Label text="Timeout">
+              <select className="field" value={t.timeoutMs} onChange={(e) => set("timeoutMs", Number(e.target.value))}>
+                {[500, 1000, 2000, 3000, 5000].map((v) => (
+                  <option key={v} value={v}>
+                    {v} ms
+                  </option>
+                ))}
+              </select>
+            </Label>
+            <Label text="Caído tras">
+              <select className="field" value={t.threshold} onChange={(e) => set("threshold", Number(e.target.value))}>
+                {[1, 2, 3, 5, 10].map((v) => (
+                  <option key={v} value={v}>
+                    {v} {v === 1 ? "falla" : "fallas seguidas"}
+                  </option>
+                ))}
+              </select>
+            </Label>
+            <Label text="Repetir alarma">
+              <select className="field" value={t.repeatSec} onChange={(e) => set("repeatSec", Number(e.target.value))}>
+                <option value={0}>No repetir</option>
+                {[10, 30, 60, 300].map((v) => (
+                  <option key={v} value={v}>
+                    Cada {v < 60 ? `${v} s` : `${v / 60} min`}
+                  </option>
+                ))}
+              </select>
+            </Label>
+          </div>
+          <div className="flex items-center justify-between">
+            <Toggle checked={t.sound} onChange={(v) => set("sound", v)} label="Alarma sonora" />
+            <div className="flex gap-2">
+              <Btn type="button" onClick={onCancel}>
+                Cancelar
+              </Btn>
+              <Btn type="submit" kind="primary" disabled={!valid}>
+                Guardar e iniciar
+              </Btn>
+            </div>
+          </div>
+        </form>
+      </Section>
+    </div>
   );
 }
