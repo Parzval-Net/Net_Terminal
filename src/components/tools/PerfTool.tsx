@@ -101,7 +101,8 @@ function SpeedTest({ history, onResult, onHistory }: SpeedProps) {
             aria-valuetext={`${phaseLabel}, paso ${overall.step} de 3, ${pct} %`}
             className="h-1.5 rounded-full bg-hover overflow-hidden"
           >
-            <div className="h-full bg-accent transition-all" style={{ width: `${pct}%` }} />
+            {/* Avance con scaleX (solo composición); animar el ancho recalculaba el diseño en cada cuadro. */}
+            <div className="h-full w-full origin-left bg-accent transition-transform" style={{ transform: `scaleX(${pct / 100})` }} />
           </div>
         </div>
       )}
@@ -441,7 +442,7 @@ function Iperf({ onServing }: { onServing?: (on: boolean) => void }) {
                     aria-valuenow={Math.min(elapsed, runSecs)}
                     className="w-20 h-1.5 rounded-full bg-hover overflow-hidden"
                   >
-                    <span className="block h-full bg-accent transition-all" style={{ width: `${Math.min(100, (elapsed / runSecs) * 100)}%` }} />
+                    <span className="block h-full w-full origin-left bg-accent transition-transform" style={{ transform: `scaleX(${Math.min(1, elapsed / runSecs)})` }} />
                   </span>
                 </span>
               )}
