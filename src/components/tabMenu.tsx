@@ -13,6 +13,7 @@ export interface TabMenuHandlers {
   onRename: (id: string, title: string | undefined) => void;
   onDuplicate: (id: string) => void;
   onReconnect: (id: string) => void;
+  /** Corta la conexión y deja la pestaña abierta. Es el lugar de Desconectar junto con la paleta. */
   onDisconnect: (id: string) => void;
   onClearScrollback: (id: string) => void;
   onResetTerminal: (id: string) => void;
@@ -66,11 +67,12 @@ export function tabMenuItems(t: Tab, state: TabState | undefined, p: TabMenuHand
     ["Renombrar", <Pencil size={13} />, startRename],
     ["Restaurar nombre original", <Undo2 size={13} />, () => p.onRename(t.id, undefined), !t.title],
     ["Duplicar", <Copy size={13} />, () => p.onDuplicate(t.id), false, `${modLabel}D`],
-    ["Reconectar", <RotateCcw size={13} />, () => p.onReconnect(t.id)],
+    // Conexión en su propio grupo: Desconectar vive aquí y en la paleta (salió de la barra de estado).
+    ["Reconectar", <RotateCcw size={13} />, () => p.onReconnect(t.id), false, undefined, true],
     ["Desconectar", <Unplug size={13} />, () => p.onDisconnect(t.id), state?.status === "closed"],
-    ...(p.onFind ? ([["Buscar en la terminal", <Search size={13} />, () => p.onFind!(t.id), false, `${modLabel}F`]] as MenuItem[]) : []),
+    ...(p.onFind ? ([["Buscar en la terminal", <Search size={13} />, () => p.onFind!(t.id), false, `${modLabel}F`, true]] as MenuItem[]) : []),
     ...(p.onHistory && !t.session.scp
-      ? ([["Historial de comandos enviados…", <History size={13} />, () => p.onHistory!(t.id), false, historyLabel]] as MenuItem[])
+      ? ([["Historial de comandos enviados…", <History size={13} />, () => p.onHistory!(t.id), false, historyLabel, !p.onFind]] as MenuItem[])
       : []),
     // Break solo existe en seriales y telnet (consolas): el resto no lo entiende.
     ...(p.onBreak && (t.session.type === "serial" || t.session.type === "telnet")
