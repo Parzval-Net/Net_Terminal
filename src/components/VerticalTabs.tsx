@@ -1,6 +1,6 @@
 import { persist, stored } from "../lib/prefs";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { Columns2, LayoutGrid, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, PanelTop, Plus, Rows2 } from "lucide-react";
+import { Columns2, History, LayoutGrid, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, PanelTop, Plus, Radio, Rows2, Search, TextSearch } from "lucide-react";
 import { tabTitle } from "../types";
 import { ContextMenu } from "./Sidebar";
 import { SessionIcon, isQuickSession } from "./SessionIcon";
@@ -9,7 +9,8 @@ import { useTabDrag } from "../lib/tabDrag";
 import { useTabKeys } from "../lib/useTabKeys";
 import { MenuItem, layoutItem, newTabMenuItems, splitMenuItems, tabMenuItems } from "./tabMenu";
 import { layoutLabel } from "../lib/split";
-import { focusLabel, modLabel } from "../lib/platform";
+import { focusLabel, historyLabel, isMac, modLabel } from "../lib/platform";
+import { useBroadcastTargets } from "./BroadcastTarget";
 
 const MIN_W = 160;
 const MAX_W = 420;
@@ -19,8 +20,9 @@ const RAIL_W = 44;
 const clamp = (w: number) => Math.max(MIN_W, Math.min(MAX_W, Math.round(w)));
 
 /**
- * Pestañas en columna (como Edge, Firefox o Arc). Mismos datos y acciones que TabBar;
- * se puede redimensionar desde el borde derecho y plegar a un riel de iconos.
+ * Pestañas en columna (como Edge, Firefox o Arc). Mismos datos y acciones que TabBar: Command
+ * Center, Buscar e Historial de la pestaña activa, número de panel en la vista dividida y marca de
+ * difusión. Se puede redimensionar desde el borde derecho y plegar a un riel de iconos.
  * Navegación: flechas/Inicio/Fin mueven el foco, Enter/Espacio activan, F2 renombra, Supr cierra.
  */
 export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
@@ -33,6 +35,17 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
   const closeMenu = useCallback(() => setMenu(null), []);
 
   useEffect(() => persist("vtabsCollapsed", collapsed), [collapsed]);
+
+  // Pestañas destino de la difusión (Notas, catálogo, botones) y número de panel en la vista dividida:
+  // los mismos que marca la barra horizontal.
+  const bc = useBroadcastTargets();
+  const bcIds = useMemo(() => (bc.multi ? new Set(bc.ids) : null), [bc]);
+  const paneOf = useMemo(() => {
+    const m = new Map<string, number>();
+    props.splitPanes?.forEach((id, i) => id && m.set(id, i + 1));
+    return m;
+  }, [props.splitPanes]);
+  const activeTab = tabs.find((t) => t.id === activeId);
 
   const commit = (id: string, value: string) => {
     setEditing(null);
@@ -100,6 +113,39 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
   // Un único tab enfocable con Tab (roving tabindex): el activo o, si no hay (p. ej. se ve
   // Herramientas), el primero.
   const focusId = tabs.some((t) => t.id === activeId) ? activeId : tabs[0]?.id;
+  const paletteKeys = isMac ? "Meta+K" : "Control+Shift+K";
+  const iconBtn = (on: boolean) => `w-7 h-7 shrink-0 grid place-items-center rounded-md hover:bg-hover ${on ? "text-accent" : "text-muted hover:text-fg"}`;
+  // Buscar e Historial de la pestaña activa (solo con una terminal a la vista; Historial no aplica a SCP).
+  const findBtn = activeTab && props.onToggleFind && (
+    <button
+      onClick={props.onToggleFind}
+      title={`Buscar en la terminal (${modLabel}F)`}
+      aria-label="Buscar en la terminal"
+      aria-pressed={!!props.findOpen}
+      className={iconBtn(!!props.findOpen)}
+    >
+      <TextSearch aria-hidden size={15} />
+    </button>
+  );
+  const historyBtn = activeTab && !activeTab.session.scp && props.onToggleHistory && (
+    <button
+      onClick={props.onToggleHistory}
+      // HistoryMenu no se cierra al hacer clic aquí (el botón lo alterna).
+      data-history-btn=""
+      title={`Historial de comandos enviados (${historyLabel})`}
+      aria-label="Historial de comandos enviados"
+      aria-pressed={!!props.historyOpen}
+      className={iconBtn(!!props.historyOpen)}
+    >
+      <History aria-hidden size={15} />
+    </button>
+  );
+  const termActions = findBtn || historyBtn ? (
+    <>
+      {findBtn}
+      {historyBtn}
+    </>
+  ) : null;
 
   return (
     <nav
@@ -150,6 +196,12 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
             {focusMode ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
         )}
+        {collapsed && props.onPalette && (
+          <button onClick={props.onPalette} title={`Buscar sesión o acción (${modLabel}K)`} aria-label="Buscar sesión o acción" aria-keyshortcuts={paletteKeys} className={iconBtn(false)}>
+            <Search aria-hidden size={14} />
+          </button>
+        )}
+        {collapsed && termActions}
         <button
           onClick={() => setCollapsed((c) => !c)}
           title={collapsed ? "Expandir pestañas" : "Plegar pestañas a iconos"}
@@ -160,6 +212,25 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
           {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
         </button>
       </div>
+      {/* Command Center y acciones de la terminal activa, como en la barra horizontal. */}
+      {!collapsed && (props.onPalette || termActions) && (
+        <div className="shrink-0 flex items-center gap-0.5 pl-1.5 pr-1.5 pb-1.5">
+          {props.onPalette && (
+            <button
+              onClick={props.onPalette}
+              title={`Buscar sesión o acción (${modLabel}K)`}
+              aria-label="Buscar sesión o acción"
+              aria-keyshortcuts={paletteKeys}
+              className="flex-1 min-w-0 h-7 px-2 flex items-center gap-2 rounded-md border border-line bg-panel text-[12px] text-muted hover:text-fg hover:border-field-line"
+            >
+              <Search aria-hidden size={13} className="shrink-0" />
+              <span className="flex-1 min-w-0 truncate text-left">Buscar sesión o acción</span>
+              {width >= 240 && <kbd className="shrink-0 text-[11px] font-sans">{modLabel}K</kbd>}
+            </button>
+          )}
+          {termActions}
+        </div>
+      )}
 
       <div
         ref={keys.listRef}
@@ -179,13 +250,15 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
           const status = states[t.id]?.status ?? "connecting";
           const marker = alerted?.has(t.id) && !active ? "alert" : activity.has(t.id) && !active ? "activity" : null;
           const title = tabTitle(t);
+          const pane = paneOf.get(t.id);
+          const inBc = !!bcIds?.has(t.id);
           return (
             <div
               key={t.id}
               role="tab"
               data-id={t.id}
               aria-selected={active}
-              aria-label={tabLabel(title, status, marker, t.readOnly)}
+              aria-label={`${tabLabel(title, status, marker, t.readOnly)}${pane ? `, panel ${pane}` : ""}${inBc ? ", recibe la difusión" : ""}`}
               tabIndex={focusId === t.id ? 0 : -1}
               onMouseDown={(e) => {
                 if (e.button === 1) {
@@ -209,8 +282,22 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
               title={`${title}${t.title ? ` (${t.session.name})` : ""}\nArrastra para mover · doble clic: renombrar · clic derecho: opciones · clic medio: cerrar`}
               className={`${rowBase} ${rowState(active)} ${focusable} ${drag.dragId === t.id ? "opacity-50" : ""} ${
                 drag.target?.id === t.id ? dropMark(drag.target.after ? "bottom" : "top") : ""
-              }`}
+              } ${inBc ? (active ? "shadow-[inset_2px_0_0_0_var(--bc-mark)]" : "shadow-[inset_2px_0_0_0_var(--warn)]") : ""}`}
+              // Difusión: borde izquierdo de aviso. En la activa el fondo es el del tema de terminal: el color se
+              // mezcla con --term-fg (como el punto de estado) para mantener >= 3:1.
+              style={inBc && active ? ({ "--bc-mark": "color-mix(in oklab, var(--warn) 60%, var(--term-fg))" } as React.CSSProperties) : undefined}
             >
+              {pane && !collapsed && (
+                <span
+                  aria-hidden
+                  title={`Panel ${pane} de la vista dividida`}
+                  className={`shrink-0 min-w-4 h-4 px-1 grid place-items-center rounded border text-[10.5px] font-semibold leading-none tabular-nums ${
+                    active ? "border-term-fg/50 text-term-fg" : "border-field-line text-fg"
+                  }`}
+                >
+                  {pane}
+                </span>
+              )}
               <SessionIcon type={t.session.type} size={13} quick={isQuickSession(t.session)} />
               {collapsed ? (
                 <>
@@ -220,7 +307,19 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                     active={active}
                     className={`absolute bottom-0.5 left-0.5 ring-1 ${active ? "ring-term" : "ring-[var(--chrome)]"}`}
                   />
-                  {t.readOnly && <ReadOnlyMark size={10} className="absolute top-0 left-0.5" />}
+                  {pane ? (
+                    <span
+                      aria-hidden
+                      title={`Panel ${pane} de la vista dividida`}
+                      className={`absolute -top-0.5 -left-0.5 min-w-3.5 h-3.5 px-0.5 grid place-items-center rounded-sm text-[9.5px] font-semibold leading-none tabular-nums border ${
+                        active ? "bg-term border-term-fg/50 text-term-fg" : "bg-chrome border-field-line text-fg"
+                      }`}
+                    >
+                      {pane}
+                    </span>
+                  ) : (
+                    t.readOnly && <ReadOnlyMark size={10} className="absolute top-0 left-0.5" />
+                  )}
                   {marker && (
                     <span
                       className={marker === "alert" ? "absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-danger" : "absolute top-1 right-0 w-[3px] h-3 rounded-full bg-accent"}
@@ -255,6 +354,14 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
                     <span className={`truncate flex-1 min-w-0 ${t.title ? "italic" : ""}`}>{title}</span>
                   )}
                   {t.readOnly && <ReadOnlyMark />}
+                  {inBc && (
+                    <span
+                      title="Recibe lo que envías desde Notas, catálogo y botones (difusión)"
+                      className={`shrink-0 grid place-items-center ${active ? "text-[var(--bc-mark)]" : "text-warn"}`}
+                    >
+                      <Radio aria-hidden size={12} />
+                    </span>
+                  )}
                   {marker === "alert" ? (
                     <span aria-hidden className="text-[11px] font-semibold text-danger shrink-0" title="Alerta por palabra clave">
                       ▲
