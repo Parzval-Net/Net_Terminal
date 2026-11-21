@@ -16,6 +16,7 @@ import {
   parseCliCounters,
   terminalFor,
   parseCounterGets,
+  portEntry,
   portRate,
   trafficCommands,
 } from "../../lib/topoTraffic";
@@ -162,7 +163,8 @@ export function useTopoTraffic({
       }
       const idx = new Map<string, number>();
       for (const k of ports) {
-        const i = cache.byPort.get(k);
+        // Clave exacta o, si falta, la única que coincide sin mayúsculas ni subinterfaz (portEntry).
+        const i = portEntry(cache.byPort, k);
         if (i !== undefined) idx.set(k, i);
       }
       if (!idx.size) return new Map();
@@ -227,7 +229,7 @@ export function useTopoTraffic({
       const counters = parseCliCounters(out);
       const res = new Map<string, CounterSample>();
       for (const k of ports) {
-        const c = counters.get(k);
+        const c = portEntry(counters, k);
         if (!c) continue;
         res.set(k, { inOctets: c.inOctets, outOctets: c.outOctets, bits: 64, speed: c.speed, ...(c.speedApprox ? { approx: true } : {}), ts, src: "cli" });
         const info: PortInfo = {};

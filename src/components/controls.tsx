@@ -20,7 +20,7 @@ export function Item({ label, hint, children }: { label: string; hint?: string; 
         <div className="min-w-0">
           <div id={labelId}>{label}</div>
           {hint && (
-            <div id={hintId} className="text-[11.5px] text-muted truncate" title={hint}>
+            <div id={hintId} className="text-[11.5px] text-muted line-clamp-2 [overflow-wrap:anywhere]" title={hint}>
               {hint}
             </div>
           )}
