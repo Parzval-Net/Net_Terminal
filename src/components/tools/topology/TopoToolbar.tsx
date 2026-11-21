@@ -351,13 +351,6 @@ export function TopoToolbar({
 
   return (
     <section className={`rounded-xl border border-line bg-panel ${wide ? "px-4 py-3" : "px-3 py-2"}`}>
-      {/* En anchos chicos se oculta: el menú lateral ya dice Topología y el texto queda en el botón. */}
-      <header className="flex items-baseline gap-2 min-w-0 mb-2 @max-[860px]:hidden">
-        <h2 className="text-[13px] font-semibold shrink-0">Topología</h2>
-        <p className="text-[11.5px] text-muted truncate" title={hint}>
-          {hint}
-        </p>
-      </header>
       {wide ? (
         <div className={`flex flex-wrap items-end gap-2 ${discoverWhy ? "mb-5" : ""}`}>
           <Label text="Descubrir con" className="w-36">

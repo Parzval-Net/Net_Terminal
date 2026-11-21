@@ -1,7 +1,7 @@
 import { ChevronUp } from "lucide-react";
 import { UTIL_HIGH, UTIL_SATURATED } from "../../../lib/topoTraffic";
 import { LINK_LEGEND, UTIL_LEGEND, linkDash } from "../../../lib/topology";
-import { UTIL_VAR } from "./topoStyle";
+import { FLOW_OK, FLOW_OK_OPACITY, NO_DATA_DASH, UTIL_VAR } from "./topoStyle";
 
 /** Muestra de línea para la leyenda (mismo trazo que el diagrama). */
 function LegendLine({ dash }: { dash?: string }) {
@@ -23,6 +23,7 @@ export function MapLegend({
   hasTentative,
   showStatusLegend,
   detail,
+  trafficOn,
   hasTraffic,
   color,
   arrows,
@@ -38,6 +39,8 @@ export function MapLegend({
   hasTentative: boolean;
   showStatusLegend: boolean;
   detail: boolean;
+  /** Lectura de tráfico activa: separa "con tráfico normal" de "sin datos de tráfico". */
+  trafficOn: boolean;
   hasTraffic: boolean;
   color: boolean;
   arrows: boolean;
@@ -77,9 +80,33 @@ export function MapLegend({
           {showStatusLegend && (
             <>
               <span className="mt-1 font-medium text-fg">Estado del enlace (sentido más cargado)</span>
+              {trafficOn ? (
+                <>
+                  {!detail && (
+                    <span className="inline-flex items-center gap-1.5">
+                      <svg width="34" height="8" aria-hidden className="shrink-0">
+                        <line x1="2" y1="4" x2="32" y2="4" stroke={FLOW_OK} strokeOpacity={FLOW_OK_OPACITY} strokeWidth={2.25} strokeLinecap="round" />
+                      </svg>
+                      Con tráfico, normal (menos de {Math.round(UTIL_HIGH * 100)} %)
+                    </span>
+                  )}
+                  <span className="inline-flex items-center gap-1.5">
+                    <svg width="34" height="8" aria-hidden className="shrink-0">
+                      <line x1="2" y1="4" x2="32" y2="4" stroke="var(--muted)" strokeWidth={1.5} strokeDasharray={NO_DATA_DASH} strokeLinecap="round" />
+                    </svg>
+                    Sin datos de tráfico (motivo en la ficha)
+                  </span>
+                </>
+              ) : (
+                <span className="inline-flex items-center gap-1.5">
+                  <svg width="34" height="8" aria-hidden className="shrink-0">
+                    <line x1="2" y1="4" x2="32" y2="4" stroke="var(--muted)" strokeWidth={1.5} strokeLinecap="round" />
+                  </svg>
+                  Normal (menos de {Math.round(UTIL_HIGH * 100)} %)
+                </span>
+              )}
               {(
                 [
-                  ["Normal (menos de 70 %)", "var(--muted)", 1.5],
                   [`Alto (${Math.round(UTIL_HIGH * 100)} a ${Math.round(UTIL_SATURATED * 100) - 1} %)`, "var(--warn)", 4],
                   [`Saturado (${Math.round(UTIL_SATURATED * 100)} % o más)`, "var(--danger)", 5],
                 ] as [string, string, number][]

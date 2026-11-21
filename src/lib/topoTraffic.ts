@@ -135,13 +135,41 @@ export function portRate(prev: CounterSample | undefined, cur: CounterSample, ma
 }
 
 /**
+ * Clave flexible de un puerto ya normalizado (canonPort): sin la subinterfaz (".100") ni signos. Sirve
+ * de segunda opción cuando el enlace informa el puerto distinto de como lo nombran los contadores.
+ */
+const loosePort = (k: string) => k.toLowerCase().replace(/\.\d+$/, "").replace(/[^a-z0-9/:]/g, "");
+
+/**
+ * Lectura de un puerto en el mapa de un equipo (clave canonPort). Primero la clave exacta; si falta,
+ * la única clave que coincide sin distinguir mayúsculas, signos ni subinterfaz (un enlace sobre
+ * "Gi1/0/1.100" usa los contadores de Gi1/0/1). Con dos o más candidatas no elige ninguna.
+ */
+export function portEntry<T>(m: Map<string, T> | undefined, port: string | undefined): T | undefined {
+  if (!m || !port) return undefined;
+  const k = canonPort(port);
+  const hit = m.get(k);
+  if (hit !== undefined) return hit;
+  const want = loosePort(k);
+  if (!want) return undefined;
+  let found: T | undefined;
+  let n = 0;
+  for (const [key, v] of m) {
+    if (loosePort(key) !== want) continue;
+    if (++n > 1) return undefined;
+    found = v;
+  }
+  return found;
+}
+
+/**
  * Tráfico de un enlace en ambos sentidos. A→B es lo que sale por el puerto de A (o, si A no se
  * lee, lo que entra por el de B); B→A, al revés. La velocidad es la menor informada. Sin al menos
  * una tasa calculada devuelve null (falta una segunda lectura).
  */
 export function linkTraffic(l: TopoLink, rates: Map<string, Map<string, PortRate>>): LinkTraffic | null {
-  const ra = l.aPort ? rates.get(l.a)?.get(canonPort(l.aPort)) : undefined;
-  const rb = l.bPort ? rates.get(l.b)?.get(canonPort(l.bPort)) : undefined;
+  const ra = portEntry(rates.get(l.a), l.aPort);
+  const rb = portEntry(rates.get(l.b), l.bPort);
   const ab = ra?.outBps ?? rb?.inBps ?? null;
   const ba = ra?.inBps ?? rb?.outBps ?? null;
   if (ab === null && ba === null) return null;
@@ -166,6 +194,109 @@ export function linkTraffic(l: TopoLink, rates: Map<string, Map<string, PortRate
     ts: Math.max(ra?.ts ?? 0, rb?.ts ?? 0),
     ...(src ? { src } : {}),
   };
+}
+
+// ---------- Enlaces sin datos de tráfico ----------
+
+/** Estado de la última ronda de lecturas (el que registra useTopoTraffic), por nombre de equipo. */
+export interface TrafficReadState {
+  snmp: string[];
+  cli: string[];
+  /** Equipos explorados sin perfil SNMP ni sesión de consola habilitada. */
+  none: string[];
+  /** "equipo: motivo". */
+  errors: string[];
+  /** Pestañas sin prompt a la vista: no se les envió nada. */
+  busy: string[];
+  /** "equipo: detalle" de las lecturas por consola cortadas. */
+  partial: string[];
+  last?: number;
+}
+
+/**
+ * Por qué un enlace no tiene tráfico con la lectura activa. De mayor a menor utilidad para actuar:
+ * error de lectura, puerto que no aparece en los contadores, lectura parcial, extremo sin perfil SNMP
+ * ni consola, pestaña ocupada, enlace sin puerto, esperando lectura y extremo sin explorar.
+ */
+export type NoTrafficKind = "error" | "portMissing" | "partial" | "noSource" | "busy" | "noPort" | "waiting" | "unexplored";
+const NO_TRAFFIC_ORDER: NoTrafficKind[] = ["error", "portMissing", "partial", "noSource", "busy", "noPort", "waiting", "unexplored"];
+
+/** Rótulo corto de cada motivo (resumen del panel). */
+export const NO_TRAFFIC_SHORT: Record<NoTrafficKind, string> = {
+  error: "error de lectura",
+  portMissing: "puerto no encontrado",
+  partial: "lectura parcial",
+  noSource: "sin SNMP ni consola",
+  busy: "pestaña ocupada",
+  noPort: "sin puerto",
+  waiting: "esperando lectura",
+  unexplored: "sin explorar",
+};
+
+export interface NoTrafficEnd {
+  /** Nombre del equipo del extremo. */
+  name: string;
+  kind: NoTrafficKind;
+  text: string;
+}
+
+export interface NoTrafficReason {
+  /** El motivo más útil para actuar entre los extremos. */
+  kind: NoTrafficKind;
+  /** Motivo legible del enlace, con el equipo de cada extremo. */
+  text: string;
+  ends: NoTrafficEnd[];
+}
+
+/** Texto después de "equipo: " en las listas de estado (errores y lecturas parciales). */
+const afterName = (list: string[], name: string) => {
+  const hit = list.find((e) => e.startsWith(`${name}: `));
+  return hit === undefined ? undefined : hit.slice(name.length + 2);
+};
+
+function endReason(
+  n: Pick<TopoNode, "id" | "name" | "explored"> | undefined,
+  id: string,
+  port: string,
+  rates: Map<string, Map<string, PortRate>>,
+  st: TrafficReadState,
+): NoTrafficEnd {
+  const name = n?.name ?? id;
+  const end = (kind: NoTrafficKind, text: string): NoTrafficEnd => ({ name, kind, text });
+  if (!n?.explored) return end("unexplored", "sin explorar: no se leen sus contadores");
+  if (!port) return end("noPort", "el enlace no informa su puerto");
+  if (st.none.includes(name)) return end("noSource", "sin perfil SNMP ni lectura por consola");
+  const err = afterName(st.errors, name);
+  if (err !== undefined) return end("error", `error de lectura (${err})`);
+  if (st.busy.includes(name)) return end("busy", "su pestaña no estaba en el prompt; se reintenta en la próxima lectura");
+  const own = rates.get(id);
+  if (portEntry(own, port)) return end("waiting", "esperando la segunda lectura (la tasa sale de dos lecturas seguidas)");
+  if (own) {
+    if (afterName(st.partial, name) !== undefined) return end("partial", `lectura parcial: ${port} no alcanzó a leerse`);
+    return end("portMissing", st.snmp.includes(name) ? `${port} no aparece en ifName ni ifDescr del equipo` : `${port} no aparece en los contadores leídos del equipo`);
+  }
+  return end("waiting", st.last ? "esperando la próxima lectura" : "esperando la primera lectura");
+}
+
+/**
+ * Motivo por el que un enlace queda sin datos de tráfico con la lectura activa (sin LinkTraffic). Se
+ * revisa cada extremo con lo que registró la última ronda: ningún extremo explorado; extremo sin
+ * perfil SNMP ni consola; error de lectura; pestaña ocupada; puerto leído sin tasa todavía (falta la
+ * segunda lectura o el contador se reinició); equipo leído cuyos contadores no traen el puerto; o
+ * lectura por consola cortada. Función pura: el estado viene de useTopoTraffic.
+ */
+export function noTrafficReason(
+  l: Pick<TopoLink, "a" | "aPort" | "b" | "bPort">,
+  nodes: Map<string, Pick<TopoNode, "id" | "name" | "explored">>,
+  rates: Map<string, Map<string, PortRate>>,
+  st: TrafficReadState,
+): NoTrafficReason {
+  const ends = [endReason(nodes.get(l.a), l.a, l.aPort, rates, st), endReason(nodes.get(l.b), l.b, l.bPort, rates, st)];
+  const read = ends.filter((e) => e.kind !== "unexplored");
+  if (!read.length) return { kind: "unexplored", text: "Ningún extremo explorado: descubre uno de los dos equipos para leer sus contadores", ends };
+  read.sort((x, y) => NO_TRAFFIC_ORDER.indexOf(x.kind) - NO_TRAFFIC_ORDER.indexOf(y.kind));
+  const text = read.length === 2 && read[0].text === read[1].text ? `Ambos extremos: ${read[0].text}` : read.map((e) => `${e.name}: ${e.text}`).join("; ");
+  return { kind: read[0].kind, text, ends };
 }
 
 /**

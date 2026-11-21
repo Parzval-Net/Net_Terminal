@@ -290,6 +290,8 @@ export interface LinkDetail {
   /** Enlace que ya nadie informa: momento desde el que no se ve (0 si no se sabe). */
   staleSince?: number;
   logical?: boolean;
+  /** Con el tráfico activo y sin lectura: por qué no hay datos (ver noTrafficReason en topoTraffic.ts). */
+  noTraffic?: string;
 }
 
 /**
