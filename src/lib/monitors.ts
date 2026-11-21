@@ -168,6 +168,9 @@ export function portState(row: { open: boolean; error: string | null }): PortSta
  * Estado global de sondas: vive en App para que las alarmas suenen aunque la pestaña
  * de herramientas no esté visible.
  */
+/** Ventana para agrupar muestras de sondas que llegan casi juntas (un render por grupo). */
+const MONITOR_BATCH_MS = 50;
+
 export function useMonitors(
   targets: MonitorTarget[],
   notify: (text: string, kind: "info" | "error") => void,
@@ -252,19 +255,32 @@ export function useMonitors(
   }, [signature]);
 
   useEffect(() => {
-    const un = listen<Sample & { id: string }>("monitor-sample", ({ payload }) => {
-      const { id, ...sample } = payload;
+    // Cada muestra re-dibujaba App entera. Las sondas que arrancan juntas con el mismo intervalo
+    // llegan casi a la vez: se agrupan las que llegan en MONITOR_BATCH_MS y se aplican en un solo
+    // render. Avisos y alarmas se procesan en el mismo orden de llegada.
+    let queue: (Sample & { id: string })[] = [];
+    let timer: number | undefined;
+    const flush = () => {
+      timer = undefined;
+      const batch = queue;
+      queue = [];
+      if (!batch.length) return;
       setSamples((all) => {
-        const list = all[id] ?? [];
-        const next = list.length >= MAX_SAMPLES ? [...list.slice(-MAX_SAMPLES + 1), sample] : [...list, sample];
-        return { ...all, [id]: next };
+        const out = { ...all };
+        for (const { id, ...sample } of batch) {
+          const list = out[id] ?? [];
+          out[id] = list.length >= MAX_SAMPLES ? [...list.slice(-MAX_SAMPLES + 1), sample] : [...list, sample];
+        }
+        return out;
       });
-
+      for (const { id, ...sample } of batch) onSample(id, sample);
+      setStatus(statusRef.current);
+    };
+    const onSample = (id: string, sample: Sample) => {
       const t = targetsRef.current.find((x) => x.id === id);
       const { next, event } = nextStatus(statusRef.current[id], sample, t?.threshold ?? 3);
       const prevSince = statusRef.current[id]?.since ?? sample.ts;
       statusRef.current = { ...statusRef.current, [id]: next };
-      setStatus(statusRef.current);
 
       if (!t) return;
       if (event === "down") {
@@ -279,8 +295,13 @@ export function useMonitors(
         notify(`${t.name} recuperado tras ${fmtDuration(sample.ts - prevSince)}`, "info");
         if (t.sound) alarmUp();
       }
+    };
+    const un = listen<Sample & { id: string }>("monitor-sample", ({ payload }) => {
+      queue.push(payload);
+      timer ??= window.setTimeout(flush, MONITOR_BATCH_MS);
     });
     return () => {
+      window.clearTimeout(timer);
       un.then((f) => f());
       Object.keys(repeatTimers.current).forEach(clearRepeat);
     };

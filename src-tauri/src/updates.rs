@@ -135,11 +135,17 @@ pub async fn install(app: AppHandle) -> Result<(), String> {
     };
     let progress = app.clone();
     let mut done: usize = 0;
+    // La descarga llega en fragmentos de pocos KB: un evento por fragmento eran miles por segundo
+    // en el hilo del webview. Se informa como mucho cada 100 ms y siempre al completar.
+    let mut every = Throttle::new(Duration::from_millis(100));
     update
         .download_and_install(
             move |chunk, total| {
                 done += chunk;
-                let _ = progress.emit("update-progress", serde_json::json!({ "downloaded": done, "total": total }));
+                let complete = total.is_some_and(|t| done as u64 >= t);
+                if every.ready() || complete {
+                    let _ = progress.emit("update-progress", serde_json::json!({ "downloaded": done, "total": total }));
+                }
             },
             || {},
         )
@@ -148,9 +154,40 @@ pub async fn install(app: AppHandle) -> Result<(), String> {
     app.restart()
 }
 
+/// Deja pasar un aviso de progreso como mucho cada `every` (el primero pasa de inmediato).
+struct Throttle {
+    every: Duration,
+    last: Option<std::time::Instant>,
+}
+
+impl Throttle {
+    fn new(every: Duration) -> Self {
+        Throttle { every, last: None }
+    }
+
+    fn ready(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if self.last.is_some_and(|l| now.duration_since(l) < self.every) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_throttle_limits_burst() {
+        // Una ráfaga de 10.000 fragmentos seguidos deja pasar solo el primero dentro de la ventana.
+        let mut t = Throttle::new(Duration::from_millis(100));
+        let passed = (0..10_000).filter(|_| t.ready()).count();
+        assert_eq!(passed, 1);
+        std::thread::sleep(Duration::from_millis(110));
+        assert!(t.ready());
+    }
 
     #[test]
     fn repo_comes_from_build_metadata() {

@@ -28,13 +28,13 @@ import { ActivityBar } from "./components/ActivityBar";
 import { HistoryMenu } from "./components/HistoryMenu";
 import { Toasts, type ToastItem, type ToastKind } from "./components/Toasts";
 import { errText, failText } from "./lib/errors";
-import { TerminalView, TermController } from "./components/TerminalView";
+import { TerminalView, TermController, preloadTermAddons } from "./components/TerminalView";
 import type { CredChange } from "./components/SessionModal";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { hopCloseNote, runningHops } from "./lib/hopRegistry";
 import { CloseManyMessage } from "./components/CloseManyMessage";
 import { CloseScope, summarizeClose, tabsToClose } from "./lib/closeAll";
-import { NotesPanel } from "./components/NotesPanel";
+import { panelClass } from "./components/PanelResize";
 import { CommandsPanel } from "./components/CommandsPanel";
 import { vendorFor } from "./lib/vendorFor";
 import { CatalogEntry, Pack, PackCommand, Risk, buildCatalog, computeRisk, orderPacks, riskLabel, validatePack } from "./lib/packs";
@@ -90,6 +90,12 @@ const ToolsView = lazyView(
       return m.ToolsView;
     }),
   (p: { active: boolean }) => <ToolsLoading active={p.active} />,
+);
+// Panel de notas (con editor, candado y vista de diagramas): solo al abrirlo. Mientras llega el
+// chunk se reserva su ancho para que el diseño no salte.
+const NotesPanel = lazyView(
+  () => import("./components/NotesPanel").then((m) => m.NotesPanel),
+  (p: { width: number; overlay?: boolean }) => <aside aria-hidden className={panelClass(!!p.overlay)} style={{ width: p.width }} />,
 );
 const SettingsModal = lazyView(() => import("./components/SettingsModal").then((m) => m.SettingsModal));
 const ImportDialog = lazyView(() => import("./components/ImportDialog").then((m) => m.ImportDialog));
@@ -756,6 +762,8 @@ function Workspace({
     const load = () => {
       import("./lib/builtinPacks").then((m) => setBuiltinPacks(m.builtinPacks)).catch(console.error);
       for (const d of LAZY_DIALOGS) d.preload().catch(() => {});
+      preloadTermAddons().catch(() => {});
+      NotesPanel.preload().catch(() => {});
     };
     if (typeof window.requestIdleCallback !== "function") {
       const t = window.setTimeout(load, 200);

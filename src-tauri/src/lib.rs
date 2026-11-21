@@ -93,7 +93,8 @@ pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, St
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+// async: clonar y serializar cientos de sesiones no ocupa el hilo principal (va en la cola "sessions").
+#[tauri::command(async)]
 fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String> {
     data_ready(&state)?;
     Ok(state.store.list())
@@ -317,7 +318,8 @@ async fn vault_unlock(master: String, app: tauri::AppHandle) -> Result<(), Strin
     .await
 }
 
-#[tauri::command]
+// async: el bloqueo escribe lo pendiente de los logs cifrados (flush a disco).
+#[tauri::command(async)]
 fn vault_lock(app: tauri::AppHandle, state: State<'_, AppState>) {
     state.creds.lock();
     state.bundle.clear();
@@ -513,7 +515,9 @@ async fn send_break(id: String, app: tauri::AppHandle) -> Result<(), String> {
     blocking(move || app.state::<AppState>().conns.send_break(&id)).await
 }
 
-#[tauri::command]
+// async: crea la carpeta y abre (o retoma) el archivo de log fuera del hilo principal. El orden de
+// llamadas por conexión lo mantiene la interfaz (cola "log:<id>" de src/lib/api.ts).
+#[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
 fn set_logging(
     id: String,
@@ -590,7 +594,8 @@ fn logs_dir_set(path: Option<String>, state: State<'_, AppState>) -> Result<Logs
 }
 
 /// Abre la carpeta de logs ("logs") o la de datos ("data") en el explorador del sistema.
-#[tauri::command]
+// async: crea la carpeta y lanza el explorador del sistema fuera del hilo principal.
+#[tauri::command(async)]
 fn open_dir(which: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let dir = match which.as_str() {
         "logs" => state.logs_dir(),
@@ -1185,7 +1190,8 @@ fn plugin_confirm(staging: String, state: State<'_, AppState>) -> Result<String,
     plugins::confirm(&state.data_dir, &staging)
 }
 
-#[tauri::command]
+// async: borra la carpeta temporal de la revisión fuera del hilo principal.
+#[tauri::command(async)]
 fn plugin_cancel(staging: String, state: State<'_, AppState>) {
     plugins::cancel(&state.data_dir, &staging)
 }
