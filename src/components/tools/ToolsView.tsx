@@ -1,4 +1,4 @@
-import { Suspense, lazy, memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Activity, ArrowDownUp, Calculator, DatabaseBackup, FileSearch, Gauge, Network, Puzzle, Radar, ScrollText, ShieldCheck, SquareTerminal, Waypoints, Wrench, X } from "lucide-react";
@@ -19,15 +19,21 @@ import type { ScpRequest, TabBrief, TerminalRef } from "./FileManager";
 import { persist, stored } from "../../lib/prefs";
 import { modLabel } from "../../lib/platform";
 import { idleStopMessage } from "../../lib/serverGuard";
+import { lazyView, whenIdle } from "../../lib/lazyView";
 
-// Respaldos y diff: se cargan al abrir el módulo.
-const BackupTool = lazy(() => import("./BackupTool"));
-// SNMP: cliente, conjuntos de OIDs y receptor de traps, también bajo demanda.
-const SnmpTool = lazy(() => import("./SnmpTool"));
-// Búsqueda en logs y respaldos: solo se descarga al abrir el módulo.
-const LogSearchTool = lazy(() => import("./LogSearchTool"));
-// Auditoría de seguridad: motor de reglas y packs integrados, solo al abrir el módulo.
-const AuditTool = lazy(() => import("./AuditTool"));
+// Respaldos, SNMP, búsqueda en logs y auditoría van en chunks propios que se precargan junto con
+// Herramientas (preloadTools): al abrir el módulo ya están y se dibujan al instante.
+const BackupTool = lazyView(() => import("./BackupTool").then((m) => m.default));
+const SnmpTool = lazyView(() => import("./SnmpTool").then((m) => m.default));
+const LogSearchTool = lazyView(() => import("./LogSearchTool").then((m) => m.default));
+const AuditTool = lazyView(() => import("./AuditTool").then((m) => m.default));
+
+/** Precarga los módulos en chunks propios cuando la app queda libre. */
+export function preloadTools() {
+  whenIdle(() => {
+    for (const t of [AuditTool, SnmpTool, BackupTool, LogSearchTool]) t.preload().catch(() => {});
+  });
+}
 
 const NAV: { id: ModuleId; label: string; Icon: typeof Activity }[] = [
   { id: "monitor", label: "Monitoreo", Icon: Activity },
@@ -209,27 +215,27 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         return <PluginsTool connId={connId} onConfirm={onConfirm} />;
       case "snmp":
         return (
-          <Suspense fallback={null}>
+          <>
             <SnmpTool settings={settings} running={running} onChange={update} refreshRunning={refreshRunning} onConfirm={onConfirm} />
-          </Suspense>
+          </>
         );
       case "backup":
         return (
-          <Suspense fallback={null}>
+          <>
             <BackupTool terminals={terminals} totalSessions={sessions.length} />
-          </Suspense>
+          </>
         );
       case "audit":
         return (
-          <Suspense fallback={null}>
+          <>
             <AuditTool terminals={terminals} onConfirm={onConfirm} />
-          </Suspense>
+          </>
         );
       case "logsearch":
         return (
-          <Suspense fallback={null}>
+          <>
             <LogSearchTool visible={active && current === "logsearch"} autoLog={settings.autoLog} onEnableAutoLog={() => update({ autoLog: true })} />
-          </Suspense>
+          </>
         );
     }
   };
