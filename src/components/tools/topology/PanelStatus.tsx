@@ -19,6 +19,8 @@ export function AttentionSection({
   trafficOn,
   focusLink,
   onPick,
+  staleCount,
+  onPurge,
   open,
   onToggle,
 }: {
@@ -28,6 +30,10 @@ export function AttentionSection({
   trafficOn: boolean;
   focusLink: string | null;
   onPick: (key: string) => void;
+  /** Enlaces CDP/LLDP que ya nadie informa (fantasma en el mapa). */
+  staleCount: number;
+  /** Quita esos enlaces del diagrama (pide confirmación). */
+  onPurge: () => void;
   open: boolean;
   onToggle: (v: boolean) => void;
 }) {
@@ -54,9 +60,20 @@ export function AttentionSection({
         ) : (
           <p className="text-muted">Todo normal{trafficOn ? "" : ": activa el tráfico para ver también la carga de los enlaces"}.</p>
         )}
+        {staleCount > 0 && (
+          <div className="rounded-md border border-line px-2 py-1.5 space-y-1">
+            <p className="leading-snug">
+              {plural(staleCount, "enlace ya no informado", "enlaces ya no informados")}: ningún equipo {staleCount === 1 ? "lo" : "los"} ve desde su última lectura completa (recableado, puerto apagado o vecino retirado).{" "}
+              {staleCount === 1 ? "Queda" : "Quedan"} en el mapa con trazo tenue y la fecha desde la que no se {staleCount === 1 ? "ve" : "ven"}, y {staleCount === 1 ? "vuelve" : "vuelven"} a lo normal si un equipo {staleCount === 1 ? "lo" : "los"} informa otra vez.
+            </p>
+            <Btn kind="ghost" className="!h-7 !px-2.5 !text-[12px] border border-line" onClick={onPurge} title="Quita del diagrama los enlaces que ya nadie informa (pide confirmación)">
+              Quitar los no vistos
+            </Btn>
+          </div>
+        )}
         <p className="text-[11px] text-muted leading-snug">
           Alto desde {Math.round(UTIL_HIGH * 100)} %, saturado desde {Math.round(UTIL_SATURATED * 100)} % (sentido más cargado); caído es un puerto down o err-disabled en algún extremo. Los problemas de interfaz son dúplex o
-          velocidad distintos, VLAN nativa, trunk contra access, miembros fuera del agregado, errores CRC y enlaces que solo ve un lado; los errores son acumulados desde el último clear counters.
+          velocidad distintos, VLAN nativa, trunk contra access, miembros fuera del agregado, errores CRC, enlaces que solo ve un lado y enlaces que ya nadie informa; los errores son acumulados desde el último clear counters.
         </p>
         <p className="text-[11px] text-muted leading-snug">
           {coverage.links
@@ -198,6 +215,11 @@ export function TrafficSection({
                 Pestaña ocupada ({traffic.status.busy.join(", ")}): sin prompt a la vista (paginador, contraseña o un comando en curso); no se le envía nada y se reintenta en la próxima lectura.
               </p>
             )}
+            {traffic.status.partial.map((e) => (
+              <p key={e} className="text-warn">
+                Lectura parcial por consola. {e}
+              </p>
+            ))}
             {traffic.status.errors.map((e) => (
               <p key={e} className="text-danger">
                 {e}

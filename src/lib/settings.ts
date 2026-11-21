@@ -291,7 +291,18 @@ function cleanTopology(v: unknown): Settings["topology"] | null {
     (l): l is Settings["topology"]["links"][number] =>
       isObj(l) && typeof l.a === "string" && typeof l.b === "string" && typeof l.aPort === "string" && typeof l.bPort === "string" && typeof l.proto === "string",
   );
-  return { nodes, links };
+  // Campos opcionales que Topología recorre como lista o compara como número: con otra forma (archivo
+  // editado a mano) se descartan en vez de fallar al dibujar.
+  const strs = (x: unknown) => (Array.isArray(x) ? x.filter((s): s is string => typeof s === "string").slice(0, 16) : undefined);
+  const opt = <T extends object, K extends string>(o: T, k: K, v: unknown): T => {
+    if (!(k in o)) return o;
+    const { [k]: _old, ...rest } = o as Record<string, unknown>;
+    return (v === undefined ? rest : { ...rest, [k]: v }) as T;
+  };
+  return {
+    nodes: nodes.map((n) => opt(n, "aliases", strs(n.aliases))),
+    links: links.map((l) => opt(opt(l, "seenBy", strs(l.seenBy)), "staleSince", typeof l.staleSince === "number" && Number.isFinite(l.staleSince) ? l.staleSince : undefined)),
+  };
 }
 
 // ---------- Versión de esquema, migraciones y avisos de datos ----------

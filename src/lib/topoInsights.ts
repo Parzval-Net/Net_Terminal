@@ -15,6 +15,7 @@ import {
   canonPort,
   isIpv4,
   isPhysicalProto,
+  isStale,
   knownAddrs,
   linkKey,
   nodeId,
@@ -23,7 +24,7 @@ import {
 
 // ---------- Revisiones sobre enlaces ----------
 
-export type IssueKind = "duplex" | "speed" | "native" | "mode" | "lag" | "errors" | "down" | "asym";
+export type IssueKind = "duplex" | "speed" | "native" | "mode" | "lag" | "errors" | "down" | "asym" | "stale";
 export type IssueSev = "warn" | "crit";
 
 export interface LinkIssue {
@@ -46,6 +47,7 @@ export const ISSUE_LABEL: Record<IssueKind, string> = {
   errors: "Errores",
   down: "Puerto caído",
   asym: "Asimetría",
+  stale: "Ya no informado",
 };
 
 /** Dúplex normalizado: "a-full", "Full", "full-duplex" -> full. */
@@ -77,9 +79,15 @@ const LAG_OUT = /^(?:D|s|I|r)$/;
 const LAG_OUT_HUAWEI = /^(?:down|unselect(?:ed)?)$/i;
 export const lagOut = (flag: string | undefined) => !!flag && (LAG_OUT.test(flag) || LAG_OUT_HUAWEI.test(flag));
 
-/** Estado de interfaz caída: notconnect, disabled, down/down, *down (admin). err-disabled va aparte. */
-const DOWN = /^(?:notconnect|disabled|\*?down|admin(?:istratively)?[ -]?down|lowerlayerdown)/i;
-const ERRDIS = /^err-?disabled/i;
+/**
+ * Estado de interfaz caída: notconnect, disabled, down/down, *down (admin). También "up/down"
+ * (Junos Admin/Link, Cisco Status/Protocol: sin enlace o sin protocolo) y los estados que NX-OS
+ * corta a 9 caracteres en "show interface status": notconnec, xcvrAbsen, sfpAbsent, suspnd
+ * (en IOS, "suspended": miembro de un agregado sin LACP del otro lado).
+ * err-disabled va aparte (incluye errDisabl y linkFlapE, el err-disable por link-flap de NX-OS).
+ */
+const DOWN = /^(?:notconnec|disabled|\*?down|admin(?:istratively)?[ -]?down|lowerlayerdown|(?:xcvr|sfp)Absen|susp(?:n|end)|\*?up\/\*?down\b)/i;
+const ERRDIS = /^(?:err-?disabl|linkFlap)/i;
 
 /** Puerto caído según su estado: "err-disabled" (cuenta como caído), "down" o undefined. */
 export const portDown = (status: string | undefined): "err-disabled" | "down" | undefined =>
@@ -111,10 +119,26 @@ export function linkChecks(t: Topology, live?: LivePorts): Map<string, LinkIssue
     const a = byId.get(l.a);
     const b = byId.get(l.b);
     if (!a || !b) continue;
+    const end = (n: TopoNode, port: string) => `${n.name} ${port}`;
+    // Ya no informado: ningún equipo lo ve desde la última lectura completa (recableado, puerto
+    // apagado, vecino retirado). Antes seguía como sano. Es su único hallazgo: el estado de sus
+    // puertos ya no describe este enlace (el puerto puede tener ahora otro vecino).
+    if (isStale(l)) {
+      const since = l.staleSince === undefined ? "" : ` desde ${sinceText(l.staleSince)}`;
+      res.set(linkKey(l), [
+        {
+          kind: "stale",
+          sev: "warn",
+          end: "both",
+          text: `${end(a, l.aPort)} y ${end(b, l.bPort)}: ningún equipo informa ya este enlace (no visto${since}). Vuelve a descubrir sus extremos o quítalo con "Quitar los no vistos"`,
+          short: `Ya no informado: no visto${since}`,
+        },
+      ]);
+      continue;
+    }
     const pa = portWithLive(a, l.aPort, live);
     const pb = portWithLive(b, l.bPort, live);
     const issues: LinkIssue[] = [];
-    const end = (n: TopoNode, port: string) => `${n.name} ${port}`;
     const da = normDuplex(pa?.duplex);
     const db = normDuplex(pb?.duplex);
     if (da && db && da !== db)
@@ -184,6 +208,13 @@ export function linkChecks(t: Topology, live?: LivePorts): Map<string, LinkIssue
   return res;
 }
 
+/** Fecha y hora cortas de "no visto desde": 21-11 14:05. */
+export function sinceText(ts: number): string {
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}-${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 export const worstSev = (issues: LinkIssue[] | undefined): IssueSev | undefined =>
   !issues?.length ? undefined : issues.some((i) => i.sev === "crit") ? "crit" : "warn";
 
@@ -248,12 +279,16 @@ export interface LinkDetail {
   dirs: { label: "Baja" | "Sube"; from: string; to: string; bps: number | null; util?: number; level: TrafficLevel }[];
   speed?: number;
   approx?: boolean;
+  /** La tasa viene de contadores de 32 bits en 1 G o más: puede ser mayor que la mostrada. */
+  lowRes?: boolean;
   findings: { sev: IssueSev; text: string }[];
   /** Hay datos de interfaz de al menos un extremo (si no, "Sin errores" sería engañoso). */
   hasPortData: boolean;
   source?: "SNMP" | "Consola";
   ts?: number;
   state?: "removed" | "added";
+  /** Enlace que ya nadie informa: momento desde el que no se ve (0 si no se sabe). */
+  staleSince?: number;
   logical?: boolean;
 }
 
@@ -320,11 +355,13 @@ export function linkDetail(
     dirs,
     ...(lt?.speed ? { speed: lt.speed } : {}),
     ...(lt?.approx ? { approx: true } : {}),
+    ...(lt?.lowRes ? { lowRes: true } : {}),
     findings: (o.issues ?? []).map((i) => ({ sev: i.sev, text: i.short })),
     hasPortData: !!(pa || pb),
     ...(lt?.src ? { source: lt.src === "snmp" ? ("SNMP" as const) : ("Consola" as const) } : {}),
     ...(lt?.ts ? { ts: lt.ts } : {}),
     ...(o.state ? { state: o.state } : {}),
+    ...(isStale(l) ? { staleSince: l.staleSince ?? 0 } : {}),
     ...(l.logical ? { logical: true } : {}),
   };
 }
@@ -601,6 +638,8 @@ export interface UnknownL2 {
 export function unknownL2(t: Topology): Map<string, UnknownL2> {
   const linked = new Map<string, Set<string>>();
   for (const l of t.links) {
+    // Un enlace que ya nadie informa no ocupa el puerto: si sigue activo, hay otra cosa conectada.
+    if (isStale(l)) continue;
     if (l.aPort) linked.set(l.a, (linked.get(l.a) ?? new Set()).add(canonPort(l.aPort)));
     if (l.bPort) linked.set(l.b, (linked.get(l.b) ?? new Set()).add(canonPort(l.bPort)));
   }
@@ -614,7 +653,8 @@ export function unknownL2(t: Topology): Map<string, UnknownL2> {
     let macs = 0;
     const vendors = new Set<string>();
     for (const [k, p] of Object.entries(n.ports)) {
-      if (mine.has(k) || LOGICAL_PORT.test(k) || !p.status || !PORT_UP.test(p.status)) continue;
+      // "up/down" (Junos Admin/Link) parte con "up" pero es un puerto sin enlace: no hay nada conectado.
+      if (mine.has(k) || LOGICAL_PORT.test(k) || !p.status || !PORT_UP.test(p.status) || portDown(p.status)) continue;
       if (p.group && groups.has(canonPort(p.group))) continue;
       const mp: MacPort | undefined = n.macs?.[k];
       ports.push(mp?.port ?? portLabel(k));
@@ -687,8 +727,9 @@ function depths(t: Topology): Map<string, number> {
  */
 export function scopeNeighbors(t: Topology, self: string, neighbors: Neighbor[], scope: TopoScope): { kept: Neighbor[]; skipped: string[] } {
   const { ranges } = parseCidrs(scope.cidrs);
-  const known = new Set(t.nodes.map((n) => n.id));
-  const selfId = nodeId(self);
+  // Con sus alias: el nombre del prompt de un equipo ya dibujado con el nombre que anuncian sus vecinos.
+  const known = new Set(t.nodes.flatMap((n) => [n.id, ...(n.aliases ?? [])]));
+  const selfId = t.nodes.find((n) => n.aliases?.includes(nodeId(self)))?.id ?? nodeId(self);
   const d = scope.maxDepth ? depths(t) : undefined;
   // Un equipo que aún no está en el diagrama es la raíz (profundidad 0).
   const tooDeep = !!d && d.size > 0 && (d.get(selfId) ?? 0) + 1 > scope.maxDepth;

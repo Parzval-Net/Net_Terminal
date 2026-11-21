@@ -464,7 +464,12 @@ export function TopoToolbar({
       {exportMenu && <ContextMenu menu={exportMenu} onClose={() => setExportMenu(null)} />}
       {nodeMenu && <ContextMenu menu={nodeMenu} onClose={() => setNodeMenu(null)} />}
       {moreMenu && <ContextMenu menu={moreMenu} onClose={() => setMoreMenu(null)} />}
-      {msg && <p className="mt-2 text-[12px] text-accent">{msg}</p>}
+      {/* Una lectura cortada va en el tono de aviso: lo leído es parcial. */}
+      {msg && (
+        <p className={`mt-2 text-[12px] ${msg.startsWith("Resultado parcial") ? "font-medium text-warn" : "text-accent"}`} role="status">
+          {msg}
+        </p>
+      )}
       {children}
     </section>
   );

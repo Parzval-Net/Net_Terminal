@@ -79,6 +79,11 @@ export interface TopoNode {
   macs?: Record<string, MacPort>;
   /** Capacidades anunciadas por CDP/LLDP (Router, Switch, Phone, W, T…), para el rol. */
   caps?: string;
+  /**
+   * Otros nombres normalizados (nodeId) con que se conoce al equipo: el del prompt cuando difiere del
+   * que anuncian sus vecinos por CDP/LLDP ("mx-edge-re0" y "mx-edge"). Evita un equipo duplicado.
+   */
+  aliases?: string[];
 }
 
 export interface TopoLink {
@@ -92,6 +97,11 @@ export interface TopoLink {
   logical?: boolean;
   /** Equipos explorados que informaron este enlace (CDP/LLDP), para detectar asimetrías. */
   seenBy?: string[];
+  /**
+   * Enlace CDP/LLDP que ningún equipo informa ya: momento (ms) de la lectura completa en que dejó de
+   * verse. Se dibuja fantasma ("no visto desde") hasta que se vuelva a ver o se quite (purgeStale).
+   */
+  staleSince?: number;
 }
 
 export interface Topology {
@@ -117,15 +127,42 @@ export const NEIGHBOR_COMMANDS: Record<TopoVendor, string[]> = {
   fortinet: ["diagnose lldprx neighbor summary", "diagnose lldprx neighbor details"],
 };
 
-/** Comandos alternativos cuando el principal no existe en esa versión. */
-export const FALLBACK_COMMANDS: Record<string, string> = {
-  "diagnose lldprx neighbor summary": "diagnose lldp rx neighbor summary",
-  "diagnose lldprx neighbor details": "diagnose lldp rx neighbor details",
-  "show interfaces status": "show interfaces description",
-  "show etherchannel summary": "show port-channel summary",
+/**
+ * Comandos alternativos, en orden, cuando el principal no existe en esa versión o plataforma.
+ * NX-OS no acepta "show interfaces …" (plural): sus variantes "show interface …" van al final para
+ * no sumar un comando rechazado en IOS. Formatos de NX-OS leídos de forma tolerante (sin equipo real
+ * para verificarlos): si la salida no calza, ese dato queda sin leer y nada más cambia.
+ */
+export const FALLBACK_COMMANDS: Record<string, string[]> = {
+  "diagnose lldprx neighbor summary": ["diagnose lldp rx neighbor summary"],
+  "diagnose lldprx neighbor details": ["diagnose lldp rx neighbor details"],
+  "show interfaces status": ["show interfaces description", "show interface status"],
+  "show etherchannel summary": ["show port-channel summary"],
+  "show interfaces counters errors": ["show interface counters errors"],
+  "show interfaces trunk": ["show interface trunk"],
   // NX-OS: sintaxis por familia de direcciones (Cisco, documento 220604).
-  "show ip bgp summary": "show bgp ipv4 unicast summary",
+  "show ip bgp summary": ["show bgp ipv4 unicast summary"],
 };
+
+/**
+ * Filtro que desactiva el paginador solo para ese comando, sin cambiar la sesión: Junos
+ * ("| no-more") y Huawei VRP ("| no-more", en VRP8 y en VRP5 recientes). Una salida larga llega
+ * de una vez en lugar de página a página. Si el equipo no lo reconoce se reenvía el comando solo
+ * (ver topoRun.ts). Cisco IOS y FortiOS no tienen un equivalente por comando: sigue el paginador.
+ */
+export const NO_PAGER: Partial<Record<TopoVendor, string>> = { juniper: "| no-more", huawei: "| no-more" };
+
+/** El comando con el filtro sin paginador de su fabricante (si tiene, y si no lleva ya un filtro). */
+export function withNoPager(vendor: TopoVendor | undefined, cmd: string): string {
+  const f = vendor ? NO_PAGER[vendor] : undefined;
+  return f && !cmd.includes("|") ? `${cmd} ${f}` : cmd;
+}
+
+/**
+ * Comando para volver al equipo anterior desde una pestaña de salto: "quit" en Huawei VRP y H3C
+ * (no reconocen "exit" en la vista de usuario) y "exit" en el resto.
+ */
+export const backCommand = (vendor: TopoVendor | null | undefined): string => (vendor === "huawei" ? "quit" : "exit");
 
 /**
  * Vecinos de ruteo (solo consulta). Sirven cuando CDP/LLDP está deshabilitado: el vecino se
@@ -194,13 +231,23 @@ export function isIpv6(s: string): boolean {
   }
 }
 
+/** MAC escrita con separadores: 0c75.bd12.3456, 00:00:5e:00:53:01, 00-00-5e-00-53-01 o 0000-5e00-5301. */
+const MAC_NAME = /^(?:[0-9a-f]{4}([.-])[0-9a-f]{4}\1[0-9a-f]{4}|[0-9a-f]{2}([:-])(?:[0-9a-f]{2}\2){4}[0-9a-f]{2})$/i;
+
 /** Nombre normalizado: sin dominio ni número de serie entre paréntesis (CDP de NX-OS). */
 export const nodeId = (name: string) => {
   const s = name.trim().replace(/\(.*\)$/, "");
   // Un vecino de ruteo se identifica por su dirección: no se corta en el primer punto.
   if (isIpv4(s)) return s;
+  // LLDP sin System Name: el nombre es el Chassis ID (una MAC). Cortarla en el primer punto dejaba
+  // "0c75" para todos los equipos del mismo fabricante y se fusionaban en uno. Va completa y en un
+  // solo formato, para que el mismo chasis visto por consola y por SNMP sea el mismo equipo.
+  if (MAC_NAME.test(s)) return normMac(s) ?? s.toLowerCase();
   return s.split(".")[0].toLowerCase();
 };
+
+/** Interfaz de Junos con la unidad lógica ".0": ge-0/0/1.0, xe-0/0/0:1.0, ae1.0. */
+const JUNOS_UNIT0 = /^(?:(?:ge|xe|et|mge)-[\d/:]+|ae\d+)\.0$/i;
 
 /** Abrevia interfaces largas para las etiquetas: GigabitEthernet1/0/1 -> Gi1/0/1. */
 export function shortPort(p: string): string {
@@ -215,8 +262,8 @@ export function shortPort(p: string): string {
     [/^Ethernet/i, "Eth"],
     [/^Port-channel/i, "Po"],
   ];
-  // Junos agrega la unidad lógica ".0" que no aporta en el diagrama.
-  const p2 = /^(ge|xe|et|ae|mge)-[\d/]+\.0$/.test(p) ? p.slice(0, -2) : p;
+  // Junos agrega la unidad lógica ".0" que no aporta en el diagrama (también en ae1.0 y xe-0/0/0:1.0).
+  const p2 = JUNOS_UNIT0.test(p) ? p.slice(0, -2) : p;
   for (const [re, s] of map) if (re.test(p2)) return p2.replace(re, s);
   return p2;
 }
@@ -242,7 +289,7 @@ function canonPortRaw(p: string): string {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "")
-    .replace(/^((?:ge|xe|et|ae|mge)-[\d/]+)\.0$/, "$1");
+    .replace(/^((?:(?:ge|xe|et|mge)-[\d/:]+|ae\d+))\.0$/, "$1");
   // Cada familia con su nombre completo y las abreviaturas de Cisco: "show interfaces" usa el
   // nombre completo, LLDP la forma corta (Gi1/0/1, Tw1/0/1) y "show cdp neighbors" la de tres
   // letras (Gig 1/0/1, Ten, Fas, For, Hun). Sin unificarlas, el enlace no encuentra sus
@@ -262,6 +309,10 @@ function canonPortRaw(p: string): string {
     [/^(port-channel|po|eth-trunk|bundle-ether|be)(?=\d)/, "po"],
     [/^(ethernet|eth|et)(?=\d)/, "eth"],
     [/^(vlan|vl)(?=\d)/, "vl"],
+    // Interfaces de router: OSPF y "show interfaces" usan el nombre completo; CDP y LLDP, el corto.
+    [/^(serial|ser|se)(?=\d)/, "se"],
+    [/^(tunnel|tun|tu)(?=\d)/, "tu"],
+    [/^(loopback|loop|lo)(?=\d)/, "lo"],
   ];
   for (const [re, fam] of families) if (re.test(s)) return s.replace(re, fam);
   return s;
@@ -347,14 +398,23 @@ export function parseCdp(out: string): Neighbor[] {
 
 const mgmtAt = (b: string) => b.indexOf("Management Addresses:");
 
-/** Cisco "show lldp neighbors detail". */
+/**
+ * Cisco "show lldp neighbors detail". IOS e IOS-XE separan los vecinos con una línea de guiones y
+ * parten con "Local Intf:". NX-OS no pone guiones: cada vecino parte en "Chassis id:" y el puerto
+ * local viene como "Local Port id:", con la dirección de gestión y la descripción en la misma línea
+ * (formato de NX-OS leído de forma tolerante, sin equipo real para verificarlo).
+ */
 export function parseCiscoLldp(out: string): Neighbor[] {
   return out
     .split(/^-{5,}\s*$/m)
+    // Solo los bloques sin "Local Intf:" (NX-OS) se parten por "Chassis id:": en IOS va después del puerto local.
+    .flatMap((b) => (/^\s*Local Intf:/m.test(b) || !/^\s*Local Port id:/m.test(b) ? [b] : b.split(/^(?=[ \t]*Chassis id:)/m)))
     .flatMap((b): Neighbor[] => {
-      const local = field(b, /Local Intf:\s*(\S+)/);
-      const remote = field(b, /Port id:\s*(\S+)/);
-      const name = field(b, /System Name:\s*(\S+)/) ?? field(b, /Chassis id:\s*(\S+)/);
+      const local = field(b, /^[ \t]*Local Intf:\s*(\S+)/m) ?? field(b, /^[ \t]*Local Port id:\s*(\S+)/m);
+      // Al inicio de la línea: "Local Port id:" también contiene "Port id:".
+      const remote = field(b, /^[ \t]*Port id:\s*(\S+)/m);
+      // "System Name: not advertised" (con dos puntos) no es un nombre: vale el Chassis id.
+      const name = field(b, /System Name:\s*(?!not advertised|null\s*$)(\S+)/m) ?? field(b, /Chassis id:\s*(\S+)/);
       if (!name || !local || !remote) return [];
       return [
         {
@@ -362,8 +422,8 @@ export function parseCiscoLldp(out: string): Neighbor[] {
           localPort: local,
           remotePort: remote,
           // Desde el primer encabezado: "Management Addresses:[\s\S]*?IP:" era cuadrático si se repetía.
-          ip: usableIp(mgmtAt(b) >= 0 ? field(b.slice(mgmtAt(b)), /IP:\s*(\d+\.\d+\.\d+\.\d+)/) : undefined),
-          platform: field(b, /System Description:\s*\n\s*([^\n]+)/),
+          ip: usableIp((mgmtAt(b) >= 0 ? field(b.slice(mgmtAt(b)), /IP:\s*(\d+\.\d+\.\d+\.\d+)/) : undefined) ?? field(b, /^[ \t]*Management Address:\s*(\d+\.\d+\.\d+\.\d+)/m)),
+          platform: field(b, /System Description:[ \t]*\n\s*([^\n]+)/) ?? field(b, /System Description:[ \t]*(\S[^\n]*)/),
           proto: "LLDP",
           remoteNative: field(b, /Vlan ID:\s*(\d+)/),
           caps: field(b, /Enabled Capabilities:\s*([^\n]+)/),
@@ -398,15 +458,48 @@ export function parseHuaweiLldp(out: string): Neighbor[] {
   return res;
 }
 
-/** Junos "show lldp neighbors" (tabla resumida). La columna Parent Interface indica el ae. */
+/** Fila de "show lldp neighbors": interfaz local, Parent Interface (opcional), Chassis Id (MAC) y el resto. */
+const JUNOS_LLDP_ROW = /^(\S+)[ \t]+(?:(\S+)[ \t]+)?([0-9a-f]{2}(?::[0-9a-f]{2}){5})(?:[ \t]+(\S.*))?$/i;
+
+/**
+ * Junos "show lldp neighbors" (tabla resumida): Local Interface, Parent Interface (el ae; no existe
+ * en versiones antiguas), Chassis Id, Port info y System Name. "Port info" puede ser una descripción
+ * con espacios ("Uplink to MX1") y "System Name" venir vacía. Cada fila se ancla en el Chassis Id y
+ * lo que sigue se reparte entre Port info y System Name por la columna del encabezado; sin System
+ * Name el vecino se identifica por su Chassis Id. Antes esas filas se perdían, y el formato antiguo
+ * completo. Formato antiguo leído de forma tolerante (sin equipo real para verificarlo).
+ */
 export function parseJunosLldp(out: string): Neighbor[] {
   const res: Neighbor[] = [];
-  for (const line of out.split("\n")) {
-    // Local Interface  Parent Interface  Chassis Id  Port info  System Name
-    const m = line.match(/^(\S+)\s+(\S+)\s+([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s+(\S+)\s+(\S+)\s*$/i);
+  /** Columna donde parte "System Name" según el encabezado (-1: sin encabezado). */
+  let sysAt = -1;
+  for (const raw of out.split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    if (/^Local Interface\s.*\bChassis Id\b/i.test(line)) {
+      sysAt = line.search(/\bSystem Name\b/i);
+      continue;
+    }
+    const m = line.match(JUNOS_LLDP_ROW);
     if (!m) continue;
-    const parent = m[2] === "-" ? undefined : m[2].replace(/\.0$/, "");
-    res.push({ name: m[5], localPort: m[1], remotePort: m[4], proto: "LLDP", group: parent });
+    const rest = m[4] ?? "";
+    const restAt = line.length - rest.length;
+    let port = rest;
+    let name = "";
+    if (sysAt >= 0 && line.length <= sysAt) {
+      // La fila termina antes de la columna System Name: el vecino no anunció su nombre.
+    } else if (sysAt >= restAt && /\s/.test(line[sysAt - 1]) && /\S/.test(line[sysAt]) && !/\s/.test(line.slice(sysAt))) {
+      port = line.slice(restAt, sysAt).trim();
+      name = line.slice(sysAt);
+    } else {
+      // Sin encabezado, o con Port info más ancho que su columna: el nombre es la última palabra.
+      const words = rest.split(/\s+/);
+      if (words.length > 1) {
+        name = words.pop()!;
+        port = words.join(" ");
+      }
+    }
+    const parent = !m[2] || m[2] === "-" ? undefined : m[2].replace(/\.0$/, "");
+    res.push({ name: name || m[3], localPort: m[1], remotePort: port, proto: "LLDP", group: parent });
   }
   return res;
 }
@@ -414,8 +507,10 @@ export function parseJunosLldp(out: string): Neighbor[] {
 /** Junos "show lldp neighbors interface X": vecino con IP de gestión. */
 export function parseJunosLldpDetail(out: string): Neighbor | null {
   const local = field(out, /Local Interface\s*:\s*(\S+)/);
-  const name = field(out, /System name\s*:\s*(\S+)/);
-  const portId = field(out, /Port ID\s*:\s*(\S+)/);
+  // Sin System name, el Chassis ID (como en la tabla resumida, para que ambas lecturas sean el mismo vecino).
+  const name = field(out, /System name\s*:\s*(\S+)/) ?? field(out, /^[ \t]*Chassis ID\s*:\s*(\S+)/m);
+  // Al inicio de la línea: "Local Port ID" (el índice propio) también contiene "Port ID".
+  const portId = field(out, /^[ \t]*Port ID\s*:\s*(\S+)/m);
   const portDesc = field(out, /Port description\s*:\s*(\S+)/);
   if (!local || !name) return null;
   const parent = field(out, /Parent Interface\s*:\s*(\S+)/);
@@ -459,6 +554,9 @@ export function parseFortiLldp(outputs: string[]): Neighbor[] {
   return [...byIdx.values()];
 }
 
+/** Puerto remoto que no es un nombre de interfaz: vacío, un índice (528) o una descripción ("Uplink to MX1"). */
+const vaguePort = (p: string) => !p || /^\d+$/.test(p) || /\s/.test(p);
+
 export function parseNeighbors(vendor: string, outputs: string[]): Neighbor[] {
   const valid = outputs.filter((o) => !isCliError(o));
   const all =
@@ -483,7 +581,8 @@ export function parseNeighbors(vendor: string, outputs: string[]): Neighbor[] {
       prev.remoteNative ??= n.remoteNative;
       prev.remoteDuplex ??= n.remoteDuplex;
       prev.caps ??= n.caps;
-      if (/^\d+$/.test(prev.remotePort) && !/^\d+$/.test(n.remotePort)) prev.remotePort = n.remotePort;
+      // Un índice numérico, una descripción con espacios o nada se reemplaza por el nombre del puerto.
+      if (vaguePort(prev.remotePort) && !vaguePort(n.remotePort)) prev.remotePort = n.remotePort;
     }
   }
   return [...byKey.values()];
@@ -698,7 +797,8 @@ export function parsePortInfo(outputs: string[]): Record<string, PortInfo> {
         if (!/^\S/.test(l) || /^-+/.test(l) || /[#>]\s*$/.test(l)) continue;
         const r = sliceRow(l.slice(0, vlanAt), cols.filter((c) => c.name !== "Vlan"));
         const [vlan, duplex, speed] = l.slice(vlanAt).trim().split(/\s+/);
-        put(r.Port, { status: r.Status, speed, desc: r.Name, vlan, duplex });
+        // NX-OS escribe "--" en Name cuando la interfaz no tiene descripción.
+        put(r.Port, { status: r.Status, speed, desc: r.Name === "--" ? undefined : r.Name, vlan, duplex });
       }
       continue;
     }
@@ -743,9 +843,14 @@ export function parsePortInfo(outputs: string[]): Record<string, PortInfo> {
     // Huawei "display interface brief": Interface PHY Protocol InUti OutUti inErrors outErrors
     hi = lines.findIndex((l) => /^Interface\s+PHY\s+Protocol/.test(l));
     if (hi >= 0) {
+      // Los miembros de un Eth-Trunk van indentados bajo él: antes no calzaban y quedaban sin estado
+      // ni errores. Se leen igual y quedan con su agregado.
+      let trunk: string | undefined;
       for (const l of lines.slice(hi + 1)) {
-        const m = l.match(/^(?=\S*\d)(\S+)\s+(\S+)\s+(\S+)(?:\s+\S+\s+\S+\s+(\d+)\b)?/);
-        if (m) put(m[1], { status: `${m[2]}/${m[3]}`, inErr: m[4] });
+        const m = l.match(/^([ \t]*)(?=\S*\d)(\S+)\s+(\S+)\s+(\S+)(?:\s+\S+\s+\S+\s+(\d+)\b)?/);
+        if (!m) continue;
+        if (!m[1]) trunk = /^Eth-Trunk\d+$/i.test(m[2]) ? m[2] : undefined;
+        put(m[2], { status: `${m[3]}/${m[4]}`, inErr: m[5], ...(m[1] && trunk ? { group: trunk } : {}) });
       }
       continue;
     }
@@ -757,6 +862,17 @@ export function parsePortInfo(outputs: string[]): Record<string, PortInfo> {
         if (!l.trim() || /^Port\s/.test(l)) break;
         const m = l.match(/^(\S+)\s+\S+\s+\S+\s+(\S+)\s+(\d{1,4})\s*$/);
         if (m && /^trunking$/i.test(m[2])) put(m[1], { native: m[3], vlan: "trunk" });
+      }
+      continue;
+    }
+    // NX-OS "show interface trunk": Port, Native Vlan, Status, Port Channel (el encabezado ocupa dos
+    // líneas; los miembros de un port-channel figuran como "trnk-bndl"). Lectura tolerante.
+    hi = lines.findIndex((l) => /^Port\s+Native\s+Status\s+Port\b/i.test(l));
+    if (hi >= 0) {
+      for (const l of lines.slice(hi + 1)) {
+        if (/^Port\s/.test(l)) break;
+        const m = l.match(/^(\S+)\s+(\d{1,4})\s+(?:trunking|trnk-bndl)\b/i);
+        if (m) put(m[1], { native: m[2], vlan: "trunk" });
       }
       continue;
     }
@@ -867,18 +983,55 @@ function dedupeLinks(links: TopoLink[]): TopoLink[] {
   });
 }
 
+/** Equipo con ese nombre normalizado: por id o por alguno de sus alias. */
+const nodeByName = (nodes: TopoNode[], id: string) => nodes.find((x) => x.id === id) ?? nodes.find((x) => x.aliases?.includes(id));
+
+/** Máximo de alias que se guardan por equipo. */
+const MAX_ALIASES = 8;
+
+/**
+ * Nodo del diagrama que corresponde al equipo que se explora: por su nombre (id o alias) o, si
+ * no hay ninguno, el único equipo sin explorar con esa misma IP de gestión. Un vecino anunciado por
+ * LLDP como "mx-edge.example.net" (192.0.2.2) cuyo prompt dice "mx-edge-re0" es el mismo equipo:
+ * antes quedaban dos nodos con la misma IP. Los conocidos solo por dirección no cuentan aquí (se
+ * fusionan aparte, con el nombre real).
+ */
+export function deviceNode(t: Topology, name: string, ip?: string): TopoNode | undefined {
+  const hit = nodeByName(t.nodes, nodeId(clean(name) || "?"));
+  if (hit) return hit;
+  if (!ip || !(isIpv6(ip) || (isIpv4(ip) && !isSharedAddr(ip)))) return undefined;
+  const same = t.nodes.filter((x) => !x.explored && !x.addrOnly && x.ip === ip);
+  return same.length === 1 ? same[0] : undefined;
+}
+
+export interface MergeOptions {
+  /**
+   * Protocolos (CDP, LLDP) cuya lectura fue completa: solo para esos se da por retirado el enlace que
+   * el equipo dejó de informar. Por defecto ambos; vacío si la lectura se cortó (resultado parcial).
+   */
+  complete?: LinkProto[];
+  /** Todo lo que informó el equipo, antes del filtro de alcance: un vecino descartado también ocupa su puerto. */
+  seen?: Neighbor[];
+  /** Momento de la lectura (ms), para "no visto desde". Por defecto, ahora. */
+  now?: number;
+}
+
 /**
  * Incorpora los vecinos de un equipo al grafo (sin duplicar enlaces en ambos sentidos).
  * Los vecinos de ruteo (byAddr) se reconocen por cualquier dirección conocida; cuando un equipo
  * se explora, los nodos que solo se conocían por una de sus direcciones se fusionan con él.
+ * Los enlaces CDP/LLDP del equipo que ya nadie informa quedan marcados (`staleSince`), no se borran.
  */
 export function mergeNeighbors(
   t: Topology,
   device: { name: string; ip?: string; platform?: string; ports?: Record<string, PortInfo>; addrs?: string[]; macs?: Record<string, MacPort> },
   neighbors: Neighbor[],
+  opts: MergeOptions = {},
 ): Topology {
   // Todo lo que informa el equipo se limpia aquí, antes de guardarse, exportarse o copiarse.
   device = { ...device, name: clean(device.name) || "?", ports: cleanPorts(device.ports), addrs: device.addrs?.filter(isIpv4) };
+  // Sobre el tope de vecinos lo incorporado es una parte: no se da por retirado lo que quedó fuera.
+  const overCap = Math.max(neighbors.length, opts.seen?.length ?? 0) > MAX_NEIGHBORS;
   neighbors = neighbors.map(cleanNeighbor).filter((n) => nodeId(n.name)).slice(0, MAX_NEIGHBORS);
   let nodes = t.nodes.map((n) => ({ ...n }));
   let links = t.links.map((l) => ({ ...l }));
@@ -903,9 +1056,9 @@ export function mergeNeighbors(
     }
     links = dedupeLinks(links);
   };
-  const ensure = (name: string, extra: Partial<TopoNode> = {}) => {
+  const ensure = (name: string, extra: Partial<TopoNode> = {}, known?: TopoNode) => {
     const id = nodeId(name);
-    let n = nodes.find((x) => x.id === id);
+    let n = known ?? nodeByName(nodes, id);
     if (!n) {
       n = { id, name: name.replace(/\(.*\)$/, ""), explored: false, x: 0, y: 0 };
       nodes.push(n);
@@ -922,7 +1075,13 @@ export function mergeNeighbors(
     if (n.ip && !n.addrOnly) absorb(n, [n.ip]);
     return n;
   };
-  const self = ensure(device.name, { ip: device.ip, platform: device.platform, explored: true });
+  // El equipo propio: por nombre o, si el prompt no coincide con el nombre que anunciaron sus vecinos,
+  // el nodo sin explorar con su misma IP de gestión (el nombre del prompt queda como alias).
+  const own = deviceNode({ nodes, links }, device.name, device.ip);
+  const wasExplored = !!own?.explored;
+  const ownId = nodeId(device.name);
+  if (own && own.id !== ownId && !own.aliases?.includes(ownId) && !UNSAFE_KEYS.has(ownId)) own.aliases = [...(own.aliases ?? []), ownId].slice(-MAX_ALIASES);
+  const self = ensure(device.name, { ip: device.ip, platform: device.platform, explored: true }, own);
   // Por puerto: lo que anunció un vecino (VLAN nativa, dúplex) se conserva junto a la lectura nueva.
   if (device.ports) {
     const merged: Record<string, PortInfo> = { ...self.ports };
@@ -940,7 +1099,7 @@ export function mergeNeighbors(
     const addrs = nb.addrs?.length ? nb.addrs : [nb.ip ?? nb.name];
     if (addrs.some((a) => selfAddrs.has(a))) return null;
     const id = nodeId(nb.name);
-    let n = nodes.find((x) => x.id === id) ?? nodes.find((x) => knownAddrs(x).some((a) => addrs.includes(a)));
+    let n = nodeByName(nodes, id) ?? nodes.find((x) => knownAddrs(x).some((a) => addrs.includes(a)));
     if (!n) {
       n = { id, name: nb.name, ip: nb.ip, explored: false, addrOnly: true, x: 0, y: 0 };
       nodes.push(n);
@@ -951,8 +1110,12 @@ export function mergeNeighbors(
   };
 
   const same = (x: string, y: string) => !!x && !!y && canonPort(x) === canonPort(y);
-  // Lo que este equipo informa se vuelve a anotar desde cero: un vecino que dejó de ver no queda como visto.
-  for (const l of links) if (l.seenBy && (l.a === self.id || l.b === self.id)) l.seenBy = l.seenBy.filter((x) => x !== self.id);
+  const complete = new Set<string>(overCap ? [] : (opts.complete ?? ["CDP", "LLDP"]));
+  // Lo que este equipo informa se vuelve a anotar desde cero: un vecino que dejó de ver no queda como
+  // visto. Solo para los protocolos leídos completos: una lectura cortada no desmiente lo anterior.
+  for (const l of links) if (l.seenBy && complete.has(l.proto) && (l.a === self.id || l.b === self.id)) l.seenBy = l.seenBy.filter((x) => x !== self.id);
+  /** Enlaces que este equipo informó en esta lectura. */
+  const seenNow = new Set<TopoLink>();
   for (const nb of neighbors) {
     const other = nb.byAddr ? ensureAddr(nb) : ensure(nb.name, { ip: nb.ip, platform: nb.platform, caps: nb.caps });
     if (!other || other.id === self.id) continue;
@@ -977,18 +1140,29 @@ export function mergeNeighbors(
     const selfPort = (l: TopoLink) => (l.a === self.id ? l.aPort : l.bPort);
     const otherPort = (l: TopoLink) => (l.a === self.id ? l.bPort : l.aPort);
     // El mismo enlace visto desde el otro extremo (con otra nomenclatura de puertos).
-    let dup = pair.find((l) => same(selfPort(l), aPort) || (l.a === other.id && same(otherPort(l), bPort)));
+    // Primero por el puerto propio: es lo que este equipo sabe con certeza.
+    let dup = pair.find((l) => same(selfPort(l), aPort)) ?? pair.find((l) => l.a === other.id && same(otherPort(l), bPort));
+    // Lo creó el otro extremo y coincide por su puerto: el puerto de este lado era lo que anunció este
+    // equipo por CDP/LLDP (un índice, una MAC o una descripción). Ahora lo dice el propio equipo.
+    const fixOwnPort = !!dup && !!aPort && isPhysicalProto(nb.proto) && isPhysicalProto(dup.proto) && !same(selfPort(dup), aPort);
     // Un enlace de ruteo conocido desde el otro equipo, sin el puerto de este lado.
     if (!dup && aPort && !isPhysicalProto(nb.proto)) dup = pair.find((l) => l.proto === nb.proto && !selfPort(l) && l.a === other.id);
     // BGP sin interfaz: una sesión por par; si es directa y el par ya está unido, no aporta.
     if (!dup && nb.proto === "BGP" && !aPort) dup = pair.find((l) => l.proto === "BGP") ?? (nb.logical ? undefined : pair[0]);
     const link: TopoLink = { a: self.id, aPort, b: other.id, bPort, proto: nb.proto, ...(nb.logical ? { logical: true } : {}) };
     const seen = (l: TopoLink) => {
-      if (isPhysicalProto(nb.proto)) l.seenBy = [...new Set([...(l.seenBy ?? []), self.id])];
+      if (!isPhysicalProto(nb.proto)) return;
+      l.seenBy = [...new Set([...(l.seenBy ?? []), self.id])];
+      seenNow.add(l);
+      // Volvió a verse: deja de ser un enlace "no visto".
+      delete l.staleSince;
     };
     seen(dup ?? link);
     if (!dup) links.push(link);
-    else if (protoRank(nb.proto) > protoRank(dup.proto)) {
+    else if (fixOwnPort) {
+      if (dup.a === self.id) dup.aPort = aPort;
+      else dup.bPort = aPort;
+    } else if (protoRank(nb.proto) > protoRank(dup.proto)) {
       // Un origen más confiable reemplaza al anterior (manual o ruteo confirmado por CDP/LLDP).
       const keepA = selfPort(dup);
       const keepB = otherPort(dup);
@@ -999,7 +1173,110 @@ export function mergeNeighbors(
       else dup.bPort = aPort;
     }
   }
+  // Enlaces CDP/LLDP de este equipo que ya no informa. Antes solo salía de `seenBy` y el enlace
+  // seguía como sano: tras un recableado quedaban dos enlaces en el mismo puerto y la comparación con
+  // un snapshot no mostraba nada retirado. Se marcan (no se borran) en dos casos: otro vecino ocupa
+  // ahora ese puerto local (siempre, también con una lectura parcial o con un vecino fuera del
+  // alcance), o la lectura de su protocolo fue completa y ningún equipo lo informa.
+  const onPort = new Map<string, Set<string>>();
+  for (const nb of (opts.seen ? opts.seen.map(cleanNeighbor).slice(0, MAX_NEIGHBORS) : neighbors)) {
+    if (!isPhysicalProto(nb.proto) || !nb.localPort) continue;
+    const id = nodeId(nb.name);
+    if (!id) continue;
+    const k = canonPort(shortPort(nb.localPort));
+    const ids = onPort.get(k) ?? new Set<string>();
+    ids.add(nodeByName(nodes, id)?.id ?? id);
+    onPort.set(k, ids);
+  }
+  const now = opts.now ?? Date.now();
+  const exploredIds = new Set(nodes.filter((n) => n.explored).map((n) => n.id));
+  for (const l of links) {
+    if (!isPhysicalProto(l.proto) || seenNow.has(l) || (l.a !== self.id && l.b !== self.id)) continue;
+    const [port, other] = l.a === self.id ? [l.aPort, l.b] : [l.bPort, l.a];
+    const there = port ? onPort.get(canonPort(port)) : undefined;
+    const replaced = !!there && !there.has(other);
+    // Sin `seenBy` (diagramas de versiones anteriores): si el otro extremo no se ha explorado, solo
+    // este equipo pudo informarlo.
+    const reporters = l.seenBy ?? (wasExplored && !exploredIds.has(other) ? [] : undefined);
+    const gone = complete.has(l.proto) && reporters?.length === 0;
+    if ((replaced || gone) && l.staleSince === undefined) l.staleSince = now;
+  }
   return layout({ nodes, links: dedupeLinks(links) });
+}
+
+/**
+ * Enlace CDP/LLDP que ya no se informa ("no visto desde"): marcado al descubrir, o sin ningún
+ * equipo en `seenBy` (diagramas guardados antes de que existiera la marca).
+ */
+export const isStale = (l: Pick<TopoLink, "staleSince" | "seenBy" | "proto">) => l.staleSince !== undefined || (isPhysicalProto(l.proto) && l.seenBy?.length === 0);
+
+/**
+ * Quita los enlaces "no vistos" y los equipos que solo existían por ellos (sin explorar, no
+ * agregados a mano y sin otro enlace). Lo pide el usuario: nunca se purga solo.
+ */
+export function purgeStale(t: Topology): Topology {
+  const gone = t.links.filter(isStale);
+  if (!gone.length) return t;
+  const links = t.links.filter((l) => !isStale(l));
+  const linked = new Set(links.flatMap((l) => [l.a, l.b]));
+  const orphans = new Set(gone.flatMap((l) => [l.a, l.b]).filter((id) => !linked.has(id)));
+  return { nodes: t.nodes.filter((n) => !orphans.has(n.id) || n.explored || n.manual), links };
+}
+
+/**
+ * Protocolos de vecinos (CDP, LLDP) cuya lectura por consola fue completa, para MergeOptions.
+ * Cuenta el comando principal de cada protocolo: sin cortes y sin ser rechazado por el equipo.
+ * "% CDP is not enabled" es una respuesta completa (no hay vecinos); un comando inexistente, no.
+ */
+export function completeProtos(vendor: TopoVendor, results: { cmd: string; out: string; cut?: boolean }[]): LinkProto[] {
+  const done: LinkProto[] = [];
+  const bad = new Set<LinkProto>();
+  for (const cmd of NEIGHBOR_COMMANDS[vendor]) {
+    const proto: LinkProto = /\bcdp\b/i.test(cmd) ? "CDP" : "LLDP";
+    if (done.includes(proto) || bad.has(proto)) continue;
+    const r = results.find((x) => x.cmd === cmd);
+    if (r && !r.cut && r.out.trim() && !isRejected(r.out)) done.push(proto);
+    else bad.add(proto);
+  }
+  return done;
+}
+
+/**
+ * Nombres completos distintos que caen en el mismo equipo porque comparten el nombre corto
+ * ("sw1.scl.example.net" y "sw1.anf.example.net" son "sw1") y traen IP de gestión distinta: se
+ * dibujan como uno solo y conviene avisarlo. Compara los vecinos leídos entre sí y con el diagrama.
+ */
+export function nameCollisions(t: Topology, neighbors: Neighbor[]): string[] {
+  const full = (name: string) => clean(name).trim().replace(/\(.*\)$/, "").toLowerCase();
+  const isFqdn = (s: string) => s.includes(".") && !isIpv4(s) && !MAC_NAME.test(s);
+  const res: string[] = [];
+  const said = new Set<string>();
+  const check = (a: { name: string; ip?: string }, b: { name: string; ip?: string }) => {
+    const [x, y] = [full(a.name), full(b.name)];
+    if (x === y || !isFqdn(x) || !isFqdn(y) || nodeId(x) !== nodeId(y) || !a.ip || !b.ip || a.ip === b.ip) return;
+    const k = [x, y].sort().join("|");
+    if (said.has(k)) return;
+    said.add(k);
+    res.push(`${x} (${a.ip}) y ${y} (${b.ip}) comparten el nombre corto "${nodeId(x)}"`);
+  };
+  const nodes = new Map(t.nodes.map((n) => [n.id, n]));
+  const byId = new Map<string, Neighbor[]>();
+  for (const nb of neighbors.slice(0, MAX_NEIGHBORS)) {
+    const id = nb.byAddr ? "" : nodeId(nb.name);
+    if (!id) continue;
+    const list = byId.get(id);
+    if (!list) byId.set(id, [nb]);
+    else if (list.length < 8) list.push(nb);
+  }
+  for (const [id, list] of byId) {
+    const node = nodes.get(id);
+    for (const [i, nb] of list.entries()) {
+      if (node) check(node, nb);
+      for (const other of list.slice(i + 1)) check(nb, other);
+    }
+    if (res.length >= 5) break;
+  }
+  return res;
 }
 
 /** Disposición por niveles desde el primer equipo explorado; respeta nodos ya movidos. */
@@ -1047,9 +1324,15 @@ export function linkGroup(t: Topology, l: TopoLink, byId?: Map<string, TopoNode>
 /** Ruta más corta (en saltos) entre dos equipos. Devuelve los enlaces en orden, o null. */
 export function shortestPath(t: Topology, from: string, to: string): { nodes: string[]; links: TopoLink[] } | null {
   if (from === to) return { nodes: [from], links: [] };
-  // Las sesiones BGP lógicas no son saltos físicos: solo se usan si no hay otro camino.
+  // Las sesiones BGP lógicas no son saltos físicos, y un enlace que ya nadie informa puede no existir:
+  // solo se usan si no hay otro camino.
   const hops = t.links.filter((l) => !l.logical);
-  return bfsPath(hops, from, to) ?? (hops.length < t.links.length ? bfsPath(t.links, from, to) : null);
+  const live = hops.filter((l) => !isStale(l));
+  return (
+    bfsPath(live, from, to) ??
+    (live.length < hops.length ? bfsPath(hops, from, to) : null) ??
+    (hops.length < t.links.length ? bfsPath(t.links, from, to) : null)
+  );
 }
 
 function bfsPath(all: TopoLink[], from: string, to: string): { nodes: string[]; links: TopoLink[] } | null {
@@ -1129,15 +1412,19 @@ export interface TopoDiff {
   removedNodes: TopoNode[];
 }
 
-/** Diferencias entre una topología anterior (snapshot) y la actual. */
+/**
+ * Diferencias entre una topología anterior (snapshot) y la actual. Un enlace que sigue en el
+ * diagrama pero que ya ningún equipo informa (`staleSince`) cuenta como retirado si en el snapshot
+ * estaba vigente: tras un recableado, el snapshot lo muestra.
+ */
 export function diffTopology(before: Topology, now: Topology): TopoDiff {
-  const nowKeys = new Set(now.links.map(linkKey));
+  const nowKeys = new Set(now.links.filter((l) => !isStale(l)).map(linkKey));
   const beforeKeys = new Set(before.links.map(linkKey));
   const nowIds = new Set(now.nodes.map((n) => n.id));
   const beforeIds = new Set(before.nodes.map((n) => n.id));
   return {
     addedLinks: now.links.filter((l) => !beforeKeys.has(linkKey(l))),
-    removedLinks: before.links.filter((l) => !nowKeys.has(linkKey(l))),
+    removedLinks: before.links.filter((l) => !isStale(l) && !nowKeys.has(linkKey(l))),
     addedNodes: now.nodes.filter((n) => !beforeIds.has(n.id)).map((n) => n.id),
     removedNodes: before.nodes.filter((n) => !nowIds.has(n.id)),
   };
@@ -1164,7 +1451,7 @@ export function toMermaid(t: Topology): string {
     if (l.proto === "MAC/OUI") macEdges.push(edge);
     edge++;
     const g = linkGroup(t, l);
-    const extra = [g, isPhysicalProto(l.proto) ? "" : protoLabel(l)].filter(Boolean).map((x) => safe(x!)).join(", ");
+    const extra = [g, isPhysicalProto(l.proto) ? "" : protoLabel(l), isStale(l) ? "ya no informado" : ""].filter(Boolean).map((x) => safe(x!)).join(", ");
     // Línea punteada para lo que no es un enlace CDP/LLDP (ruteo, manual, descripción).
     const line = isPhysicalProto(l.proto) ? "---" : "-.-";
     lines.push(`  ${s} ${line}|"${safe(l.aPort || "?")} ↔ ${safe(l.bPort || "?")}${extra ? ` (${extra})` : ""}"| ${d}`);
@@ -1174,7 +1461,13 @@ export function toMermaid(t: Topology): string {
   return lines.join("\n");
 }
 
-/** CSV de enlaces y puertos; con `traffic`, agrega las últimas tasas y la utilización de cada enlace. */
+/** Marca de orden de bytes: sin ella Excel abre el CSV en la página de códigos local y muestra mal los acentos. */
+export const CSV_BOM = "﻿";
+
+/**
+ * CSV de enlaces y puertos (UTF-8 con BOM); con `traffic`, agrega las últimas tasas y la utilización
+ * de cada enlace. Un enlace que ya nadie informa lleva "(ya no informado)" en el protocolo.
+ */
 export function toCsv(t: Topology, traffic?: Map<string, LinkTraffic>): string {
   const node = (id: string) => t.nodes.find((n) => n.id === id);
   // Nombres y descripciones vienen de los equipos (CDP/LLDP): una celda que empieza con
@@ -1186,7 +1479,7 @@ export function toCsv(t: Topology, traffic?: Map<string, LinkTraffic>): string {
   };
   const withTraffic = !!traffic?.size;
   const num = (n: number | null | undefined) => (n == null || !Number.isFinite(n) ? "" : String(Math.round(n)));
-  return [
+  return CSV_BOM + [
     "equipo_a,ip_a,puerto_a,estado_a,velocidad_a,descripcion_a,equipo_b,ip_b,puerto_b,estado_b,velocidad_b,descripcion_b,agregado,protocolo" +
       (withTraffic ? ",trafico_a_b_bps,trafico_b_a_bps,velocidad_enlace_bps,utilizacion_pct,lectura,utilizacion_aproximada" : ""),
     ...t.links.map((l) => {
@@ -1198,7 +1491,7 @@ export function toCsv(t: Topology, traffic?: Map<string, LinkTraffic>): string {
       return [
         a?.name ?? l.a, a?.ip, l.aPort, pa?.status, pa?.speed, pa?.desc,
         b?.name ?? l.b, b?.ip, l.bPort, pb?.status, pb?.speed, pb?.desc,
-        linkGroup(t, l), protoLabel(l),
+        linkGroup(t, l), `${protoLabel(l)}${isStale(l) ? " (ya no informado)" : ""}`,
         ...(withTraffic
           ? [num(lt?.ab), num(lt?.ba), num(lt?.speed), lt?.util == null ? "" : (lt.util * 100).toFixed(1), lt ? new Date(lt.ts).toISOString() : "", lt?.approx ? "si" : ""]
           : []),
@@ -1259,6 +1552,11 @@ export interface LinkTraffic {
   util?: number;
   /** La velocidad salió del "BW" configurado (consola), no de la velocidad física: utilización aproximada. */
   approx?: boolean;
+  /**
+   * La tasa salió de contadores de 32 bits en un enlace de 1 G o más: pueden dar más de una vuelta
+   * entre lecturas, así que la tasa real puede ser mayor (también va con `approx`).
+   */
+  lowRes?: boolean;
   /** Momento de la lectura (ms). */
   ts: number;
   /** De dónde salió la lectura: contadores SNMP (IF-MIB) o comando de consulta por consola. */
@@ -1436,11 +1734,13 @@ export function toSvg(t: Topology, W = 170, H = 54, traffic?: Map<string, LinkTr
   }
   const groups = new Set<string>();
   for (const g of geo) {
-    const dash = linkDash(g.l);
+    // Un enlace que ya nadie informa va tenue y con punteado fino, como en pantalla.
+    const stale = isStale(g.l);
+    const dash = stale ? "1.5 6" : linkDash(g.l);
     const lt = traffic?.get(linkKey(g.l));
     const stroke = lt ? UTIL_COLORS[utilLevel(lt.util)] : "#8a919c";
     const width = lt ? (2 + 3 * Math.min(1, lt.util ?? 0)).toFixed(1) : "2";
-    parts.push(`<path d="${g.d}" fill="none" stroke="${stroke}" stroke-width="${width}"${dash ? ` stroke-dasharray="${dash}" stroke-linecap="round"` : ""}/>`);
+    parts.push(`<path d="${g.d}" fill="none" stroke="${stroke}" stroke-width="${width}"${stale ? ' stroke-opacity="0.55"' : ""}${dash ? ` stroke-dasharray="${dash}" stroke-linecap="round"` : ""}/>`);
     if (g.l.aPort) parts.push(label(g.pa, g.l.aPort));
     if (g.l.bPort) parts.push(label(g.pb, g.l.bPort));
     const grp = linkGroup(t, g.l);
@@ -1717,7 +2017,7 @@ function prettyPort(k: string): string {
 
 /** Equipo del diagrama que corresponde a un nombre o IP. */
 export const findNode = (t: Topology, nameOrIp: string) =>
-  t.nodes.find((n) => n.id === nodeId(nameOrIp)) ?? (isIpv4(nameOrIp) ? t.nodes.find((n) => knownAddrs(n).includes(nameOrIp)) : undefined);
+  nodeByName(t.nodes, nodeId(nameOrIp)) ?? (isIpv4(nameOrIp) ? t.nodes.find((n) => knownAddrs(n).includes(nameOrIp)) : undefined);
 
 /** Sugerencias desde las descripciones de interfaz ya leídas (no ejecuta comandos). */
 export function suggestFromDescriptions(t: Topology): LinkSuggestion[] {

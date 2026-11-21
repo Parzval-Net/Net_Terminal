@@ -31,7 +31,11 @@ struct Patterns {
 fn patterns() -> &'static Patterns {
     static P: OnceLock<Patterns> = OnceLock::new();
     P.get_or_init(|| Patterns {
-        more: Regex::new(r"(?i)(--\s*more\s*--|-{2,}\s*more\s*-{2,}|\(more\)|press any key)\s*$").unwrap(),
+        // " --More-- " (IOS, NX-OS), "  ---- More ----" (VRP) y "---(more)---" o "---(more 45%)---" (Junos):
+        // el mismo marcador que PAGER en src/lib/cliText.ts. Antes "\(more\)\s*$" exigía el fin de línea
+        // tras el paréntesis: el paginador de Junos no se reconocía, el trabajo esperaba el plazo completo,
+        // devolvía solo la primera página y el comando siguiente se tecleaba dentro del paginador.
+        more: Regex::new(r"(?i)(-{2,}\s*\(?more(?:\s+\d+%)?\)?\s*-{2,}|\(more\)|press any key)\s*$").unwrap(),
         // Los mismos prompts que src/lib/cliText.ts (lista común en scripts/tests/fixtures/prompts.json):
         // Huawei/H3C <SW>, [~SW], [*SW-GE1/0/1]; MikroTik [admin@MikroTik] >; shell RHEL
         // [user@host ~]$; Junos, PAN-OS y shells user@host>, user@host:~$; Cisco/Arista/Aruba
@@ -61,6 +65,61 @@ fn patterns() -> &'static Patterns {
 const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 /// Texto final que se conserva para reconocer preguntas de confirmación.
 const TAIL_KEEP: usize = 4096;
+/// Tope de confirmaciones respondidas por comando (Enter, "y", "n", Ctrl+C): más es un bucle.
+const MAX_CONFIRMS: u32 = 200;
+/// Tope de páginas del paginador por comando. Va aparte de las confirmaciones: una salida larga
+/// ("show interfaces" de un chasis, unas 4.600 líneas) pasa de 200 páginas y antes se cortaba ahí
+/// con "Demasiadas confirmaciones", y lo leído se procesaba como si fuera la salida completa.
+const MAX_PAGES: u32 = 5000;
+pub const TOO_MANY_CONFIRMS: &str = "Demasiadas confirmaciones; se detuvo por seguridad";
+pub const TOO_MANY_PAGES: &str = "Demasiadas páginas del paginador; se detuvo la lectura";
+
+/// Qué hacer con lo último que envió el equipo.
+#[derive(Debug, PartialEq)]
+enum Auto {
+    /// Nada que responder.
+    Wait,
+    /// Respuesta que se escribe en la sesión.
+    Reply(&'static str),
+    /// Se superó un tope: el trabajo se corta con este motivo.
+    Stop(&'static str),
+}
+
+/// Respuestas automáticas de un comando, con un tope para el paginador y otro para las confirmaciones.
+#[derive(Default)]
+struct AutoReplies {
+    pages: u32,
+    confirms: u32,
+    /// Pregunta del equipo respondida con "no" (solo con `answer = false`).
+    declined: Option<String>,
+}
+
+impl AutoReplies {
+    /// `tail`: texto desde la última respuesta automática, sin espacios al final.
+    fn next(&mut self, p: &Patterns, tail: &str, answer: bool) -> Auto {
+        if p.more.is_match(tail) {
+            self.pages += 1;
+            return if self.pages > MAX_PAGES { Auto::Stop(TOO_MANY_PAGES) } else { Auto::Reply(" ") };
+        }
+        let yes_no = p.yes_no.is_match(tail);
+        if !yes_no && !p.confirm.is_match(tail) {
+            return Auto::Wait;
+        }
+        self.confirms += 1;
+        if self.confirms > MAX_CONFIRMS {
+            return Auto::Stop(TOO_MANY_CONFIRMS);
+        }
+        if !answer {
+            self.declined.get_or_insert_with(|| tail.lines().last().unwrap_or("").trim().chars().take(200).collect());
+        }
+        Auto::Reply(match (yes_no, answer) {
+            (true, true) => "y\r",
+            (true, false) => "n\r",
+            (false, true) => "\r",
+            (false, false) => "\x03",
+        })
+    }
+}
 
 /// Un solo comando a la vez por sesión: dos trabajos en paralelo escribirían su comando mientras el
 /// otro responde "--More--" o espera el prompt, y el equipo se comería el primer carácter
@@ -196,8 +255,7 @@ fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &
         let start = Instant::now();
         let mut output = String::new();
         let mut tail = String::new(); // texto desde la última respuesta automática
-        let mut answered = 0;
-        let mut declined: Option<String> = None;
+        let mut auto = AutoReplies::default();
         let mut echo = EchoScan::default();
         // Líneas completas hacia la interfaz: un fragmento puede cortar una línea a la mitad.
         let mut partial = String::new();
@@ -254,48 +312,31 @@ fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &
             }
             partial.push_str(&chunk);
             flush(&mut partial, false);
-            let t = tail.trim_end_matches([' ', '\t']);
-            let question = || t.lines().last().unwrap_or("").trim().chars().take(200).collect::<String>();
-            let reply = if p.more.is_match(t) {
-                Some(" ")
-            } else if p.yes_no.is_match(t) {
-                if answer {
-                    Some("y\r")
-                } else {
-                    declined.get_or_insert_with(question);
-                    Some("n\r")
-                }
-            } else if p.confirm.is_match(t) {
-                if answer {
-                    Some("\r")
-                } else {
-                    declined.get_or_insert_with(question);
-                    Some("\x03")
-                }
-            } else {
-                None
-            };
-            if let Some(r) = reply {
-                answered += 1;
-                if answered > 200 {
-                    leave_pager(conns, conn, p, &tail);
-                    fail(&mut error, "Demasiadas confirmaciones; se detuvo por seguridad".into());
-                    break;
-                }
-                // Si la pestaña pasó a solo lectura con el trabajo en curso, se detiene en esta escritura.
-                if let Err(e) = conns.write(conn, r.as_bytes()) {
+            match auto.next(p, tail.trim_end_matches([' ', '\t']), answer) {
+                Auto::Wait => {}
+                Auto::Stop(why) => {
                     flush(&mut partial, true);
-                    fail(&mut error, format!("{e}. Se detuvo el trabajo"));
+                    leave_pager(conns, conn, p, &tail);
+                    fail(&mut error, why.into());
                     break;
                 }
-                tail.clear();
-                continue;
+                Auto::Reply(r) => {
+                    // Si la pestaña pasó a solo lectura con el trabajo en curso, se detiene en esta escritura.
+                    if let Err(e) = conns.write(conn, r.as_bytes()) {
+                        flush(&mut partial, true);
+                        fail(&mut error, format!("{e}. Se detuvo el trabajo"));
+                        break;
+                    }
+                    tail.clear();
+                    continue;
+                }
             }
             if echo.finished(p, &output, command.trim()) {
                 break;
             }
         }
         flush(&mut partial, true);
+        let declined = auto.declined;
         let failed = p.error.is_match(&output) || declined.is_some();
         RunOutcome { output, ok: !failed, declined, error, ran: true }
     }
@@ -441,6 +482,12 @@ mod tests {
         assert!(p.yes_no.is_match("Are you sure to download file? (y/n)[n]:"));
         assert!(p.more.is_match(" --More-- "));
         assert!(p.more.is_match("  ---- More ----"));
+        // Junos, sin y con porcentaje: antes ninguno calzaba y el trabajo esperaba el plazo completo.
+        assert!(p.more.is_match("---(more)---"));
+        assert!(p.more.is_match("---(more 45%)---"));
+        assert!(p.more.is_match("ge-0/0/1  up  up\n---(more 100%)---"));
+        assert!(!p.more.is_match("Learn more -- see the documentation"));
+        assert!(!p.more.is_match("---(more 45%)--- ge-0/0/2 up up"), "con texto después ya no es el paginador en espera");
         for prompt in ["Router#", "SW-CORE(config)#", "<HUAWEI>", "[HUAWEI]", "noc@mx01>", "fw01 #"] {
             assert!(p.prompt.is_match(prompt), "{prompt}");
         }
@@ -457,6 +504,37 @@ mod tests {
         }
         assert!(p.error.is_match("%Error opening tftp://10.0.0.5/x.bin (Timed out)"));
         assert!(!p.error.is_match("[OK - 33591768 bytes]"));
+    }
+
+    #[test]
+    fn pager_pages_do_not_count_as_confirmations() {
+        let p = patterns();
+        // 201 páginas (unas 4.600 líneas): todas se avanzan; antes la 201 cortaba con "Demasiadas confirmaciones".
+        let mut auto = AutoReplies::default();
+        for i in 0..201 {
+            let tail = if i % 2 == 0 { "Gi1/0/1 is up\n --More-- " } else { "ge-0/0/1 up up\n---(more 45%)---" };
+            assert_eq!(auto.next(p, tail.trim_end_matches([' ', '\t']), true), Auto::Reply(" "), "página {i}");
+        }
+        assert_eq!((auto.pages, auto.confirms), (201, 0));
+        // Las confirmaciones conservan su tope, aunque haya páginas entre medio.
+        for _ in 0..MAX_CONFIRMS {
+            assert_eq!(auto.next(p, "Destination filename [a.bin]?", true), Auto::Reply("\r"));
+        }
+        assert_eq!(auto.next(p, "  ---- More ----", true), Auto::Reply(" "));
+        assert_eq!(auto.next(p, "Destination filename [a.bin]?", true), Auto::Stop(TOO_MANY_CONFIRMS));
+        // El paginador también tiene tope: un equipo que repite "--More--" sin fin no ocupa la sesión.
+        let mut auto = AutoReplies::default();
+        for _ in 0..MAX_PAGES {
+            assert_eq!(auto.next(p, " --More--", true), Auto::Reply(" "));
+        }
+        assert_eq!(auto.next(p, " --More--", true), Auto::Stop(TOO_MANY_PAGES));
+        // Sin nada que responder, y sin confirmar cuando `answer` es false (queda la primera pregunta).
+        let mut auto = AutoReplies::default();
+        assert_eq!(auto.next(p, "Router#show clock\n10:00", false), Auto::Wait);
+        assert_eq!(auto.next(p, "Are you sure to download file? (y/n)[n]:", false), Auto::Reply("n\r"));
+        assert_eq!(auto.next(p, "Proceed with reload? [confirm]", false), Auto::Reply("\x03"));
+        assert_eq!(auto.declined.as_deref(), Some("Are you sure to download file? (y/n)[n]:"));
+        assert_eq!(AutoReplies::default().next(p, "Overwrite? (y/n)[n]:", true), Auto::Reply("y\r"));
     }
 
     #[test]

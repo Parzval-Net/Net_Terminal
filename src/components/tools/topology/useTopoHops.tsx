@@ -33,7 +33,7 @@ import {
   vendorOfPlatform,
 } from "../../../lib/hopTab";
 import { HopCredInfo, hopCredKey, isIpLiteral } from "../../../lib/hopCred";
-import { TopoNode, TopoVendor, Topology, hopCommand, knownAddrs, nodeId } from "../../../lib/topology";
+import { TopoNode, TopoVendor, Topology, backCommand, hopCommand, knownAddrs, nodeId, vendorFromPrompt } from "../../../lib/topology";
 import type { Session } from "../../../types";
 import type { MenuItem } from "../../tabMenu";
 import type { TabBrief, TerminalRef } from "../FileManager";
@@ -441,16 +441,23 @@ export function useTopoHops({
     return () => window.clearTimeout(t);
   }, [hopViews]);
 
-  /** Vuelve al equipo anterior de la ruta (exit en la misma pestaña). */
+  /**
+   * Vuelve al equipo anterior de la ruta, en la misma pestaña: "exit", o "quit" si el equipo donde
+   * está es Huawei VRP o H3C (su prompt lo dice; no reconocen "exit" y la pestaña se quedaba ahí con
+   * la ruta ya acortada). Sin prompt a la vista vale la plataforma del equipo en el diagrama.
+   */
   const hopBack = () => {
     if (!term?.tabId || !termRoute?.steps.length) return;
     const why = tabBlock(term.tabId);
     if (why) return setMsg(why);
-    invoke("write", { id: term.connId, data: "exit\r" }).catch((e) => setMsg(String(e)));
+    const names = routeNames(termRoute);
+    const here = topoRef.current.nodes.find((n) => n.id === nodeId(names[names.length - 1]));
+    const seen = vendorFromPrompt((term.screen?.(4) ?? "").replace(/\r/g, "").trimEnd());
+    const cmd = backCommand(seen ?? vendorOfPlatform(here?.platform));
+    invoke("write", { id: term.connId, data: `${cmd}\r` }).catch((e) => setMsg(String(e)));
     const tabId = term.tabId;
     setRoutes((m) => ({ ...m, [tabId]: truncateRoute(termRoute, termRoute.steps.length - 1) }));
-    const names = routeNames(termRoute);
-    setMsg(`Enviado "exit": esa pestaña vuelve a ${names[names.length - 2]}.`);
+    setMsg(`Enviado "${cmd}": esa pestaña vuelve a ${names[names.length - 2]}.`);
   };
 
   // ---------- Abrir terminal: un botón que hace lo correcto ----------
@@ -554,7 +561,7 @@ export function useTopoHops({
   const crumbState = (name: string): { state: "connected" | "down" | "none"; tabId?: string } => {
     const id = nodeId(name);
     const { terminals: terms, tabs: briefs } = liveRef.current;
-    const hit = tabAtDevice(id, addrsOf(id), terms, routesRef.current, new Set(hopRuns.current.keys()));
+    const hit = tabAtDevice(id, addrsOf(id), terms, routesRef.current, new Set(hopRuns.current.keys()), topoRef.current.nodes.find((n) => n.id === id)?.aliases);
     if (hit?.tab.tabId) return { state: "connected", tabId: hit.tab.tabId };
     const down = briefs.find((b) => b.status === "closed" && routesRef.current[b.tabId] && nodeId(routeNames(routesRef.current[b.tabId]).slice(-1)[0]) === id);
     return down ? { state: "down", tabId: down.tabId } : { state: "none" };

@@ -1,5 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
-import { LinkDetail, ageText } from "../../../lib/topoInsights";
+import { LinkDetail, ageText, sinceText } from "../../../lib/topoInsights";
 import { LEVEL_COLOR, LEVEL_LABEL } from "./topoStyle";
 import { bpsEs } from "./topoText";
 import type { TipState } from "./topoTypes";
@@ -75,6 +75,7 @@ function LinkTipBody({ d, now }: { d: LinkDetail; now: number }) {
           </span>
         )}
         {d.state && <span className="ml-auto shrink-0 text-[11px] text-muted">{d.state === "removed" ? "ya no aparece" : "nuevo"}</span>}
+        {!d.state && d.staleSince !== undefined && <span className="ml-auto shrink-0 text-[11px] text-muted">{d.staleSince ? `no visto desde ${sinceText(d.staleSince)}` : "no visto"}</span>}
       </div>
       {d.ends.map((e, i) => (
         <p key={i} className="mt-0.5 text-muted [overflow-wrap:anywhere]">
@@ -95,7 +96,9 @@ function LinkTipBody({ d, now }: { d: LinkDetail; now: number }) {
           {d.dirs.map((x) => (
             <DirBar key={x.label} d={x} approx={d.approx} />
           ))}
-          {d.approx && <p className="mt-0.5 text-[11px] text-muted">≈ velocidad del BW configurado (aproximada)</p>}
+          {d.approx && (
+            <p className="mt-0.5 text-[11px] text-muted">{d.lowRes ? "≈ contadores de 32 bits en un enlace de 1 G o más: la tasa real puede ser mayor" : "≈ velocidad del BW configurado (aproximada)"}</p>
+          )}
           {!d.speed && <p className="mt-0.5 text-[11px] text-muted">Velocidad del enlace desconocida: sin % de uso.</p>}
         </>
       ) : (

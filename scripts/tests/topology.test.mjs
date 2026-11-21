@@ -400,7 +400,7 @@ const sent = new Set([
   ...Object.values(T.PORT_COMMANDS).flat(),
   ...Object.values(T.ROUTING_COMMANDS).flat(),
   ...Object.values(T.ADDRESS_COMMANDS).filter(Boolean),
-  ...Object.values(T.FALLBACK_COMMANDS),
+  ...Object.values(T.FALLBACK_COMMANDS).flat(),
   T.junosDetailCommand("ge-0/0/0"),
 ]);
 for (const cmd of sent) assert.equal(computeRisk(cmd), "read", cmd);
@@ -1474,13 +1474,14 @@ assert.deepEqual(T.parseDismissed([1, 2]), {});
   assert.equal(T.canonPort("ge-0/0/1"), "ge-0/0/1");
 
   // Comando por plataforma detectada, luego por resaltado; sin ninguno, Cisco y después Huawei.
-  assert.deepEqual(R.trafficCommands("vrp8", undefined), ["display interface"]);
-  assert.deepEqual(R.trafficCommands("yunshan", "cisco"), ["display interface"], "la plataforma manda sobre el resaltado");
+  // Junos y Huawei parten sin paginador ("| no-more") y después el comando solo, por si no lo reconoce.
+  assert.deepEqual(R.trafficCommands("vrp8", undefined), ["display interface | no-more", "display interface"]);
+  assert.deepEqual(R.trafficCommands("yunshan", "cisco"), ["display interface | no-more", "display interface"], "la plataforma manda sobre el resaltado");
   assert.deepEqual(R.trafficCommands("nxos", undefined), ["show interfaces", "show interface"]);
-  assert.deepEqual(R.trafficCommands(undefined, "juniper"), ["show interfaces extensive"]);
-  assert.deepEqual(R.trafficCommands(undefined, undefined), ["show interfaces", "show interface", "display interface"]);
+  assert.deepEqual(R.trafficCommands(undefined, "juniper"), ["show interfaces extensive | no-more", "show interfaces extensive"]);
+  assert.deepEqual(R.trafficCommands(undefined, undefined), ["show interfaces", "show interface", "display interface | no-more", "display interface"]);
   assert.deepEqual(R.trafficCommands("fos72", undefined), [], "FortiOS sin comando de contadores verificado");
-  for (const c of R.trafficCommands(undefined, undefined)) assert.equal(computeRisk(c), "read", c);
+  for (const p of [undefined, "vrp8", "junos", "nxos", "iosxe"]) for (const c of R.trafficCommands(p, undefined)) assert.equal(computeRisk(c), "read", c);
 
   // De punta a punta: enlace con el nombre de "show cdp neighbors" y dos lecturas de show interfaces.
   const show = (inB, outB) =>

@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from "react";
-import { LinkTraffic, Pt, TopoNode, TopoSnapshot, isRoutingProto, linkDash, portOf, protoLabel, quad, utilLevel } from "../../../lib/topology";
+import { LinkTraffic, Pt, TopoNode, TopoSnapshot, isRoutingProto, isStale, linkDash, portOf, protoLabel, quad, utilLevel } from "../../../lib/topology";
 import { LinkLevel } from "../../../lib/topoTraffic";
 import { LinkIssue, linkLevelOf, markEnds } from "../../../lib/topoInsights";
 import { plural } from "../../../lib/plural";
@@ -78,16 +78,18 @@ const LinkView = memo(function LinkView({
   const grp = noGroup ? undefined : (portOf(ga, g.l.aPort)?.group ?? portOf(gb, g.l.bPort)?.group);
   const [lit, setLit] = useState(false);
   const detailLevel = detail && lt && byUtil ? utilLevel(lt.util) : undefined;
+  // Enlace que ya nadie informa: fantasma (tenue y punteado fino) hasta que se vuelva a ver o se quite.
+  const stale = !state && isStale(g.l);
   const down = level === "down" && !state;
-  const color = state === "removed" ? "var(--danger)" : state === "added" ? "var(--ok)" : down ? "var(--text)" : detail ? (detailLevel ? UTIL_VAR[detailLevel] : hot ? "var(--accent)" : "var(--muted)") : level === "saturated" ? "var(--danger)" : level === "high" ? "var(--warn)" : hot ? "var(--accent)" : "var(--muted)";
+  const color = stale ? "var(--muted)" : state === "removed" ? "var(--danger)" : state === "added" ? "var(--ok)" : down ? "var(--text)" : detail ? (detailLevel ? UTIL_VAR[detailLevel] : hot ? "var(--accent)" : "var(--muted)") : level === "saturated" ? "var(--danger)" : level === "high" ? "var(--warn)" : hot ? "var(--accent)" : "var(--muted)";
   const base = g.l.logical ? 1.25 : 1.5;
   const width = down ? 2 : detail ? (lt && byUtil ? 1.75 + 3 * Math.min(1, lt.util ?? 0) : hot || state ? 2.5 : base) : level === "saturated" ? 5 : level === "high" ? 4 : hot || state ? 2.5 : base;
   const strokeWidth = isRoute ? Math.max(3.5, width) : width;
   const showGroup = grp && g.pair.length > 1 && g.pair.indexOf(g.l) === 0;
-  const dash = state === "removed" ? "6 5" : down ? "5 5" : linkDash(g.l);
+  const dash = state === "removed" ? "6 5" : stale ? "1.5 6" : down ? "5 5" : linkDash(g.l);
   // Sin color de utilización, las flechas van en el tono neutro del texto.
   const dirColor = (bps: number | null) => (byUtil ? UTIL_VAR[lt?.speed && bps !== null ? utilLevel(bps / lt.speed) : "none"] : "var(--muted)");
-  const label = `${aName} ${g.l.aPort || "?"} a ${bName} ${g.l.bPort || "?"}, ${protoLabel(g.l)}${down ? ", caído" : level === "high" ? ", uso alto" : level === "saturated" ? ", saturado" : ""}${nIssues ? `, ${nIssues} ${nIssues === 1 ? "hallazgo" : "hallazgos"}` : ""}`;
+  const label = `${aName} ${g.l.aPort || "?"} a ${bName} ${g.l.bPort || "?"}, ${protoLabel(g.l)}${stale ? ", ya no informado" : down ? ", caído" : level === "high" ? ", uso alto" : level === "saturated" ? ", saturado" : ""}${nIssues ? `, ${nIssues} ${nIssues === 1 ? "hallazgo" : "hallazgos"}` : ""}`;
   const key = g.k;
   return (
     <g
@@ -126,7 +128,7 @@ const LinkView = memo(function LinkView({
         d={g.d}
         fill="none"
         stroke={color}
-        strokeOpacity={down ? 0.65 : undefined}
+        strokeOpacity={stale ? 0.5 : down ? 0.65 : undefined}
         strokeWidth={strokeWidth}
         strokeDasharray={dash}
         strokeLinecap={dash ? "round" : undefined}

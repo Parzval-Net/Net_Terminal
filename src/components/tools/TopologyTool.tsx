@@ -34,6 +34,7 @@ import {
   followedTerminal,
   isIpv4,
   isIpv6,
+  isStale,
   isUserProto,
   knownAddrs,
   layout,
@@ -42,6 +43,7 @@ import {
   linkGroup,
   linkKey,
   nodeId,
+  purgeStale,
   sourceOn,
   toCsv,
   toDrawio,
@@ -419,7 +421,9 @@ export function TopologyTool({
       placed.push(g);
       return g;
     });
-    return { nodes: [...topo.nodes, ...ghosts], links: [...topo.links, ...diff.removedLinks] };
+    // Un enlace que sigue en el diagrama como "no visto" cuenta como retirado: ya está en topo.links.
+    const have = new Set(topo.links.map(linkKey));
+    return { nodes: [...topo.nodes, ...ghosts], links: [...topo.links, ...diff.removedLinks.filter((l) => !have.has(linkKey(l)))] };
   }, [diff, snapshot, liveTopo]);
   // Filtros: solo cambian lo que se dibuja; el diagrama guardado, las rutas y las exportaciones siguen completos.
   const shown = useMemo(() => filterView(view, filter), [view, filter]);
@@ -536,6 +540,8 @@ export function TopologyTool({
     const m = new Map<string, LinkTraffic>();
     if (!trafficOn) return m;
     for (const l of topo.links) {
+      // Un enlace que ya nadie informa no lleva tráfico: los contadores de su puerto pueden ser de otro enlace.
+      if (isStale(l)) continue;
       const lt = linkTraffic(l, traffic.rates);
       if (lt) m.set(linkKey(l), lt);
     }
@@ -631,6 +637,21 @@ export function TopologyTool({
     return { down, load, issues };
   }, [attention]);
   const coverage = useMemo(() => checkCoverage(topoData, traffic.live), [topoData, traffic.live]);
+  /** Enlaces CDP/LLDP que ya nadie informa: se dibujan fantasma hasta que se vuelvan a ver o se quiten. */
+  const staleCount = useMemo(() => topo.links.filter(isStale).length, [topo.links]);
+  const purge = () =>
+    onConfirm({
+      title: `¿Quitar ${staleCount === 1 ? "el enlace no visto" : `los ${staleCount} enlaces no vistos`}?`,
+      message:
+        "Se quitan del diagrama los enlaces CDP/LLDP que ningún equipo informa ya, y los equipos sin explorar que solo existían por ellos. Los snapshots no cambian. Si el enlace sigue en uso, vuelve a descubrir sus extremos en vez de quitarlo.",
+      label: "Quitar",
+      danger: true,
+      defaultCancel: true,
+      action: () => {
+        onTopo((t) => purgeStale(t));
+        setMsg(`${staleCount === 1 ? "Se quitó 1 enlace no visto" : `Se quitaron ${staleCount} enlaces no vistos`}.`);
+      },
+    });
 
   // Agentes IA (MCP): tasas, estado de enlaces y "Requieren atención" mientras esta vista está
   // abierta con el tráfico activo. Solo se publica una referencia; get_topology la lee si la pide.
@@ -1248,6 +1269,8 @@ export function TopologyTool({
               trafficOn={trafficOn}
               focusLink={focusLink}
               onPick={pickLink}
+              staleCount={staleCount}
+              onPurge={purge}
               open={isOpen("atencion")}
               onToggle={(v) => setOpen("atencion", v)}
             />

@@ -14,12 +14,19 @@ export interface DeviceResult {
   output: string;
   /** Pregunta del equipo que se respondió que no (`answer = false`). */
   declined?: string;
+  /**
+   * Motivo por el que la lectura se cortó antes de volver al prompt (plazo vencido, tope de páginas o
+   * de salida, sesión cerrada): `output` trae solo lo leído hasta ahí y no se debe tomar como completa.
+   */
+  cut?: string;
 }
 
 /**
  * Ejecuta un comando en la sesión (responde --More-- y confirmaciones) y devuelve toda
  * su salida cuando vuelve el prompt. Los eventos que llegan antes de conocer el id del
  * trabajo se guardan y se procesan después, para no perder respuestas rápidas.
+ * Si la lectura se corta (plazo, tope de páginas) devuelve lo leído sin avisar: quien necesite
+ * saber si la salida está completa usa `runOnDeviceResult` y revisa `cut`.
  */
 export async function runOnDevice(conn: string, command: string, timeoutSecs = 60, onWait?: (text: string) => void): Promise<string> {
   return (await runOnDeviceResult(conn, command, timeoutSecs, true, onWait)).output;
@@ -63,5 +70,5 @@ export async function runOnDeviceResult(conn: string, command: string, timeoutSe
     un();
   }
   if (failure && !output) throw new Error(failure);
-  return { ok: ok && !failure, output, declined };
+  return { ok: ok && !failure, output, declined, ...(failure ? { cut: failure } : {}) };
 }

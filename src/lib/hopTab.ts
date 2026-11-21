@@ -244,6 +244,24 @@ export const truncateRoute = (r: TabRoute, idx: number): TabRoute => (idx >= r.s
 const looseId = (n: string) => nodeId(n).replace(/[_\s]+/g, "-");
 export const samePrompt = (a: string, b: string) => looseId(a) === looseId(b);
 
+/** El nombre es el del equipo `id` del diagrama o uno de sus alias. */
+const isDevice = (name: string, id: string, aliases?: string[]) => nodeId(name) === id || !!aliases?.includes(nodeId(name));
+
+/**
+ * El prompt es del equipo `id` del diagrama: por su nombre, por uno de sus alias (el nombre del
+ * prompt cuando difiere del que anuncian sus vecinos) o por la ruta de la pestaña, que guarda el
+ * prompt de cada equipo al que saltó (`RouteStep.prompt`). Antes la lectura de tráfico comparaba el
+ * prompt con el id a secas y, con un alias, siempre decía "su pestaña está ahora en X".
+ */
+export function promptIsDevice(prompt: string, id: string, aliases?: string[], route?: TabRoute): boolean {
+  const mine = [id, ...(aliases ?? [])];
+  if (mine.some((x) => samePrompt(prompt, x))) return true;
+  if (!route) return false;
+  const shown = routePrompts(route);
+  const names = routeNames(route);
+  return shown.some((p, i) => (samePrompt(prompt, p) || samePrompt(prompt, names[i])) && mine.some((x) => samePrompt(names[i], x)));
+}
+
 /**
  * En qué equipo de la ruta está la pestaña según su pantalla: el índice (0 = pivote), `-1` si el
  * prompt es de un equipo que no está en la ruta (la pestaña cambió de equipo) o `null` si la pantalla
@@ -611,6 +629,8 @@ export interface PlanNode {
   name: string;
   ip?: string;
   platform?: string;
+  /** Otros nombres del equipo (el de su prompt cuando difiere del que anuncian sus vecinos). */
+  aliases?: string[];
 }
 
 /** De dónde salió un equipo del diagrama: el equipo que lo descubrió (id) y la ruta de la pestaña que estaba en él. */
@@ -772,7 +792,7 @@ const rank = (t: PlanTab) => (t.status === "connected" ? 0 : t.status === "conne
  */
 export function planOpen(inp: PlanInput): OpenPlan {
   const { target } = inp;
-  const here = inp.tabs.filter((t) => t.device && nodeId(t.device.name) === target.id).sort((a, b) => rank(a) - rank(b));
+  const here = inp.tabs.filter((t) => t.device && isDevice(t.device.name, target.id, target.aliases)).sort((a, b) => rank(a) - rank(b));
   const live = here.find((t) => t.status === "connected");
   const dead = here.find((t) => t.status === "closed");
   // Descubierto desde una pestaña: su ruta heredada. Si no, la más corta por el diagrama.
@@ -842,6 +862,7 @@ export function tabAtDevice<T extends { name: string; host?: string; screen?: (n
   tabs: T[],
   routes?: Record<string, TabRoute>,
   busy?: ReadonlySet<string>,
+  aliases?: string[],
 ): { tab: T; verified: boolean } | undefined {
   let best: { tab: T; verified: boolean; r: number } | undefined;
   for (const t of tabs) {
@@ -849,7 +870,7 @@ export function tabAtDevice<T extends { name: string; host?: string; screen?: (n
     const d = tabDevice(t, route);
     if (!d) continue;
     let r: number;
-    if (nodeId(d.name) === id) r = d.verified ? 0 : 2;
+    if (isDevice(d.name, id, aliases)) r = d.verified ? 0 : 2;
     else if (!route && !d.verified && t.host && addrs.includes(t.host)) r = 3;
     else continue;
     // Una pestaña con un salto en curso (esperando el prompt del pivote para saltar) solo si no hay otra.
@@ -902,4 +923,4 @@ export function newCameFrom(
 }
 
 /** El nodo como equipo del plan. */
-export const planNode = (n: TopoNode): PlanNode => ({ id: n.id, name: n.name, ip: n.ip, platform: n.platform });
+export const planNode = (n: TopoNode): PlanNode => ({ id: n.id, name: n.name, ip: n.ip, platform: n.platform, ...(n.aliases?.length ? { aliases: n.aliases } : {}) });
