@@ -26,6 +26,7 @@ import {
   sameSubnet,
   suggestDeviceIp,
 } from "../../lib/transferCmds";
+import { Segmented } from "../controls";
 import { Btn, Collapsible, CopyText, IpSelect, Label, Section, StatusPill, Toggle, fmtBytes, ToolHeader } from "./ui";
 import { useLocalIp } from "./useLocalIp";
 import { FileManager, ScpRequest, TerminalRef } from "./FileManager";
@@ -163,7 +164,7 @@ function FtpTab({
   const { files, reload } = useSharedFiles();
   return (
     <>
-      <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]">
+      <div className="grid items-start gap-4 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]">
         <FtpServerSection settings={s} running={running} onChange={onChange} refreshRunning={refreshRunning} ip={ip} ips={ips} stat={stats.ftp} file={files[0]?.[0] ?? "firmware.bin"} />
         <SftpSection terminals={terminals} onScp={onScp} />
       </div>
@@ -583,7 +584,7 @@ function SendReceive({
             {s.tftpPort < 1024 ? " En Linux el puerto 69 puede requerir privilegios; si no inicia, usa 1069 y configura ese puerto en el equipo si lo soporta." : ""}
           </p>
         </div>
-        <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr))]">
+        <div className="grid items-start gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr))]">
           <ServerGuardPanel kind="tftp" settings={s} onChange={onChange} ips={ips} running={tftpOn} stat={stats.tftp} />
           <ServerGuardPanel kind="http" settings={s} onChange={onChange} ips={ips} running={httpOn} stat={stats.http} />
         </div>
@@ -646,7 +647,7 @@ function Step({
             <span className="sr-only">{done ? " (listo)" : " (pendiente)"}</span>
           </h3>
           {hint && (
-            <p className="text-[11.5px] text-muted truncate" title={hint}>
+            <p className="text-[11.5px] text-muted line-clamp-2" title={hint}>
               {hint}
             </p>
           )}
@@ -774,10 +775,13 @@ function Assistant({
   const taskLabel = recovering ? "Recuperar desde el arranque" : (ACTIONS.find((a) => a.id === act)?.label ?? "");
 
   return (
-    <ol aria-label="Enviar o recibir un archivo en 3 pasos" className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr))]">
-      <Step n={1} title="Equipo y tarea" hint={`${term ? term.name : "Sin pestaña (solo copiar)"} · ${vendorLabel} · ${taskLabel}`} done={recovering || !!r}>
-        <div className="space-y-3">
-          <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr))]">
+    // Flex en vez de grid: el paso 1 crece más que Archivo (3:2) y cada tarjeta queda con su alto
+    // natural (items-start), sin estirarse a la altura de la vecina.
+    <ol aria-label="Enviar o recibir un archivo en 3 pasos" className="flex flex-wrap items-start gap-4">
+      <Step n={1} title="Equipo y tarea" hint={`${term ? term.name : "Sin pestaña (solo copiar)"} · ${vendorLabel} · ${taskLabel}`} done={recovering || !!r} className="flex-[3_1_460px]">
+        {/* Bajo 30rem (480 px) del paso, selects y tareas van en una columna para no cortar textos. */}
+        <div className="@container space-y-3">
+          <div className="grid gap-3 @[30rem]:grid-cols-2">
             <Label text="Pestaña del equipo">
               <select className="field" value={conn} onChange={(e) => chooseTerm(e.target.value)}>
                 <option value="">Ninguna (solo copiar)</option>
@@ -800,7 +804,7 @@ function Assistant({
             </Label>
           </div>
 
-          <div role="radiogroup" aria-label="Tarea" className="grid grid-cols-2 gap-1.5">
+          <div role="radiogroup" aria-label="Tarea" className="grid gap-1.5 @[30rem]:grid-cols-2">
             {ACTIONS.map((a) => {
               const can = protocolsFor(vendor, a.id).length > 0;
               const on = act === a.id;
@@ -819,7 +823,7 @@ function Assistant({
                   className={`px-2.5 py-1.5 rounded-md border text-left text-[12px] disabled:opacity-40 ${on && !recovering ? "border-[var(--accent)] bg-[var(--selected)]" : "border-line hover:bg-hover"}`}
                 >
                   <span className="block font-medium">{a.label}</span>
-                  <span className="block text-[11px] text-muted truncate">{a.hint}</span>
+                  <span className="block text-[11px] text-muted line-clamp-2">{a.hint}</span>
                 </button>
               );
             })}
@@ -830,31 +834,19 @@ function Assistant({
               disabled={!canRecover}
               title={canRecover ? "El equipo no arranca o no tiene firmware: se carga desde su menú de arranque por la consola" : "Aún sin guía de recuperación para este fabricante"}
               onClick={() => setMode("recover")}
-              className={`col-span-2 px-2.5 py-1.5 rounded-md border text-left text-[12px] disabled:opacity-40 ${recovering ? "border-[var(--accent)] bg-[var(--selected)]" : "border-line hover:bg-hover"}`}
+              className={`@[30rem]:col-span-2 px-2.5 py-1.5 rounded-md border text-left text-[12px] disabled:opacity-40 ${recovering ? "border-[var(--accent)] bg-[var(--selected)]" : "border-line hover:bg-hover"}`}
             >
               <span className="block font-medium">Recuperar desde el arranque (consola)</span>
-              <span className="block text-[11px] text-muted truncate">Equipo sin firmware o que no inicia: menú del BIOS o ROMMON, imagen por TFTP</span>
+              <span className="block text-[11px] text-muted line-clamp-2">Equipo sin firmware o que no inicia: menú del BIOS o ROMMON, imagen por TFTP</span>
             </button>
           </div>
 
           {!recovering && protos.length > 1 && (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11.5px] font-medium text-muted">Protocolo</span>
-              <div role="radiogroup" aria-label="Protocolo" className="inline-flex rounded-md border border-line overflow-hidden">
-                {protos.map((x) => (
-                  <button
-                    key={x}
-                    type="button"
-                    role="radio"
-                    aria-checked={p === x}
-                    onClick={() => setProto(x)}
-                    title={x === "http" ? "Más rápido para imágenes grandes" : "El más compatible"}
-                    className={`h-8 px-3 text-[12px] ${p === x ? "bg-accent text-accent-fg font-medium" : "hover:bg-hover"}`}
-                  >
-                    {x.toUpperCase()}
-                  </button>
-                ))}
-              </div>
+              <span title="TFTP: el más compatible · HTTP: más rápido para imágenes grandes">
+                <Segmented label="Protocolo" value={p ?? "tftp"} options={protos.map((x) => [x, x.toUpperCase()] as const)} onChange={setProto} />
+              </span>
             </div>
           )}
         </div>
@@ -874,6 +866,7 @@ function Assistant({
         }
         done={fileDone}
         right={filesActions}
+        className="flex-[2_1_320px]"
       >
         {!recovering && !needsFile && (
           <Label text={act === "backup" ? "Nombre del respaldo en este PC" : "Archivo en el equipo"} className="mb-3">
@@ -893,7 +886,7 @@ function Assistant({
         title={recovering ? "Verificación y pasos en la consola" : "Verificación y comando"}
         hint={recovering ? "Datos de red, lo que falta y los valores para el menú de arranque" : "Lo que falta, con el botón para resolverlo, y el comando con la IP de este PC"}
         done={!recovering && ready}
-        className="[grid-column:1/-1]"
+        className="basis-full"
       >
         {recovering ? (
           <Recovery
