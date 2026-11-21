@@ -129,6 +129,14 @@ export function FtpServerSection({
   );
 }
 
+/** Avance de una descarga o subida del cliente FTP (evento "transfer" con origin "client"). */
+interface ClientProgress {
+  file: string;
+  dir: "get" | "put";
+  bytes: number;
+  total: number | null;
+}
+
 interface Entry {
   name: string;
   size: number;
@@ -151,6 +159,8 @@ export function FtpClientSection({ files, onLocalChange }: { files: [string, num
   const [jobs, setJobs] = useState<string[]>([]);
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
+  // Progreso de cada descarga o subida en curso, aquí mismo (antes solo se veía en otra pestaña).
+  const [progress, setProgress] = useState<Record<string, ClientProgress>>({});
 
   useEffect(() => {
     const un = listen<{ job: string; kind: string; text: string }>("tool-job", ({ payload: e }) => {
@@ -159,10 +169,17 @@ export function FtpClientSection({ files, onLocalChange }: { files: [string, num
       if (e.kind === "done") {
         onLocalChange();
         setJobs((j) => j.filter((x) => x !== e.job));
+        setProgress(({ [e.job]: _, ...rest }) => rest);
       }
+    });
+    // El evento "transfer" del cliente FTP usa el id del trabajo.
+    const unT = listen<ClientProgress & { id: string; origin?: string }>("transfer", ({ payload: t }) => {
+      if (t.origin !== "client" || !jobsRef.current.includes(t.id)) return;
+      setProgress((m) => ({ ...m, [t.id]: { file: t.file, dir: t.dir, bytes: t.bytes, total: t.total } }));
     });
     return () => {
       un.then((f) => f());
+      unT.then((f) => f());
     };
   }, [onLocalChange]);
 
@@ -189,6 +206,7 @@ export function FtpClientSection({ files, onLocalChange }: { files: [string, num
       const job = await invoke<string>(cmd, { params: params(), name });
       jobsRef.current = [...jobsRef.current, job];
       setJobs(jobsRef.current);
+      setProgress((m) => ({ ...m, [job]: m[job] ?? { file: name.split("/").pop() ?? name, dir: cmd === "ftp_get" ? "get" : "put", bytes: 0, total: null } }));
     } catch (e) {
       setError(String(e));
     }
@@ -196,7 +214,7 @@ export function FtpClientSection({ files, onLocalChange }: { files: [string, num
 
   return (
     <Section title="Cliente FTP / FTPS" hint="Trae firmware o configuraciones de un servidor FTP a la carpeta compartida, o sube archivos desde ella.">
-      <div className="grid gap-3 [grid-template-columns:2fr_0.7fr_1.2fr_1.2fr_1.6fr]">
+      <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(160px,100%),1fr))]">
         <Label text="Servidor">
           <input className="field font-mono" value={host} placeholder="ftp.ejemplo.cl" onChange={(e) => setHost(e.target.value)} />
         </Label>
@@ -234,31 +252,80 @@ export function FtpClientSection({ files, onLocalChange }: { files: [string, num
           <RefreshCw size={13} className={busy ? "animate-spin" : ""} /> Listar
         </Btn>
       </div>
-      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {error && (
+        <p role="alert" className="mt-2 text-[12px] text-danger">
+          {error}
+        </p>
+      )}
+      {jobs.length > 0 && (
+        <ul className="mt-3 space-y-2" aria-label="Transferencias del cliente FTP">
+          {jobs.map((job) => {
+            const t = progress[job];
+            if (!t) return null;
+            const pct = t.total ? Math.min(100, (t.bytes / t.total) * 100) : null;
+            return (
+              <li key={job} className="text-[12px]">
+                <div className="flex items-baseline gap-2">
+                  <span className="flex-1 min-w-0 truncate">
+                    {t.dir === "get" ? "Este PC descarga de" : "Este PC sube a"} {host} · <span className="font-mono">{t.file}</span>
+                  </span>
+                  <span className="shrink-0 tabular-nums text-muted">
+                    {fmtBytes(t.bytes)}
+                    {t.total ? ` de ${fmtBytes(t.total)}` : ""}
+                  </span>
+                </div>
+                <div
+                  className="mt-1 h-1.5 rounded-full bg-hover overflow-hidden"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={pct ?? undefined}
+                  aria-label={`Progreso de ${t.file}`}
+                >
+                  <div className={`h-full bg-accent ${pct == null ? "animate-pulse w-1/3" : ""}`} style={pct != null ? { width: `${pct}%` } : undefined} />
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
       {listing && (
-        <div className="mt-3 grid gap-3 [grid-template-columns:2fr_1fr]">
+        <div className="mt-3 grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr))]">
           <div className="max-h-[320px] overflow-auto rounded-lg border border-line">
             <table className="w-full text-[12px]">
+              <caption className="sr-only">Contenido de {listing.cwd || "/"}</caption>
               <tbody>
                 {listing.cwd !== "/" && (
                   <tr className="border-t border-line first:border-0 hover:bg-hover cursor-default" onDoubleClick={() => enter("..")}>
                     <td className="px-2 py-1.5" colSpan={4}>
-                      <Folder size={13} className="inline mr-1.5 text-muted" />
-                      ..
+                      {/* Botón: la carpeta se abre también con Tab y Enter, no solo con doble clic. */}
+                      <button type="button" className="inline-flex items-center gap-1.5 hover:underline" aria-label="Subir a la carpeta superior" onClick={() => enter("..")}>
+                        <Folder size={13} className="text-muted" aria-hidden />
+                        ..
+                      </button>
                     </td>
                   </tr>
                 )}
                 {listing.entries.map((e) => (
                   <tr key={e.name} className="border-t border-line first:border-0 hover:bg-hover" onDoubleClick={() => e.dir && enter(e.name)}>
                     <td className="px-2 py-1.5 font-mono truncate">
-                      {e.dir ? <Folder size={13} className="inline mr-1.5 text-muted" /> : <FileText size={13} className="inline mr-1.5 text-muted" />}
-                      {e.name}
+                      {e.dir ? (
+                        <button type="button" className="inline-flex items-center gap-1.5 max-w-full text-left hover:underline" title={`Abrir ${e.name}`} onClick={() => enter(e.name)}>
+                          <Folder size={13} className="shrink-0 text-muted" aria-hidden />
+                          <span className="truncate">{e.name}</span>
+                        </button>
+                      ) : (
+                        <>
+                          <FileText size={13} className="inline mr-1.5 text-muted" aria-hidden />
+                          {e.name}
+                        </>
+                      )}
                     </td>
                     <td className="px-2 text-right text-muted tabular-nums whitespace-nowrap">{e.dir ? "" : fmtBytes(e.size)}</td>
                     <td className="px-2 text-muted whitespace-nowrap">{e.date}</td>
                     <td className="px-2 text-right">
                       {!e.dir && (
-                        <Btn kind="ghost" className="!h-6 !px-1.5" title="Traer a la carpeta compartida" onClick={() => start("ftp_get", e.name)}>
+                        <Btn kind="ghost" className="!h-6 !px-1.5" title="Traer a la carpeta compartida" aria-label={`Traer ${e.name} a la carpeta compartida`} onClick={() => start("ftp_get", e.name)}>
                           <ArrowDownToLine size={13} />
                         </Btn>
                       )}
@@ -283,7 +350,7 @@ export function FtpClientSection({ files, onLocalChange }: { files: [string, num
             <Btn className="mt-2" disabled={!upload} onClick={() => start("ftp_put", upload)}>
               <ArrowUpFromLine size={13} /> Subir a {listing.cwd || "/"}
             </Btn>
-            <p className="mt-2 text-[11.5px] text-muted">El progreso aparece en Transferencias. Doble clic en una carpeta para entrar.</p>
+            <p className="mt-2 text-[11.5px] text-muted">El progreso aparece arriba de la lista. Pulsa una carpeta para entrar.</p>
           </div>
         </div>
       )}

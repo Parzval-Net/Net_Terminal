@@ -56,12 +56,45 @@ const FORTI_RESTORE = "https://docs.fortinet.com/document/fortigate/7.6.6/cli-re
 const FORTI_BACKUP = "https://docs.fortinet.com/document/fortigate/7.4.8/cli-reference/229031989/execute-backup";
 
 /**
+ * Nombre del archivo sin el sistema de archivos del equipo: el comando ya lo agrega, y
+ * "flash:config.txt" armaba "copy flash:flash:config.txt tftp://...". Quita "flash:", "flash:/",
+ * "bootflash:" o "usb0:/" del inicio.
+ */
+export function deviceFileName(name: string): string {
+  return name.trim().replace(/^[A-Za-z][\w-]*:\/?/, "");
+}
+
+/**
+ * El nombre sirve tal cual en un comando del equipo y en una URL tftp:// o http://: letras, números,
+ * punto, guion, guion bajo y "/" (subcarpeta). Con espacios, "copy tftp://ip/cat9k image.bin flash:"
+ * toma argumentos de más; con otros caracteres la URL queda mal formada.
+ */
+export function commandSafeName(name: string): boolean {
+  return /^[A-Za-z0-9._/-]+$/.test(name.trim());
+}
+
+/** Resultado de tftp_add (servers::add_shared): nombre con que quedó en la carpeta compartida. */
+export interface SharedAdded {
+  name: string;
+  original: string;
+  /** Ya estaba en la carpeta (el mismo archivo o uno idéntico): no se copió. */
+  existing: boolean;
+}
+
+/** Aviso cuando el archivo agregado quedó con otro nombre o ya estaba en la carpeta (vacío si no). */
+export function addedNote(a: SharedAdded): string {
+  if (a.existing) return a.name === a.original ? `${a.name} ya estaba en la carpeta compartida.` : `${a.original} ya estaba en la carpeta compartida como ${a.name}.`;
+  if (a.name !== a.original) return `${a.original} se guardó como ${a.name} para que el comando del equipo funcione.`;
+  return "";
+}
+
+/**
  * Comando para el equipo, o null si el fabricante no hace esa acción con ese protocolo.
  * `fs` y `extra` vienen del perfil (carpeta del equipo, VRF de NX-OS).
  */
 export function recipe(vendor: Vendor, action: Action, proto: Proto, v: { ip: string; port: number; file: string; fs?: string; extra?: string }): Recipe | null {
   if (!protocolsFor(vendor, action).includes(proto)) return null;
-  const file = v.file.trim() || "archivo.bin";
+  const file = deviceFileName(v.file) || "archivo.bin";
   if (vendor === "fortigate") {
     if (action === "firmware")
       return {
@@ -139,6 +172,13 @@ export interface RecoveryValue {
   send: boolean;
   /** Tecla de menú: se envía sola, sin Enter (los menús del boot loader responden a una tecla). */
   key?: boolean;
+  /**
+   * Comando de la CLI normal del equipo (después del arranque): se puede enviar a una pestaña SSH o
+   * Telnet. Sin esto el valor es del menú de arranque y solo se envía a una consola serial.
+   */
+  cli?: boolean;
+  /** Borra, reemplaza o reinicia: se confirma antes de enviarlo, con este aviso. */
+  confirm?: string;
 }
 export interface RecoveryStep {
   text: string;
@@ -188,17 +228,23 @@ export function recoveryGuide(vendor: Vendor, v: { pcIp: string; deviceIp: strin
           text: "Al terminar pregunta Default/Backup/Run [D/B/R]: D la deja como firmware por defecto y Y confirma el reparticionado (se pierden la imagen por defecto y la de respaldo anteriores).",
           warn: true,
           values: [
-            { label: "Guardar como predeterminado", value: "D", send: true, key: true },
-            { label: "Confirmar", value: "Y", send: true, key: true },
+            { label: "Guardar como predeterminado", value: "D", send: true, key: true, confirm: "Deja la imagen descargada como firmware por defecto." },
+            { label: "Confirmar", value: "Y", send: true, key: true, confirm: "Confirma el reparticionado: se pierden la imagen por defecto y la de respaldo anteriores." },
           ],
         },
         { text: "Primer ingreso: usuario admin y contraseña en blanco; el equipo obliga a definir una nueva." },
         {
           text: "Recomendado: deja también la imagen en la partición de respaldo (desde la CLI, con TFTP aún activo) y verifica las dos particiones y la versión.",
           values: [
-            { label: "Imagen de respaldo", value: `execute restore secondary-image tftp ${file} ${v.pcIp}`, send: true },
-            { label: "Particiones", value: "diagnose sys flash list", send: true },
-            { label: "Versión", value: "get system status", send: true },
+            {
+              label: "Imagen de respaldo",
+              value: `execute restore secondary-image tftp ${file} ${v.pcIp}`,
+              send: true,
+              cli: true,
+              confirm: "Reemplaza la imagen de la partición de respaldo. El equipo pedirá confirmar (y/n).",
+            },
+            { label: "Particiones", value: "diagnose sys flash list", send: true, cli: true },
+            { label: "Versión", value: "get system status", send: true, cli: true },
           ],
         },
       ],
@@ -217,8 +263,12 @@ export function recoveryGuide(vendor: Vendor, v: { pcIp: string; deviceIp: strin
             { label: "Servidor TFTP (este PC)", value: `TFTP_SERVER=${v.pcIp}`, send: true },
             { label: "Archivo", value: `TFTP_FILE=${file}`, send: true },
           ] },
-        { text: "tftpdnld borra la flash antes de copiar la imagen y pide confirmación.", warn: true, values: [{ label: "Descargar", value: "tftpdnld", send: true }] },
-        { text: "Al terminar, arranca con la imagen nueva.", values: [{ label: "Reiniciar", value: "reset", send: true }] },
+        {
+          text: "tftpdnld borra la flash antes de copiar la imagen y pide confirmación.",
+          warn: true,
+          values: [{ label: "Descargar", value: "tftpdnld", send: true, confirm: "tftpdnld borra la flash del router antes de copiar la imagen." }],
+        },
+        { text: "Al terminar, arranca con la imagen nueva.", values: [{ label: "Reiniciar", value: "reset", send: true, confirm: "Reinicia el router." }] },
       ],
     };
   return null;
@@ -236,6 +286,31 @@ const numIp = (n: number) => [24, 16, 8, 0].map((s) => (n >>> s) & 255).join("."
 export function sameSubnet(a: string, b: string, mask: string): boolean {
   const [x, y, m] = [ipNum(a), ipNum(b), ipNum(mask)];
   return x !== null && y !== null && m !== null && ((x & m) >>> 0) === ((y & m) >>> 0);
+}
+
+/**
+ * Problemas de los datos de red de la recuperación que la guía advierte y `sameSubnet` no ve: IP del
+ * equipo igual a la del PC, máscara no contigua o fuera de /8 a /30, IP del equipo que es la
+ * dirección de red o de broadcast y, en Cisco ROMMON, gateway igual a la IP del router.
+ */
+export function recoveryNetIssues(vendor: Vendor, v: { pcIp: string; deviceIp: string; mask: string; gateway: string }): string[] {
+  const [pc, dev, m] = [ipNum(v.pcIp), ipNum(v.deviceIp), ipNum(v.mask)];
+  const out: string[] = [];
+  if (dev === null) return [`${v.deviceIp || "La IP del equipo"} no es una IPv4 válida`];
+  if (m === null) return [`${v.mask} no es una máscara válida`];
+  // Parte de host de la máscara: contigua si es 2^k - 1 (unos solo a la derecha).
+  const hostBits = ~m >>> 0;
+  const prefix = Math.clz32(hostBits);
+  if ((hostBits & (hostBits + 1)) !== 0) out.push(`La máscara ${v.mask} no es contigua`);
+  else if (prefix < 8 || prefix > 30) out.push(`La máscara ${v.mask} (/${prefix}) debe estar entre /8 y /30`);
+  else {
+    const host = (dev & hostBits) >>> 0;
+    if (host === 0) out.push(`${v.deviceIp} es la dirección de red con ${v.mask}: usa otra IP para el equipo`);
+    else if (host === hostBits) out.push(`${v.deviceIp} es la dirección de broadcast con ${v.mask}: usa otra IP para el equipo`);
+  }
+  if (pc !== null && pc === dev) out.push(`La IP del equipo (${v.deviceIp}) es la misma de este PC`);
+  if (vendor === "cisco" && ipNum(v.gateway) === dev) out.push("DEFAULT_GATEWAY no puede ser la misma IP del router");
+  return out;
 }
 
 /** IP sugerida para el equipo: la siguiente a la del PC en su red /24 (o la anterior si es .254). */

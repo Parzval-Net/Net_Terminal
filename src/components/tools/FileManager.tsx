@@ -17,7 +17,8 @@ import {
   Trash2,
 } from "lucide-react";
 import { Settings } from "../../lib/settings";
-import { RemoteFile, guessProfile, parseListing, parseMd5, profiles } from "../../lib/devicefs";
+import { RemoteFile, guessProfile, keepPresent, parseListing, parseMd5, profiles } from "../../lib/devicefs";
+import { type SharedAdded, addedNote, commandSafeName } from "../../lib/transferCmds";
 import type { Session } from "../../types";
 import { Btn, Console, Label, fmtBytes } from "./ui";
 
@@ -122,6 +123,7 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
   const [selRemote, setSelRemote] = useState<Set<string>>(new Set());
   const [ops, setOps] = useState<Op[]>([]);
   const [error, setError] = useState("");
+  const [note, setNote] = useState("");
   const [drop, setDrop] = useState<"local" | "remote" | null>(null);
   const [showLog, setShowLog] = useState<string | null>(null);
   const jobToOp = useRef(new Map<string, string>());
@@ -137,6 +139,8 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
     setProfileId(p);
     setFs(profiles.find((x) => x.id === p)!.fs);
     setRemote(null);
+    // La selección era del equipo anterior: "Traer" o MD5 pedirían ese archivo a este equipo.
+    setSelRemote(new Set());
     if (term.host)
       invoke<string | null>("source_ip", { host: term.host })
         .then((v) => v && setIp(v))
@@ -144,7 +148,15 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connId, term?.session.platform]);
 
-  const loadLocal = useCallback(() => invoke<[string, number][]>("tftp_files").then(setLocal), []);
+  // Un archivo borrado (aquí o en la carpeta) deja de estar seleccionado: "Enviar" no arma un copy de algo que no existe.
+  const loadLocal = useCallback(
+    () =>
+      invoke<[string, number][]>("tftp_files").then((l) => {
+        setLocal(l);
+        setSelLocal((sel) => keepPresent(sel, l.map(([n]) => n)));
+      }),
+    [],
+  );
   useEffect(() => {
     loadLocal();
     invoke<{ name: string; ip: string }[]>("local_ips").then((l) => {
@@ -156,7 +168,7 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
   // Eventos: salida de comandos en el equipo y progreso de transferencias.
   useEffect(() => {
     const subs = [
-      listen<{ job: string; kind: string; text: string; data?: { ok: boolean; output: string } }>("tool-job", ({ payload: e }) => {
+      listen<{ job: string; kind: string; text: string; data?: { ok: boolean; output: string; declined?: string | null } }>("tool-job", ({ payload: e }) => {
         if (e.job === listJob.current) {
           if (e.kind === "result" && e.data) setRemote(parseListing(e.data.output));
           if (e.kind === "error") setError(e.text);
@@ -185,6 +197,9 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
             }
             if (e.kind === "result" && e.data) {
               if (o.status === "error") return o;
+              // Pregunta que borra, sobrescribe o reinicia: la app responde que no y lo decide el usuario.
+              if (e.data.declined)
+                return { ...o, status: "error", error: `El equipo preguntó "${e.data.declined}" y la app respondió que no. Si corresponde, hazlo en la terminal` };
               if (!e.data.ok) return { ...o, status: "error", error: "El equipo informó un error (ver salida)" };
               return { ...o, status: "ok", error: undefined };
             }
@@ -385,6 +400,11 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
 
   const enqueue = (kind: Op["kind"], files: string[]) => {
     if (!term) return setError("Conecta una sesión con el equipo primero");
+    setNote("");
+    // Con espacios u otros caracteres el comando del equipo toma argumentos de más o la URL queda mal.
+    const bad = ssh ? [] : files.filter((f) => !commandSafeName(f));
+    if (bad.length)
+      return setError(`${bad.join(", ")}: el nombre tiene espacios o caracteres especiales y el comando del equipo fallaría. Renómbralo con letras, números, punto, guion o guion bajo`);
     if (ssh && (kind === "send" || kind === "pull")) {
       if (!term.host) return setError(`${proto.toUpperCase()} requiere una sesión de red con host (no serial)`);
       const mode: "scp" | "sftp" = proto === "sftp" ? "sftp" : "scp";
@@ -455,13 +475,23 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
         action: go,
       });
     if (overwrite.length)
-      onConfirm({
-        title: "¿Sobrescribir archivos?",
-        message: `Ya existe${overwrite.length > 1 ? "n" : ""} en el destino: ${overwrite.join(", ")}`,
-        label: "Sobrescribir",
-        danger: true,
-        action: go,
-      });
+      onConfirm(
+        kind === "send"
+          ? {
+              // El equipo pide confirmar la sobrescritura y la app responde que no (ver filexfer.rs).
+              title: "Ya existe en el equipo",
+              message: `${overwrite.join(", ")}. Si el equipo pide confirmar la sobrescritura, la app responde que no y la operación queda detenida: bórralo antes en el equipo o confirma en la terminal.`,
+              label: "Enviar igual",
+              action: go,
+            }
+          : {
+              title: "¿Sobrescribir archivos?",
+              message: `Ya existe${overwrite.length > 1 ? "n" : ""} en este PC: ${overwrite.join(", ")}`,
+              label: "Sobrescribir",
+              danger: true,
+              action: go,
+            },
+      );
     else go();
     setSelLocal(new Set());
     setSelRemote(new Set());
@@ -470,7 +500,15 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
   const addFiles = async () => {
     const paths = await open({ multiple: true, directory: false, title: "Archivos para enviar a equipos" });
     const list = typeof paths === "string" ? [paths] : (paths ?? []);
-    for (const path of list) await invoke("tftp_add", { path }).catch((e) => setError(String(e)));
+    const notes: string[] = [];
+    for (const path of list) {
+      try {
+        notes.push(addedNote(await invoke<SharedAdded>("tftp_add", { path })));
+      } catch (e) {
+        setError(String(e));
+      }
+    }
+    setNote(notes.filter(Boolean).join(" "));
     loadLocal();
   };
 
@@ -503,6 +541,7 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
               setProfileId(e.target.value);
               setFs(profiles.find((p) => p.id === e.target.value)!.fs);
               setRemote(null);
+              setSelRemote(new Set());
             }}
           >
             {profiles.map((p) => (
@@ -576,7 +615,16 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
           )}
         </div>
       )}
-      {error && <p className="text-[12px] text-danger">{error}</p>}
+      {error && (
+        <p role="alert" className="text-[12px] text-danger">
+          {error}
+        </p>
+      )}
+      {note && (
+        <p role="status" className="text-[12px] text-muted">
+          {note}
+        </p>
+      )}
 
       <div className="grid grid-cols-[1fr_auto_1fr] gap-3 items-stretch">
         {/* Panel PC */}
@@ -586,13 +634,13 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
           highlight={drop === "local"}
           actions={
             <>
-              <Btn kind="ghost" className="!px-1.5 !h-7" title="Agregar archivos" onClick={addFiles}>
+              <Btn kind="ghost" className="!px-1.5 !h-7" title="Agregar archivos" aria-label="Agregar archivos" onClick={addFiles}>
                 <FilePlus size={14} />
               </Btn>
-              <Btn kind="ghost" className="!px-1.5 !h-7" title="Abrir carpeta" onClick={() => invoke("open_dir", { which: "tftp" })}>
+              <Btn kind="ghost" className="!px-1.5 !h-7" title="Abrir carpeta" aria-label="Abrir la carpeta compartida" onClick={() => invoke("open_dir", { which: "tftp" })}>
                 <FolderOpen size={14} />
               </Btn>
-              <Btn kind="ghost" className="!px-1.5 !h-7" title="Actualizar" onClick={loadLocal}>
+              <Btn kind="ghost" className="!px-1.5 !h-7" title="Actualizar" aria-label="Actualizar la carpeta compartida" onClick={loadLocal}>
                 <RefreshCw size={13} />
               </Btn>
             </>
@@ -613,6 +661,7 @@ export function FileManager({ terminals, settings: s, refreshRunning, onConfirm,
           footer={plural(local.length, "archivo", "archivos")}
         >
           {local.length === 0 && <Empty text="Agrega firmware o configuraciones con el botón +" />}
+          {local.length > 0 && <span className="sr-only">Pulsa un archivo para seleccionarlo o quitarlo de la selección.</span>}
           {local.map(([name, size]) => (
             <Row
               key={name}
@@ -820,7 +869,9 @@ function Pane({
         <span className="text-[12.5px] font-semibold truncate flex-1">{title}</span>
         {actions}
       </div>
-      <div className="h-[300px] overflow-y-auto p-1">{children}</div>
+      <div role="group" aria-label={title} className="h-[300px] overflow-y-auto p-1">
+        {children}
+      </div>
       <div className="px-3 h-7 flex items-center border-t border-line text-[11px] text-muted">{footer}</div>
     </div>
   );
@@ -845,25 +896,41 @@ function Row({
   onDragStart: (e: React.DragEvent) => void;
   onDelete?: () => void;
 }) {
+  // La fila es un botón de alternar (aria-pressed): se elige con Tab y Enter o Espacio, no solo con el
+  // mouse. Las carpetas no se seleccionan. Borrar aparece también con el foco dentro de la fila.
+  const label = (
+    <>
+      {dir ? <Folder size={14} className="text-muted shrink-0" aria-hidden /> : <FileText size={14} className="text-muted shrink-0" aria-hidden />}
+      <span className="truncate flex-1 font-mono text-[12px]">{name}</span>
+      <span className="text-[11px] text-muted tabular-nums shrink-0">{detail}</span>
+    </>
+  );
   return (
     <div
       draggable={!dir}
       onDragStart={onDragStart}
-      onClick={onToggle}
       title={sub}
-      className={`group flex items-center gap-2 px-2 h-8 rounded-md text-[12.5px] ${selected ? "bg-selected" : "hover:bg-hover"}`}
+      className={`group flex items-center gap-1 pr-2 h-8 rounded-md text-[12.5px] ${selected ? "bg-selected" : "hover:bg-hover"}`}
     >
-      {dir ? <Folder size={14} className="text-muted shrink-0" /> : <FileText size={14} className="text-muted shrink-0" />}
-      <span className="truncate flex-1 font-mono text-[12px]">{name}</span>
-      <span className="text-[11px] text-muted tabular-nums shrink-0">{detail}</span>
+      {dir ? (
+        <span className="flex-1 min-w-0 h-full flex items-center gap-2 px-2">{label}</span>
+      ) : (
+        <button
+          type="button"
+          aria-pressed={selected}
+          onClick={onToggle}
+          className="flex-1 min-w-0 h-full flex items-center gap-2 px-2 rounded-md text-left focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+        >
+          {label}
+        </button>
+      )}
       {onDelete && (
         <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          className="hidden group-hover:block text-muted hover:text-danger"
+          type="button"
+          onClick={onDelete}
+          className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 text-muted hover:text-danger"
           title="Eliminar del PC"
+          aria-label={`Eliminar ${name} de este PC`}
         >
           <Trash2 size={12} />
         </button>

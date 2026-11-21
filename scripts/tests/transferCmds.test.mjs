@@ -83,3 +83,45 @@ assert.equal(T.ipAllowed("192.168.1.99", ["192.168.1.0/24"]), true);
 assert.equal(T.ipAllowed("192.168.1.99", ["10.0.0.0/8", "192.168.1.99"]), true);
 assert.equal(T.ipAllowed("192.168.2.1", ["192.168.1.0/24"]), false);
 assert.equal(T.ipAllowed("10.1.2.3", ["0.0.0.0/0"]), true);
+
+// ---- Nombres de archivo en el comando ----
+// El ejemplo del campo era "flash:archivo": armaba "copy flash:flash:config.txt ...".
+assert.equal(T.recipe("cisco", "pull", "tftp", { ...v, file: "flash:config.txt" }).command, "copy flash:config.txt tftp://10.0.0.5/config.txt");
+assert.equal(T.recipe("nxos", "pull", "tftp", { ...v, file: "bootflash:x.cfg" }).command, "copy bootflash:x.cfg tftp://10.0.0.5/x.cfg vrf management");
+assert.equal(T.recipe("huawei", "pull", "tftp", { ...v, file: "flash:/vrpcfg.zip" }).command, "tftp 10.0.0.5 put vrpcfg.zip");
+assert.equal(T.deviceFileName(" usb0:/dir/a.bin "), "dir/a.bin");
+assert.equal(T.deviceFileName("c9300.bin"), "c9300.bin");
+assert.equal(T.commandSafeName("c2960-lanbasek9-mz.152-7.E9.bin"), true);
+assert.equal(T.commandSafeName("dir/a.cfg"), true);
+assert.equal(T.commandSafeName("cat9k image 17.9.bin"), false, "con espacios el copy toma argumentos de más");
+assert.equal(T.commandSafeName("respaldo#1.cfg"), false);
+// Aviso al agregar: nombre cambiado (espacios) o archivo que ya estaba (no se copió sobre sí mismo).
+assert.match(T.addedNote({ name: "cat9k_image.bin", original: "cat9k image.bin", existing: false }), /se guardó como cat9k_image\.bin/);
+assert.match(T.addedNote({ name: "respaldo.cfg", original: "respaldo.cfg", existing: true }), /ya estaba en la carpeta/);
+assert.equal(T.addedNote({ name: "fw.bin", original: "fw.bin", existing: false }), "");
+
+// ---- Recuperación: valores que se confirman y los que van a la CLI normal ----
+const sendable = [...fgVals, ...cr.steps.flatMap((s) => s.values ?? [])];
+const confirmed = sendable.filter((x) => x.confirm).map((x) => x.value);
+assert.deepEqual(confirmed, ["D", "Y", "execute restore secondary-image tftp FGT_60F-v7.4.8.out 192.168.1.100", "tftpdnld", "reset"], "lo que borra, reemplaza o reinicia se confirma");
+assert.deepEqual(
+  sendable.filter((x) => x.cli).map((x) => x.value),
+  ["execute restore secondary-image tftp FGT_60F-v7.4.8.out 192.168.1.100", "diagnose sys flash list", "get system status"],
+  "solo esto va a una pestaña que no es consola",
+);
+
+// ---- Recuperación: datos de red ----
+const net = (o) => T.recoveryNetIssues(o.vendor ?? "fortigate", { pcIp: "10.0.0.5", deviceIp: "10.0.0.6", mask: "255.255.255.0", gateway: "10.0.0.5", ...o });
+assert.deepEqual(net({}), []);
+assert.deepEqual(net({ vendor: "cisco" }), []);
+assert.match(net({ deviceIp: "10.0.0.5" }).join(), /misma de este PC/);
+assert.match(net({ mask: "255.0.255.0" }).join(), /no es contigua/);
+assert.match(net({ mask: "0.0.0.0" }).join(), /entre \/8 y \/30/);
+assert.match(net({ mask: "255.255.255.255" }).join(), /entre \/8 y \/30/);
+assert.match(net({ deviceIp: "10.0.0.0" }).join(), /dirección de red/);
+assert.match(net({ deviceIp: "10.0.0.255" }).join(), /broadcast/);
+assert.deepEqual(net({ mask: "255.255.255.252" }), [], "/30 válido");
+assert.match(net({ vendor: "cisco", gateway: "10.0.0.6" }).join(), /DEFAULT_GATEWAY/);
+assert.deepEqual(net({ gateway: "10.0.0.6" }), [], "FortiGate no usa gateway en el menú");
+assert.match(net({ deviceIp: "x" }).join(), /no es una IPv4/);
+console.log("transferCmds nombres y red: ok");
