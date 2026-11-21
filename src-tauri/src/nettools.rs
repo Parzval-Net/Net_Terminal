@@ -1,7 +1,7 @@
 //! Herramientas de red: traceroute, iperf3 (cliente/servidor), verificación de puertos,
 //! interfaces locales y speedtest contra Cloudflare.
 
-use crate::monitor::{command, resolve, tcp_probe_addrs, validate_host};
+use crate::monitor::{command, resolve, validate_host};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -138,6 +138,14 @@ impl Jobs {
         let host = p.host.unwrap_or_default();
         validate_host(&host)?;
         c.args(["-c", &host, "-p", &port, "-J"]);
+        // Sin plazo propio, un servidor que descarta el SYN deja la medición esperando el timeout
+        // TCP del sistema (en Linux más de un minuto). --connect-timeout existe desde iperf 3.6.
+        if crate::toolpath::iperf_path()
+            .and_then(|p| command(&p).arg("--version").output().ok())
+            .is_some_and(|o| supports_connect_timeout(&String::from_utf8_lossy(&o.stdout)))
+        {
+            c.args(["--connect-timeout", "5000"]);
+        }
         c.args(["-t", &p.seconds.unwrap_or(10).clamp(1, 300).to_string()]);
         c.args(["-P", &p.parallel.unwrap_or(1).clamp(1, 32).to_string()]);
         if p.reverse.unwrap_or(false) {
@@ -186,6 +194,17 @@ impl Jobs {
     }
 }
 
+/// `--connect-timeout` llegó en iperf 3.6: con una versión anterior o desconocida no se agrega,
+/// porque iperf3 rechaza las opciones que no conoce.
+fn supports_connect_timeout(version_out: &str) -> bool {
+    let Some(rest) = version_out.lines().find_map(|l| l.trim().strip_prefix("iperf ")) else { return false };
+    let mut it = rest.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse::<u32>().unwrap_or(0));
+    match (it.next(), it.next()) {
+        (Some(major), Some(minor)) => (major, minor) >= (3, 6),
+        _ => false,
+    }
+}
+
 fn which(bin: &str) -> bool {
     command(bin).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok()
         || command("sh").args(["-c", &format!("command -v {bin}")]).output().map(|o| o.status.success()).unwrap_or(false)
@@ -225,8 +244,45 @@ fn summarize_iperf(v: &Value) -> Value {
 pub struct PortResult {
     port: u16,
     open: bool,
+    /// "open", "closed" (el equipo respondió con RST), "filtered" (sin respuesta en el plazo:
+    /// ACL o firewall que descarta) o "error" (red o host inalcanzable, otro error del sistema).
+    state: &'static str,
     rtt: Option<f64>,
     error: Option<String>,
+}
+
+/// Estado de un puerto según el error de conexión.
+fn port_state(kind: std::io::ErrorKind) -> &'static str {
+    use std::io::ErrorKind as K;
+    match kind {
+        K::ConnectionRefused | K::ConnectionReset => "closed",
+        K::TimedOut | K::WouldBlock => "filtered",
+        _ => "error",
+    }
+}
+
+/// Prueba un puerto en cada dirección del host. Abierto si alguna conecta; si no, gana el estado
+/// más informativo: cerrado (el equipo responde) sobre filtrado y este sobre otro error.
+fn probe_port(addrs: &[std::net::SocketAddr], timeout: Duration) -> (&'static str, Option<f64>, Option<String>) {
+    let rank = |s: &str| match s {
+        "closed" => 3,
+        "filtered" => 2,
+        _ => 1,
+    };
+    let mut best: (&'static str, String) = ("error", "sin dirección".into());
+    for addr in addrs {
+        let t0 = Instant::now();
+        match std::net::TcpStream::connect_timeout(addr, timeout) {
+            Ok(_) => return ("open", Some(t0.elapsed().as_secs_f64() * 1000.0), None),
+            Err(e) => {
+                let st = port_state(e.kind());
+                if rank(st) >= rank(best.0) {
+                    best = (st, e.to_string());
+                }
+            }
+        }
+    }
+    (best.0, None, Some(best.1))
 }
 
 pub fn check_ports(host: &str, ports: Vec<u16>, timeout_ms: u64) -> Result<Vec<PortResult>, String> {
@@ -236,8 +292,12 @@ pub fn check_ports(host: &str, ports: Vec<u16>, timeout_ms: u64) -> Result<Vec<P
     }
     let timeout = Duration::from_millis(timeout_ms.clamp(100, 10_000));
     // El host se resuelve una vez (antes era una consulta DNS por puerto) y en cada
-    // puerto solo cambia el número.
-    let addrs = resolve(host, 0);
+    // puerto solo cambia el número. Si no resuelve es un error de la consulta, no un
+    // "cerrado" en cada puerto.
+    let addrs = resolve(host, 0)?;
+    if addrs.is_empty() {
+        return Err(format!("DNS: {host} no tiene direcciones"));
+    }
     // Pool acotado: un hilo y un socket por puerto agotaba los descriptores (macOS limita
     // a 256 por app) y hacía fallar sesiones nuevas mientras corría el escaneo.
     const WORKERS: usize = 64;
@@ -250,14 +310,9 @@ pub fn check_ports(host: &str, ports: Vec<u16>, timeout_ms: u64) -> Result<Vec<P
             let (queue, results, addrs) = (queue.clone(), results.clone(), addrs.clone());
             std::thread::spawn(move || loop {
                 let Some(port) = queue.lock().unwrap().next() else { break };
-                let (open, rtt, error) = match addrs.as_ref() {
-                    Ok(list) => {
-                        let list: Vec<_> = list.iter().map(|a| std::net::SocketAddr::new(a.ip(), port)).collect();
-                        tcp_probe_addrs(&list, timeout)
-                    }
-                    Err(e) => (false, None, Some(e.clone())),
-                };
-                results.lock().unwrap().push(PortResult { port, open, rtt, error });
+                let list: Vec<_> = addrs.iter().map(|a| std::net::SocketAddr::new(a.ip(), port)).collect();
+                let (state, rtt, error) = probe_port(&list, timeout);
+                results.lock().unwrap().push(PortResult { port, open: state == "open", state, rtt, error });
             })
         })
         .collect();
@@ -345,6 +400,24 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Error del speedtest con la fase y un próximo paso: el texto de reqwest solo ("error sending
+/// request for url…", "HTTP status client error (403 Forbidden)") no dice qué hacer.
+fn phase_error(phase: &str, status: Option<u16>, timeout: bool, connect: bool, raw: &str) -> String {
+    let hint = match (status, timeout, connect) {
+        (Some(403 | 407), _, _) => "Un proxy o firewall bloquea speed.cloudflare.com: pide permitir ese sitio o revisa el proxy del sistema.",
+        (Some(429), _, _) => "Cloudflare limitó las pruebas seguidas: espera unos minutos y vuelve a intentar.",
+        (Some(s), _, _) if s >= 500 => "Falla temporal de Cloudflare: vuelve a intentar en unos minutos.",
+        (_, true, _) => "Sin respuesta en el plazo: el enlace está muy lento o un firewall corta la transferencia.",
+        (_, _, true) => "No se pudo conectar: revisa la conexión a internet, el DNS o el proxy del sistema.",
+        _ => "Revisa la conexión, el proxy o el firewall y vuelve a intentar.",
+    };
+    format!("Falló la medición de {phase}. {hint} (detalle: {raw})")
+}
+
+fn req_error(phase: &str, e: reqwest::Error) -> String {
+    phase_error(phase, e.status().map(|s| s.as_u16()), e.is_timeout(), e.is_connect(), &e.to_string())
+}
+
 fn percentile(mut v: Vec<f64>, p: f64) -> f64 {
     if v.is_empty() {
         return 0.0;
@@ -425,9 +498,9 @@ async fn run_speedtest(app: &AppHandle, job: &str, cancel: &AtomicBool) -> Resul
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| req_error("bajada", e))?;
         let mut n = 0usize;
-        while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        while let Some(chunk) = resp.chunk().await.map_err(|e| req_error("bajada", e))? {
             n += chunk.len();
             if cancelled() {
                 return Err("Cancelado".into());
@@ -457,7 +530,7 @@ async fn run_speedtest(app: &AppHandle, job: &str, cancel: &AtomicBool) -> Resul
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| req_error("subida", e))?;
         let mbps = *size as f64 * 8.0 / t0.elapsed().as_secs_f64().max(0.001) / 1e6;
         up.push(mbps);
         progress("upload", mbps, (i + 1) as f64 / up_sizes.len() as f64);
@@ -545,8 +618,43 @@ mod tests {
         let open = l.local_addr().unwrap().port();
         let r = check_ports("localhost", vec![open, 1], 500).unwrap();
         assert!(r.iter().any(|p| p.port == open && p.open));
-        let r = check_ports("no-existe.invalid", vec![22, 23], 200).unwrap();
-        assert!(r.iter().all(|p| !p.open && p.error.as_deref().unwrap().starts_with("DNS:")));
+        // Un host que no resuelve es un error de la consulta (no "cerrado" en cada puerto).
+        let e = check_ports("no-existe.invalid", vec![22, 23], 200).err().unwrap();
+        assert!(e.starts_with("DNS:"), "{e}");
+    }
+
+    #[test]
+    fn port_check_tells_closed_from_filtered() {
+        // Puerto sin listener en localhost: el sistema responde con RST, es "cerrado".
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let free = l.local_addr().unwrap().port();
+        drop(l);
+        let r = check_ports("127.0.0.1", vec![free], 500).unwrap();
+        assert_eq!((r[0].state, r[0].open), ("closed", false));
+        use std::io::ErrorKind as K;
+        assert_eq!(port_state(K::ConnectionRefused), "closed");
+        assert_eq!(port_state(K::TimedOut), "filtered");
+        assert_eq!(port_state(K::WouldBlock), "filtered");
+        assert_eq!(port_state(K::PermissionDenied), "error");
+    }
+
+    #[test]
+    fn detects_connect_timeout_support_by_version() {
+        assert!(supports_connect_timeout("iperf 3.16 (cJSON 1.7.15)\nLinux vm 6.1"));
+        assert!(supports_connect_timeout("iperf 3.6\n"));
+        assert!(supports_connect_timeout("iperf 4.0"));
+        assert!(!supports_connect_timeout("iperf 3.1.3\n"));
+        assert!(!supports_connect_timeout("iperf3: error - unknown option"));
+        assert!(!supports_connect_timeout(""));
+    }
+
+    #[test]
+    fn speedtest_errors_name_the_phase_and_next_step() {
+        let e = phase_error("bajada", Some(403), false, false, "HTTP status client error (403 Forbidden)");
+        assert!(e.starts_with("Falló la medición de bajada.") && e.contains("proxy o firewall") && e.contains("403"), "{e}");
+        assert!(phase_error("subida", None, true, false, "x").contains("Sin respuesta en el plazo"));
+        assert!(phase_error("subida", None, false, true, "x").contains("No se pudo conectar"));
+        assert!(phase_error("bajada", Some(503), false, false, "x").contains("Falla temporal"));
     }
 
     /// cargo test --release -- --ignored --nocapture bench_
