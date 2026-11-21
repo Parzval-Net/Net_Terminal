@@ -422,8 +422,13 @@ pub struct Summary {
     pub total: usize,
     pub matches: usize,
     pub files_with_hits: usize,
-    /// Se alcanzó el tope de resultados.
+    /// Hay más coincidencias que las entregadas (tope total o tope por archivo).
     pub truncated: bool,
+    /// Se alcanzó el tope total de resultados (`max_results`).
+    pub results_capped: bool,
+    /// Archivos con más coincidencias que el tope por archivo (`PER_FILE_HITS`): de ellos se
+    /// entregan solo las primeras. Subir el máximo de resultados no las trae.
+    pub files_capped: usize,
     /// Había más archivos que el tope del recorrido.
     pub walk_truncated: bool,
     pub skipped_binary: usize,
@@ -727,6 +732,7 @@ pub fn search(roots: &Roots, q: &Prepared, cancel: &AtomicBool, sink: &mut dyn F
         }
         if budget == 0 {
             sum.truncated = true;
+            sum.results_capped = true;
             break;
         }
         let Some((_, root, excluded)) = canon.iter().find(|(k, _, _)| *k == c.kind) else { continue };
@@ -736,6 +742,7 @@ pub fn search(roots: &Roots, q: &Prepared, cancel: &AtomicBool, sink: &mut dyn F
                 sum.partial += usize::from(f.partial);
                 if f.more {
                     sum.truncated = true;
+                    sum.files_capped += 1;
                 }
                 if !f.hits.is_empty() {
                     sum.matches += before - budget;
@@ -757,6 +764,7 @@ pub fn search(roots: &Roots, q: &Prepared, cancel: &AtomicBool, sink: &mut dyn F
     }
     if budget == 0 {
         sum.truncated = true;
+        sum.results_capped = true;
     }
     flush(&mut pending, &sum, sink);
     sum.ms = t0.elapsed().as_millis() as u64;
@@ -1151,7 +1159,8 @@ mod tests {
         let (files, sum) = run(&fx, &p);
         assert_eq!(files.iter().map(|f| f.hits.len()).sum::<usize>(), 60);
         assert_eq!(sum.matches, 60);
-        assert!(sum.truncated);
+        assert!(sum.truncated && sum.results_capped);
+        assert_eq!(sum.files_capped, 0);
     }
 
     #[test]
@@ -1164,6 +1173,9 @@ mod tests {
         let a = files.iter().find(|f| f.rel == "a.log").unwrap();
         assert_eq!(a.hits.len(), PER_FILE_HITS);
         assert!(a.more && sum.truncated);
+        // El tope es del archivo, no del total: la interfaz lo dice así y no pide subir el máximo.
+        assert_eq!(sum.files_capped, 1);
+        assert!(!sum.results_capped);
         assert!(files.iter().any(|f| f.rel == "b.log"), "un archivo ruidoso no tapa a los demás");
     }
 

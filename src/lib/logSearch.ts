@@ -12,6 +12,10 @@ export const KIND_SHORT: Record<SearchKind, string> = { logs: "Log", backups: "R
 export const MAX_QUERY = 500;
 export const MAX_RESULTS_CHOICES = [200, 500, 1000, 2000, 5000];
 export const FILE_MB_CHOICES = [8, 16, 64, 256, 1024];
+/** Coincidencias que se muestran por archivo (PER_FILE_HITS en logsearch.rs). */
+export const PER_FILE_HITS = 200;
+/** Archivos que se recorren como máximo (MAX_FILES en logsearch.rs). */
+export const MAX_WALK_FILES = 50_000;
 
 export interface SearchForm {
   query: string;
@@ -85,7 +89,12 @@ export interface Summary {
   total: number;
   matches: number;
   filesWithHits: number;
+  /** Hay más coincidencias que las entregadas (por cualquiera de los dos topes). */
   truncated: boolean;
+  /** Se alcanzó el tope total ("Máximo de resultados"). */
+  resultsCapped?: boolean;
+  /** Archivos con más coincidencias que el tope por archivo. */
+  filesCapped?: number;
   walkTruncated: boolean;
   skippedBinary: number;
   skippedErrors: number;
@@ -205,8 +214,18 @@ export function summaryLines(s: Summary): string[] {
   out.push(
     `${s.cancelled ? "Búsqueda cancelada: " : ""}${plural(s.matches, "coincidencia", "coincidencias")} en ${plural(s.filesWithHits, "archivo", "archivos")} · ${s.scanned.toLocaleString("es-CL")} de ${s.total.toLocaleString("es-CL")} revisados en ${secs}.`,
   );
-  if (s.truncated) out.push("Se alcanzó el tope de resultados: hay más coincidencias. Acota el texto, las fechas o el equipo.");
-  if (s.walkTruncated) out.push("Hay más archivos que el máximo que se recorre; se revisaron los más recientes.");
+  // Sin el detalle (backend anterior), "truncated" se toma como tope total.
+  const filesCapped = s.filesCapped ?? 0;
+  if (s.resultsCapped || (s.truncated && s.resultsCapped == null && !filesCapped))
+    out.push("Se alcanzó el tope de resultados: hay más coincidencias. Acota el texto, las fechas o el equipo.");
+  if (filesCapped)
+    out.push(
+      `${plural(filesCapped, "archivo tiene", "archivos tienen")} más de ${PER_FILE_HITS.toLocaleString("es-CL")} coincidencias: de cada uno se muestran las primeras ${PER_FILE_HITS.toLocaleString("es-CL")}. Acota el texto o abre el archivo para verlas todas.`,
+    );
+  if (s.walkTruncated)
+    out.push(
+      `Hay más de ${MAX_WALK_FILES.toLocaleString("es-CL")} archivos que cumplen los filtros: se revisaron los primeros que se encontraron, no necesariamente los más recientes. Acota con fechas o equipo.`,
+    );
   if (s.partial) out.push(`${plural(s.partial, "archivo supera", "archivos superan")} el tamaño máximo por archivo: se buscó solo en su inicio.`);
   if (s.skippedBinary) out.push(`${plural(s.skippedBinary, "archivo binario omitido", "archivos binarios omitidos")}.`);
   if (s.skippedErrors) out.push(`${plural(s.skippedErrors, "archivo no se pudo leer", "archivos no se pudieron leer")}.`);

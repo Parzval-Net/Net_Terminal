@@ -78,16 +78,81 @@ const SECRET_WORDS: &[&str] = &[
     "hexadecimal",
     "cipher",
     "irreversible-cipher",
+    // Check Point Gaia: "set user admin password-hash $6$…" y "set expert-password-hash $1$…".
+    "password-hash",
+    "expert-password-hash",
 ];
 
 /// Indicadores de tipo/cifrado entre la palabra clave y el valor.
 fn is_type_token(tok: &str) -> bool {
     let t = tok.to_ascii_lowercase();
     (t.len() <= 3 && t.chars().all(|c| c.is_ascii_digit()))
+        || is_sha(&t)
         || matches!(
             t.as_str(),
-            "enc" | "cipher" | "irreversible-cipher" | "simple" | "plain" | "encrypted" | "ascii-text" | "hexadecimal" | "md5" | "sha" | "sha1" | "sha256" | "hidden"
+            "enc" | "cipher" | "irreversible-cipher" | "simple" | "plain" | "encrypted" | "ascii-text" | "hexadecimal" | "md5" | "scrypt" | "hidden"
         )
+}
+
+/// "sha", "sha1", "sha256", "sha512"… (Arista: "secret sha512 $6$…").
+fn is_sha(t: &str) -> bool {
+    t.strip_prefix("sha").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Algoritmos de SNMPv3 entre "auth"/"priv" y la clave.
+fn is_snmp_alg(tok: &str) -> bool {
+    let t = tok.to_ascii_lowercase();
+    is_type_token(&t)
+        || matches!(t.as_str(), "des" | "3des" | "des56" | "aes" | "aes128" | "aes192" | "aes256" | "aes-128" | "aes-192" | "aes-256" | "aes-cfb-128")
+}
+
+/// Posiciones (en `words`) de secretos SNMP que no siguen a una palabra clave: la comunidad de
+/// "snmp-server host <ip> [informs|traps] [vrf X] [version 1|2c] <comunidad> …" y las claves de
+/// "snmp-server user … auth <alg> <clave> priv <alg> <clave>". Con "version 3" el token es el
+/// usuario, no un secreto.
+fn snmp_secret_words(toks: &[String]) -> Vec<usize> {
+    let lower: Vec<String> = toks.iter().map(|t| t.to_ascii_lowercase()).collect();
+    if lower.len() < 3 || lower[0] != "snmp-server" {
+        return Vec::new();
+    }
+    match lower[1].as_str() {
+        "host" => {
+            let mut j = 3;
+            while j < lower.len() {
+                match lower[j].as_str() {
+                    "informs" | "traps" => j += 1,
+                    "vrf" | "use-vrf" | "filter-vrf" | "source-interface" | "udp-port" => j += 2,
+                    "version" => {
+                        if lower.get(j + 1).map(String::as_str) == Some("3") {
+                            return Vec::new();
+                        }
+                        j += 2;
+                    }
+                    _ => return vec![j],
+                }
+            }
+            Vec::new()
+        }
+        "user" => {
+            let mut out = Vec::new();
+            let mut j = 2;
+            while j < lower.len() {
+                if lower[j] == "auth" || lower[j] == "priv" {
+                    let mut v = j + 1;
+                    while v < lower.len() && is_snmp_alg(&lower[v]) {
+                        v += 1;
+                    }
+                    if v < lower.len() && lower[v] != "priv" && lower[v] != "localizedkey" {
+                        out.push(v);
+                    }
+                    j = v;
+                }
+                j += 1;
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn forti_set_secret(tok: &str) -> bool {
@@ -131,6 +196,10 @@ pub fn mask_line_secrets(line: &str, found: &mut Vec<String>) -> String {
     let words: Vec<usize> = parts.iter().enumerate().filter(|(_, (w, _))| !w).map(|(i, _)| i).collect();
     if words.is_empty() {
         return line.to_string();
+    }
+    let toks: Vec<String> = words.iter().map(|&i| parts[i].1.clone()).collect();
+    for j in snmp_secret_words(&toks) {
+        found.push(std::mem::replace(&mut parts[words[j]].1, "****".to_string()));
     }
     let first = parts[words[0]].1.to_ascii_lowercase();
     let mut k = 0;
@@ -436,6 +505,26 @@ mod tests {
             ("        set password ENC SH2abc==", "        set password ENC ****"),
             ("        set psksecret ENC xyz", "        set psksecret ENC ****"),
             ("    encrypted-password \"$6$x\"; ## SECRET-DATA", "    encrypted-password ****; ## SECRET-DATA"),
+            // Arista: el algoritmo va entre la palabra clave y el hash.
+            ("username admin role network-admin secret sha512 $6$abc$def", "username admin role network-admin secret sha512 ****"),
+            ("enable password sha512 $6$abc", "enable password sha512 ****"),
+            ("aaa root secret sha512 $6$abc", "aaa root secret sha512 ****"),
+            ("username u secret scrypt $abc", "username u secret scrypt ****"),
+            // Check Point Gaia.
+            ("set user admin password-hash $6$abc$def", "set user admin password-hash ****"),
+            ("set expert-password-hash $1$abc", "set expert-password-hash ****"),
+            // Comunidad SNMP en snmp-server host (IOS, NX-OS, Arista).
+            ("snmp-server host 192.0.2.1 version 2c COMUNIDAD", "snmp-server host 192.0.2.1 version 2c ****"),
+            ("snmp-server host 192.0.2.1 COMUNIDAD", "snmp-server host 192.0.2.1 ****"),
+            ("snmp-server host 192.0.2.1 traps version 2c COMUNIDAD udp-port 162", "snmp-server host 192.0.2.1 traps version 2c **** udp-port 162"),
+            ("snmp-server host 192.0.2.1 vrf MGMT version 2c COMUNIDAD", "snmp-server host 192.0.2.1 vrf MGMT version 2c ****"),
+            ("snmp-server host 192.0.2.1 informs version 1 COMUNIDAD bgp", "snmp-server host 192.0.2.1 informs version 1 **** bgp"),
+            // Claves de usuarios SNMPv3 (NX-OS, Arista).
+            (
+                "snmp-server user admin network-admin auth md5 0xAB12 priv 0xCD34 localizedkey",
+                "snmp-server user admin network-admin auth md5 **** priv **** localizedkey",
+            ),
+            ("snmp-server user u g v3 localized 8000 auth sha 1A2B priv aes 128 3C4D", "snmp-server user u g v3 localized 8000 auth sha **** priv aes 128 ****"),
         ];
         for (input, want) in cases {
             assert_eq!(mask_line(input), want, "entrada: {input}");
@@ -463,6 +552,9 @@ mod tests {
             " key 1",
             "crypto key generate rsa modulus 2048",
             "        set keepalive 10",
+            // SNMPv3: después de "version 3" va el usuario, no un secreto; sin comunidad, nada que enmascarar.
+            "snmp-server host 192.0.2.1 version 3 priv usuario",
+            "snmp-server host 192.0.2.1 use-vrf management",
             "",
         ] {
             assert_eq!(mask_line(keep), keep);

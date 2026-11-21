@@ -68,7 +68,8 @@ function applyBackspaces(line: string): string {
 
 /**
  * Deja solo la configuración: sin eco del comando, sin marcas de paginación, sin el
- * prompt final ni la cabecera variable de Cisco ("Building configuration", bytes).
+ * prompt final ni la cabecera variable (bytes y "Building configuration" de IOS, horas de NX-OS,
+ * estado del nodo de Junos en cluster): dos respaldos sin cambios deben salir idénticos.
  */
 export function cleanConfig(raw: string, cmd: string): string {
   const lines = raw
@@ -80,9 +81,15 @@ export function cleanConfig(raw: string, cmd: string): string {
   // Todo lo anterior al eco del comando (y el eco) se descarta.
   const echo = lines.findIndex((l) => l.includes(cmd.trim()));
   let body = echo >= 0 ? lines.slice(echo + 1) : lines;
-  while (body.length && !body[body.length - 1].trim()) body.pop();
+  const trimTail = () => {
+    while (body.length && !body[body.length - 1].trim()) body.pop();
+    // Junos en chassis cluster o Virtual Chassis: "{primary:node0}" antes del prompt; cambia tras un failover.
+    if (body.length && JUNOS_STATE.test(body[body.length - 1].trim())) body.pop();
+    while (body.length && !body[body.length - 1].trim()) body.pop();
+  };
+  trimTail();
   if (body.length && PROMPT.test(body[body.length - 1])) body.pop();
-  while (body.length && !body[body.length - 1].trim()) body.pop();
+  trimTail();
   // Cabecera variable de IOS: cambia en cada respaldo y ensucia las comparaciones.
   let start = 0;
   while (
@@ -92,7 +99,28 @@ export function cleanConfig(raw: string, cmd: string): string {
   )
     start++;
   body = body.slice(start);
+  // Marcas de hora de la cabecera (NX-OS, NVRAM de IOS): cambian sin que cambie la configuración.
+  body = body.filter((l, i) => i >= HEADER_LINES || !VOLATILE_HEADER.test(l.trim()));
+  while (body.length && !body[0].trim()) body.shift();
   return body.join("\n") + (body.length ? "\n" : "");
+}
+
+/** Estado del nodo que Junos muestra sobre el prompt en cluster o VC: "{primary:node0}", "{master:0}". */
+const JUNOS_STATE = /^\{[\w:.-]+\}$/;
+/** Líneas de la cabecera donde se buscan marcas de hora. */
+const HEADER_LINES = 8;
+/** NX-OS ("!Command:", "!Running configuration last done at:", "!Time:") e IOS ("! NVRAM config last updated at"). */
+const VOLATILE_HEADER = /^!\s*(Command\s*:|Time\s*:|Running configuration last done at\b|NVRAM config last updated\b)/i;
+
+/**
+ * Configuración lista para guardar, o el motivo para no guardarla. Una lectura cortada (plazo
+ * vencido, sesión cerrada, tope de salida o de páginas) nunca se guarda: parecería un respaldo
+ * válido y en la comparación aparecería como configuración quitada.
+ */
+export function prepareBackup(r: { output: string; cut?: string }, cmd: string): { clean: string; problem: string | null } {
+  if (r.cut) return { clean: "", problem: `Respaldo incompleto: ${r.cut}` };
+  const clean = cleanConfig(r.output, cmd);
+  return { clean, problem: configProblem(clean) };
 }
 
 /** Mensaje de error si la salida no parece una configuración. */
@@ -112,6 +140,16 @@ export async function pool<T>(items: T[], limit: number, run: (item: T) => Promi
     while (next < items.length && !stopped()) await run(items[next++]);
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/** Estado de un equipo en una tanda de respaldos. "skipped": no alcanzó a iniciar porque se detuvo la tanda. */
+export type JobState = { state: "pending" | "running" | "ok" | "error" | "skipped"; text?: string };
+
+/** Tras detener la tanda, los que seguían en cola quedan como omitidos (ya no están "En cola"). */
+export function skipPending(jobs: Record<string, JobState>): Record<string, JobState> {
+  return Object.fromEntries(
+    Object.entries(jobs).map(([id, j]) => [id, j.state === "pending" ? { state: "skipped", text: "No se respaldó: se detuvo la tanda" } : j]),
+  );
 }
 
 /** "2026-10-21_143005.txt" → "21-10-2026 14:30:05". */

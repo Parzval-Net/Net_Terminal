@@ -15,6 +15,7 @@ import {
   LineData,
   MAX_QUERY,
   MAX_RESULTS_CHOICES,
+  PER_FILE_HITS,
   ResultsState,
   SearchForm,
   SearchKind,
@@ -149,7 +150,7 @@ function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit) => void }) {
           onClick={() => onCopy(hit)}
           title="Copiar línea"
           aria-label={`Copiar la línea ${hit.line}`}
-          className="shrink-0 w-6 h-6 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover focus-visible:opacity-100 opacity-60 group-hover:opacity-100"
+          className="shrink-0 w-6 h-6 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
         >
           <Copy size={12} />
         </button>
@@ -448,7 +449,7 @@ export default function LogSearchTool({
               </Label>
             </div>
             <p className="mt-2 text-[11.5px] text-muted">
-              La fecha de un respaldo es la de su nombre; la de un log o una nota, la de su última modificación. De un archivo más grande que el máximo se lee solo el inicio.
+              La fecha de un respaldo es la de su nombre; la de un log o una nota, la de su última modificación. De un archivo más grande que el máximo se lee solo el inicio, y de cada archivo se muestran hasta {PER_FILE_HITS.toLocaleString("es-CL")} coincidencias.
             </p>
           </Collapsible>
         </form>
@@ -457,7 +458,8 @@ export default function LogSearchTool({
         </p>
       </Section>
 
-      <div role="status" aria-live="polite" className="space-y-1.5">
+      <div className="space-y-1.5">
+        {/* El avance cambia cada 150 ms: queda fuera de la región viva para no encolar anuncios que tapen el resumen final. */}
         {running && (
           <div>
             <p className="text-[12px]">{progress.total ? progressText(progress) : "Recorriendo carpetas…"}</p>
@@ -467,13 +469,15 @@ export default function LogSearchTool({
             <p className="mt-1 text-[11.5px] text-muted">Esc cancela la búsqueda. Los resultados aparecen a medida que se encuentran.</p>
           </div>
         )}
-        {!running && lines.map((l, i) => (
-          <p key={i} className={`text-[12px] ${i === 0 ? "" : "text-warn"}`}>
-            {l}
-          </p>
-        ))}
-        {note && !error && <p className="text-[12px] text-muted">{note}</p>}
-        {error && <p className="text-[12px] text-danger">{error}</p>}
+        <div role="status" aria-live="polite" className="space-y-1.5">
+          {!running && lines.map((l, i) => (
+            <p key={i} className={`text-[12px] ${i === 0 ? "" : "text-warn"}`}>
+              {l}
+            </p>
+          ))}
+          {note && !error && <p className="text-[12px] text-muted">{note}</p>}
+          {error && <p className="text-[12px] text-danger">{error}</p>}
+        </div>
       </div>
 
       {files.length > 0 && (
