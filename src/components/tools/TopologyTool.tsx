@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
+  Camera,
   Copy,
   Download,
   FileCode2,
@@ -107,6 +108,13 @@ import { DISMISSED_KEY, PanelSection, TopoUi, loadDismissed, legacyTopo, loadUi,
 import { FLOW_MAX, H, MAX_L2_NODES, PARALLEL_GAP, VENDORS, W } from "./topology/topoConst";
 import { UTIL_VAR } from "./topology/topoStyle";
 import type { ConfirmReq, Geo, L2Geo, ManualForm, Menu, Pill, TrafficRow } from "./topology/topoTypes";
+
+/** Hora de un snapshot para el chip de origen: hh:mm si es de hoy; si no, con la fecha. */
+function snapTime(ts: number): string {
+  const d = new Date(ts);
+  const hm = d.toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? hm : `${d.toLocaleDateString("es-CL", { day: "2-digit", month: "2-digit" })} ${hm}`;
+}
 
 export function TopologyTool({
   terminals,
@@ -929,8 +937,29 @@ export function TopologyTool({
   /** Botones de la barra con texto (si no, solo ícono con tooltip). */
   const labels = wide || (!tiny && size.rw >= 900);
   // Por qué "Descubrir vecinos" no se puede pulsar, visible bajo el botón.
+  // Con un diagrama ya dibujado (guardado o abierto desde un snapshot) conectarse sirve para actualizarlo.
   const discoverWhy =
-    mode === "cli" ? (!terminals.length ? "Conéctate a un equipo para descubrir" : !term ? "Elige un equipo de la lista" : undefined) : !profile ? "Crea un perfil SNMP en Herramientas › SNMP" : undefined;
+    mode === "cli"
+      ? !terminals.length
+        ? topo.nodes.length
+          ? "Conéctate a un equipo para actualizar el mapa"
+          : "Conéctate a un equipo para descubrir"
+        : !term
+          ? "Elige un equipo de la lista"
+          : undefined
+      : !profile
+        ? "Crea un perfil SNMP en Herramientas › SNMP"
+        : undefined;
+  // Origen del mapa a la vista: el snapshot que se compara o el que se abrió (misma referencia hasta que
+  // el diagrama cambie). Sin sesión, un mapa guardado se marca como tal para no confundirlo con uno vigente.
+  const openedSnap = snapshot ? undefined : snapshots.find((s) => s.topo === topo);
+  const shownSnap = snapshot ?? openedSnap;
+  const offline = mode === "cli" && !terminals.length && topo.nodes.length > 0;
+  const origin = shownSnap
+    ? `${snapshot ? "Comparando con snapshot" : "Snapshot"} ${snapTime(shownSnap.ts)}${offline ? " · sin sesión activa" : ""}`
+    : offline
+      ? "Diagrama guardado · sin sesión activa"
+      : "";
   const openSection = (sec: PanelSection) => setUi((u) => ({ ...u, panel: true, sec: { ...u.sec, [sec]: true } }));
   const askClear = () => {
     const manual = topo.nodes.filter((n) => n.manual).length + topo.links.filter((l) => isUserProto(l.proto)).length;
@@ -1155,6 +1184,16 @@ export function TopologyTool({
       </TopoToolbar>
 
       <div className="relative flex-1 min-h-[200px] flex gap-3">
+        {origin && (
+          // Debajo de la ficha del equipo elegido cuando esta ocupa la esquina (panel cerrado).
+          <p
+            className={`absolute left-2 z-10 max-w-[calc(100%-1rem)] inline-flex items-center gap-1.5 rounded-full border border-line bg-panel shadow-pop px-2.5 h-6 text-[11.5px] text-muted pointer-events-none ${!ui.panel && sel ? "top-11" : "top-2"}`}
+            title={shownSnap ? shownSnap.name : undefined}
+          >
+            <Camera size={12} aria-hidden className="shrink-0" />
+            <span className="truncate">{origin}</span>
+          </p>
+        )}
         <TopoCanvas
           mapBox={mapBox}
           scroller={scroller}
