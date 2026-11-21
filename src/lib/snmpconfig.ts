@@ -112,7 +112,16 @@ export interface GenResult {
   text: string;
   errors: FieldError[];
   warnings: string[];
+  /** El texto lleva secretos escritos por el usuario (no solo marcadores). */
+  typed: boolean;
 }
+
+/**
+ * Secretos que de verdad se escriben en el texto: en v3 las contraseñas (salvo Huawei VRP, que las
+ * pide de forma interactiva) y en v2c la community. Un valor que quedó de otra versión o plataforma
+ * no cuenta, para no avisar de secretos que el texto no trae.
+ */
+export const emitsSecrets = (i: GenInput) => (i.version === "v3" ? i.platform !== "vrp" && !!(i.authPass || i.privPass) : !!i.community);
 
 // ---------- Validación ----------
 
@@ -201,11 +210,13 @@ export function validate(i: GenInput): FieldError[] {
   const secret = (field: keyof GenInput, label: string, v: string) => {
     if (v && !SECRET_RE.test(v)) e.push({ field, msg: `${label}: 8 a 64 caracteres, sin espacios, comillas, \\ ? ! # ;.` });
   };
-  if (i.version === "v3") {
+  // Huawei VRP no escribe las contraseñas v3 (las pide el equipo) y sus campos quedan deshabilitados:
+  // un valor que quedó de otra plataforma no puede bloquear la generación.
+  if (i.version === "v3" && i.platform !== "vrp") {
     secret("authPass", "Contraseña auth", i.authPass);
     secret("privPass", "Contraseña priv", i.privPass);
     if (i.authPass && i.privPass && i.authPass === i.privPass) e.push({ field: "privPass", msg: "Usa contraseñas distintas para auth y priv." });
-  } else {
+  } else if (i.version === "v2c") {
     secret("community", "Community", i.community);
     if (/^(public|private)$/i.test(i.community)) e.push({ field: "community", msg: "No uses public ni private." });
   }
@@ -235,7 +246,8 @@ export function generate(input: GenInput): GenResult {
     else warnings.push("AES-256 no está estandarizado por IETF: hay dos variantes de derivación de llave (Blumenthal y Reeder/Cisco). Verifica que el NMS use la misma que el equipo, o usa AES-128 (RFC 3826).");
   }
   if (!info.views) warnings.push(`${info.label} no permite vistas con subárboles excluidos desde este bloque; el acceso es de solo lectura a toda la MIB que expone el equipo.`);
-  if (errors.length) return { text: "", errors, warnings };
+  const typed = emitsSecrets(i);
+  if (errors.length) return { text: "", errors, warnings, typed: false };
 
   const priv: PrivAlg = i.priv === "aes256" && info.aes256 ? "aes256" : "aes128";
   const nms = parseNets(i.nms).nets;
@@ -243,10 +255,11 @@ export function generate(input: GenInput): GenResult {
   const v = {
     ...i,
     priv,
-    authPass: i.authPass || PH.auth,
-    privPass: i.privPass || PH.priv,
+    // En VRP los campos de contraseña quedan deshabilitados: lo que quedó escrito no se usa.
+    authPass: (i.platform !== "vrp" && i.authPass) || PH.auth,
+    privPass: (i.platform !== "vrp" && i.privPass) || PH.priv,
     community: i.community || PH.community,
-    typed: !!(i.authPass || i.privPass || i.community),
+    typed,
   };
   const gen = { ios, nxos, vrp, junos, fortios, netsnmp }[i.platform];
   const head = [
@@ -257,7 +270,7 @@ export function generate(input: GenInput): GenResult {
       : `${info.cm} Reemplaza los marcadores <...> por valores reales de 8 caracteres o más antes de pegar.`,
     "",
   ];
-  return { text: [...head, ...gen(v, nms, rcv)].join("\n") + "\n", errors, warnings };
+  return { text: [...head, ...gen(v, nms, rcv)].join("\n") + "\n", errors, warnings, typed };
 }
 
 type V = GenInput & { priv: PrivAlg; typed: boolean };
@@ -376,7 +389,7 @@ function vrp(v: V, nms: Net[], rcv: string[]): string[] {
     o.push(`snmp-agent usm-user v3 ${v.user}`);
     o.push(`snmp-agent usm-user v3 ${v.user} group ${v.group}`);
     o.push("# Las dos líneas siguientes piden la contraseña dos veces: pégalas una a una y escríbela en el equipo.");
-    o.push(`#   auth: ${v.authPass === PH.auth ? PH.auth : "(la que escribiste en NetTerminal)"}  priv: ${v.privPass === PH.priv ? PH.priv : "(la que escribiste en NetTerminal)"}`);
+    o.push(`#   auth: ${PH.auth}  priv: ${PH.priv}`);
     if (v.auth === "sha256") o.push("# sha2-256 requiere VRP reciente; versiones antiguas solo aceptan md5/sha. Verifica con '?'.");
     o.push(`snmp-agent usm-user v3 ${v.user} authentication-mode ${am}`);
     o.push(`snmp-agent usm-user v3 ${v.user} privacy-mode ${pm}`);
