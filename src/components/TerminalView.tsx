@@ -325,6 +325,8 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     publishTermSize(id, term.cols, term.rows);
     termRef.current = term;
     fitRef.current = fit;
+    // Antes de cualquier callback que lo consulte (attachSearch corre en el acto si el chunk ya está).
+    let disposed = false;
     const attachSearch = () => {
       if (disposed || !SearchCtor) return;
       const search = new SearchCtor({ highlightLimit: FIND_LIMIT });
@@ -354,7 +356,6 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       window.clearTimeout(screenTimer);
       screenTimer = window.setTimeout(() => !disposed && screenHintRef.current?.(id), ms);
     };
-    let disposed = false;
     // Resaltado al vuelo y marcadores (ver lib/termDecor): sin suscripciones hasta que se usan.
     const hlEngine = new HighlightEngine(term, () => {
       if (disposed || dialogRef.current !== "hl") return;

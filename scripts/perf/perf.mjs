@@ -35,7 +35,7 @@ const BUDGET = {
   openMs: Math.round(100 * CPU * SLACK), // primera apertura de una vista (umbral de "instantáneo", Nielsen Norman Group)
   reopenMs: Math.round(50 * CPU * SLACK), // volver a una vista ya abierta
   idleBusyPct: 10 * CPU * SLACK, // % de CPU del hilo principal en reposo
-  initialJsKb: 400, // JavaScript inicial de la app, gzip
+  initialJsKb: 330, // JavaScript inicial de la app, gzip
 };
 
 let playwright;
