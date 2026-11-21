@@ -1,4 +1,4 @@
-import { type ReactNode, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { moveItem } from "./lib/tabDrag";
 import {
   addSessions,
@@ -51,9 +51,11 @@ import type { ScriptLaunch } from "./components/ScriptLaunchDialog";
 import type { Section } from "./components/SettingsModal";
 import type { Macro } from "./lib/settings";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { BookOpen, NotebookPen, Pin, Search as SearchIcon, Sparkles, SquareTerminal, Wrench, X as XIcon, Zap, Plus } from "lucide-react";
+import { History, Pin, Search as SearchIcon, Sparkles, SquareTerminal, Upload, Wrench, X as XIcon, Zap, Plus } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ConnStatus, Session, Tab, TabState, historyKey, tabTitle } from "./types";
+import { ConnStatus, Session, Tab, TabState, historyKey, sessionTarget, tabTitle } from "./types";
+import { matchConnect, parseQuick, quickTarget } from "./lib/quickTarget";
 import { closeAllLabel, focusLabel, highlightLabel, historyLabel, isMac, localOsVendor, markHereLabel, modLabel, nextMarkLabel, prevMarkLabel } from "./lib/platform";
 import { presets, resolvePreset, useSystemDark } from "./lib/theme";
 import { DataNotices, Settings, logOptions, useSettings } from "./lib/settings";
@@ -71,7 +73,7 @@ import { SplitLayout, SplitState, fillPanes, paneRect } from "./lib/split";
 import logo from "./assets/logo.svg";
 import { plural } from "./lib/plural";
 import { useVaultAutoLock } from "./lib/vaultLock";
-import { isQuickSession } from "./components/SessionIcon";
+import { QuickBolt, SessionIcon, isQuickSession, typeLabel } from "./components/SessionIcon";
 import "./App.css";
 
 // Vistas pesadas y de uso ocasional: se cargan aparte para aligerar el arranque.
@@ -1231,6 +1233,10 @@ function Workspace({
     },
   });
 
+  // Buscar e Historial de la pestaña activa: abren o cierran. Los usan la barra de pestañas y la de estado.
+  const toggleFind = () => (activeId && findOpenIds[activeId] ? controllers.current.get(activeId)?.closeFind() : h.find());
+  const toggleHistory = () => (historyFor ? h.closeHistory() : h.openHistory());
+
   // Mismos datos y acciones para la barra horizontal y la columna de pestañas verticales.
   const tabBarProps: TabBarProps = {
     tabs,
@@ -1273,6 +1279,12 @@ function Workspace({
     alerted,
     tabLayout: settings.tabLayout,
     onTabLayout: h.setTabLayout,
+    onPalette: () => setPaletteOpen(true),
+    onToggleFind: toggleFind,
+    findOpen: !!activeId && !!findOpenIds[activeId],
+    onToggleHistory: toggleHistory,
+    historyOpen: !!historyFor,
+    splitPanes: splitOn ? split!.panes : null,
   };
 
   const sidebarEl = (extra: Partial<React.ComponentProps<typeof Sidebar>> = {}) => (
@@ -1472,13 +1484,14 @@ function Workspace({
           )}
           {tabs.length === 0 && activeId !== "tools" && (
             <EmptyState
+              sessions={sessions}
+              onOpen={openTab}
               onLocal={newLocal}
               onPalette={() => setPaletteOpen(true)}
               onQuick={h.openQuick}
               onNew={() => setModal({})}
+              onImport={h.openImport}
               onTools={h.toggleTools}
-              onCommands={h.toggleCommands}
-              onNotes={h.toggleNotes}
             />
           )}
         </div>
@@ -1560,8 +1573,8 @@ function Workspace({
           onAi={h.openAi}
           onSaveAs={activeTab ? () => h.saveTabAs(activeTab.id) : undefined}
           findOpen={!!activeId && !!findOpenIds[activeId]}
-          onFind={() => (activeId && findOpenIds[activeId] ? controllers.current.get(activeId)?.closeFind() : h.find())}
-          onHistory={() => (historyFor ? h.closeHistory() : h.openHistory())}
+          onFind={toggleFind}
+          onHistory={toggleHistory}
           historyOpen={!!historyFor}
           onToggleReadOnly={activeTab ? () => h.toggleReadOnly(activeTab.id) : undefined}
         />}
@@ -1736,7 +1749,7 @@ function Workspace({
                     : []),
                   states[activeTab.id]?.status === "closed"
                     ? { label: "Reconectar sesión", detail: "Vuelve a conectar la pestaña activa", run: () => h.reconnect() }
-                    : { label: "Desconectar sesión", detail: "Corta la conexión; la pestaña queda abierta", run: () => h.disconnect() },
+                    : { label: "Desconectar sesión", detail: "Corta la conexión; la pestaña queda abierta", danger: true, run: () => h.disconnect() },
                 ]
               : []),
             { label: "Modo foco", detail: focusMode ? "Salir: vuelve a mostrar barras y paneles" : "Oculta barras y paneles: solo pestañas y terminal", shortcut: focusLabel, run: h.toggleFocus },
@@ -1779,6 +1792,7 @@ function Workspace({
                     label: "Cerrar todas las sesiones",
                     detail: `${tabs.length} ${tabs.length === 1 ? "pestaña abierta" : "pestañas abiertas"}; pide confirmación si hay conexiones activas`,
                     shortcut: closeAllLabel,
+                    danger: true,
                     run: () => requestCloseMany("all"),
                   },
                 ]
@@ -1815,54 +1829,207 @@ function ToolsLoading({ active }: { active: boolean }) {
   );
 }
 
+/**
+ * Pantalla de inicio (sin pestañas). Una sola tarea principal, conectarse, con el campo "Conectar a…"
+ * (sesión guardada o user@host, como la paleta) y los destinos recientes a un clic. El resto queda en
+ * segundo plano: nueva sesión, importar desde otra app, terminal local, Herramientas y la paleta.
+ */
 function EmptyState({
+  sessions,
+  onOpen,
   onLocal,
   onPalette,
   onQuick,
   onNew,
+  onImport,
   onTools,
-  onCommands,
-  onNotes,
 }: {
+  sessions: Session[];
+  onOpen: (s: Session) => void;
   onLocal: () => void;
   onPalette: () => void;
   onQuick: () => void;
   onNew: () => void;
+  onImport: () => void;
   onTools: () => void;
-  onCommands: () => void;
-  onNotes: () => void;
 }) {
-  // Mismos nombres, íconos y atajos que la barra de actividad y la paleta: una sola forma de llamar a cada cosa.
-  const items: [React.ReactNode, React.ReactNode, string, () => void][] = [
-    [<Zap size={15} />, "Conexión rápida sin guardar", `${modLabel}O`, onQuick],
-    [<SearchIcon size={15} />, "Buscar sesión", `${modLabel}K`, onPalette],
-    [<Plus size={15} />, "Nueva sesión guardada", `${modLabel}N`, onNew],
-    [<SquareTerminal size={15} />, "Terminal local", `${modLabel}T`, onLocal],
-    [<Wrench size={15} />, "Herramientas de red", `${modLabel}E`, onTools],
-    [<BookOpen size={15} />, "Catálogo de comandos", `${modLabel}L`, onCommands],
-    [<NotebookPen size={15} />, "Notas", `${modLabel}J`, onNotes],
+  const id = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
+  const [index, setIndex] = useState(0);
+  const [error, setError] = useState(false);
+  // Últimos destinos de conexión rápida (los mismos que la paleta y Conexión rápida).
+  const [recent, setRecent] = useState<Session[]>([]);
+  useEffect(() => {
+    invoke<string[]>("recent_targets")
+      .then((list) => setRecent(list.map((t) => parseQuick(t)[0]).filter((x): x is Session => !!x).slice(0, 5)))
+      .catch(() => {});
+  }, []);
+  // Foco inicial en el campo, salvo que otro control ya lo tenga (un diálogo abierto al iniciar, por ejemplo).
+  useEffect(() => {
+    if (!document.activeElement || document.activeElement === document.body) inputRef.current?.focus();
+  }, []);
+
+  const matches = useMemo(() => matchConnect(query, sessions), [query, sessions]);
+  useEffect(() => {
+    setIndex(0);
+    setError(false);
+  }, [query]);
+  const listId = `${id}-list`;
+  const hintId = `${id}-hint`;
+  const open = (s: Session, quick: boolean) => {
+    if (quick) invoke("recent_target_add", { target: quickTarget(s) }).catch(() => {});
+    onOpen(s);
+  };
+  const submit = () => {
+    const m = matches[index];
+    if (m) open(m.session, m.quick);
+    else if (query.trim()) setError(true);
+  };
+
+  const secondary: [React.ReactNode, string, string | null, () => void][] = [
+    [<Plus size={14} />, "Nueva sesión", `${modLabel}N`, onNew],
+    [<Upload size={14} />, "Importar sesiones", null, onImport],
+    [<SquareTerminal size={14} />, "Terminal local", `${modLabel}T`, onLocal],
+    [<Wrench size={14} />, "Herramientas", `${modLabel}E`, onTools],
   ];
-  // m-auto en vez de place-items-center: con poca altura la lista se desplaza en lugar de cortarse arriba.
+  // m-auto en vez de place-items-center: con poca altura el contenido se desplaza en lugar de cortarse arriba.
   return (
     <div className="absolute inset-0 flex overflow-y-auto">
-      <div className="w-[340px] max-w-full m-auto px-4 py-4">
-        <img src={logo} alt="" className="w-16 h-16 -ml-2 mb-2 [@media(max-height:560px)]:hidden" draggable={false} />
-        <h1 className="text-[18px] font-semibold mb-1">NetTerminal</h1>
-        <p className="text-muted mb-4">SSH, Telnet y Serial sin complicaciones.</p>
-        <div className="space-y-0.5">
-          {items.map(([icon, label, key, fn], i) => (
+      <div className="w-[480px] max-w-full m-auto px-4 py-6">
+        <div className="flex items-center gap-3 mb-5 [@media(max-height:560px)]:mb-3">
+          <img src={logo} alt="" className="w-10 h-10 shrink-0 [@media(max-height:560px)]:hidden" draggable={false} />
+          <h1 className="text-[18px] font-semibold">NetTerminal</h1>
+        </div>
+
+        <label htmlFor={`${id}-input`} className="block mb-1.5 font-medium">
+          Conectar a…
+        </label>
+        <div className="relative">
+          <Zap aria-hidden size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+          <input
+            ref={inputRef}
+            id={`${id}-input`}
+            role="combobox"
+            aria-expanded={matches.length > 0}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={matches.length ? `${id}-opt-${index}` : undefined}
+            aria-describedby={hintId}
+            aria-invalid={error || undefined}
+            autoComplete="off"
+            spellCheck={false}
+            className="field !h-10 !pl-9 !text-[14px]"
+            placeholder="user@host, IP o sesión"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setIndex((i) => Math.min(i + 1, matches.length - 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setIndex((i) => Math.max(i - 1, 0));
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              } else if (e.key === "Escape" && query) {
+                e.preventDefault();
+                setQuery("");
+              }
+            }}
+          />
+          {/* Lista superpuesta bajo el campo: Recientes y las demás acciones no se corren al escribir. */}
+          {matches.length > 0 && (
+          <ul id={listId} role="listbox" aria-label="Destinos" className="absolute z-10 left-0 right-0 top-full mt-1 p-1 max-h-60 overflow-y-auto bg-panel border border-line rounded-lg shadow-pop">
+            {matches.map(({ session: s, quick }, i) => (
+              <li
+                key={quick ? `quick-${s.type}` : s.id}
+                id={`${id}-opt-${i}`}
+                role="option"
+                aria-selected={i === index}
+                onMouseMove={() => setIndex(i)}
+                // mousedown: el campo no pierde el foco antes de abrir.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => open(s, quick)}
+                className={`flex items-center gap-2.5 px-2.5 h-9 rounded-md cursor-default ${
+                  i === index ? "bg-selected shadow-[inset_2px_0_0_0_var(--accent)]" : ""
+                }`}
+              >
+                {quick ? <QuickBolt size={14} /> : <SessionIcon type={s.type} size={14} />}
+                <span className="flex-1 min-w-0 truncate">
+                  {quick ? `Conexión rápida ${typeLabel[s.type]}` : s.name}
+                  <span className="text-muted">
+                    {" · "}
+                    {sessionTarget(s)}
+                    {!quick && s.folder ? ` · ${s.folder}` : ""}
+                  </span>
+                </span>
+                <span className="text-[11px] font-medium text-muted uppercase">{typeLabel[s.type]}</span>
+              </li>
+            ))}
+          </ul>
+          )}
+        </div>
+        <p id={hintId} role={error ? "alert" : undefined} className={`mt-1.5 text-[11.5px] ${error ? "text-danger" : "text-muted"}`}>
+          {error ? (
+            <>
+              No hay una sesión con ese nombre ni un destino válido. Prueba con <code>admin@10.0.0.1</code> o <code>telnet host 23</code>.
+            </>
+          ) : (
+            <>
+              Enter conecta por SSH; escribe <code>telnet host</code> para Telnet.{" "}
+              <button type="button" onClick={onQuick} className="underline underline-offset-2 hover:text-fg rounded-sm">
+                Serial u opciones avanzadas ({modLabel}O)
+              </button>
+            </>
+          )}
+        </p>
+
+        {recent.length > 0 && (
+          <section aria-labelledby={`${id}-recent`} className="mt-5">
+            <h2 id={`${id}-recent`} className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
+              Recientes
+            </h2>
+            <ul className="space-y-0.5">
+              {recent.map((s, i) => (
+                <li key={`${quickTarget(s)}-${i}`}>
+                  <button
+                    onClick={() => open(s, true)}
+                    title={`Conectar a ${sessionTarget(s)} (${typeLabel[s.type]})`}
+                    className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md hover:bg-hover text-left"
+                  >
+                    <History aria-hidden size={14} className="text-muted shrink-0" />
+                    <span className="flex-1 min-w-0 truncate">{sessionTarget(s)}</span>
+                    <span className="text-[11px] font-medium text-muted uppercase">{typeLabel[s.type]}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <nav aria-label="Otras acciones" className="mt-5 pt-4 border-t border-line flex flex-wrap gap-x-1 gap-y-0.5 text-[12.5px]">
+          {secondary.map(([icon, label, key, fn]) => (
             <button
-              key={i}
+              key={label}
               onClick={fn}
-              title={`${label} (${key})`}
-              className="w-full flex items-center gap-2.5 px-3 h-9 rounded-lg hover:bg-hover text-left"
+              title={key ? `${label} (${key})` : label}
+              className="flex items-center gap-1.5 h-7 px-2 rounded-md text-muted hover:text-fg hover:bg-hover"
             >
-              <span aria-hidden className="text-muted shrink-0">{icon}</span>
-              <span className="flex-1 min-w-0 truncate">{label}</span>
-              <kbd className="text-[11px] text-muted font-sans">{key}</kbd>
+              <span aria-hidden className="shrink-0">{icon}</span>
+              {label}
             </button>
           ))}
-        </div>
+        </nav>
+        <button
+          onClick={onPalette}
+          className="mt-2 flex items-center gap-1.5 h-7 px-2 rounded-md text-[12.5px] text-muted hover:text-fg hover:bg-hover"
+        >
+          <SearchIcon aria-hidden size={14} className="shrink-0" />
+          Todo lo demás:
+          <kbd className="font-sans text-fg">{modLabel}K</kbd>
+        </button>
       </div>
     </div>
   );
