@@ -59,4 +59,11 @@ assert.deepEqual(D.loghostCommands("192.0.2.10", 1514), {
 const ui = readFileSync(new URL("../../src/components/tools/SyslogTool.tsx", import.meta.url), "utf8");
 assert.match(ui, /verificar en tu\s+versión/, "la interfaz pide verificar el parámetro port en la versión del equipo");
 
+// ---------- Selección del gestor de archivos ----------
+// Un archivo borrado de la carpeta deja de estar seleccionado: "Enviar" no arma un copy de algo que no existe.
+const sel = new Set(["a.bin", "b.cfg"]);
+assert.deepEqual([...D.keepPresent(sel, ["a.bin", "c.txt"])], ["a.bin"]);
+assert.equal(D.keepPresent(sel, ["a.bin", "b.cfg", "c.txt"]), sel, "sin cambios devuelve el mismo Set");
+assert.equal(D.keepPresent(sel, []).size, 0);
+
 console.log("transfer: ok");

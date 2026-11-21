@@ -955,15 +955,11 @@ fn tftp_files(state: State<'_, AppState>) -> Vec<(String, u64)> {
     v
 }
 
-/// Copia un archivo elegido por el usuario a la carpeta servida por TFTP/HTTP.
+/// Copia un archivo elegido por el usuario a la carpeta servida por TFTP/HTTP, con un nombre que el
+/// equipo pueda usar en un comando y sin pisar ni truncar lo que ya está (ver `servers::add_shared`).
 #[tauri::command(async)]
-fn tftp_add(path: String, state: State<'_, AppState>) -> Result<String, String> {
-    let src = std::path::PathBuf::from(&path);
-    let name = src.file_name().ok_or("Ruta inválida")?.to_owned();
-    let dir = state.data_dir.join("tftp");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::copy(&src, dir.join(&name)).map_err(|e| e.to_string())?;
-    Ok(name.to_string_lossy().into_owned())
+fn tftp_add(path: String, state: State<'_, AppState>) -> Result<servers::Added, String> {
+    servers::add_shared(std::path::Path::new(&path), &state.data_dir.join("tftp"))
 }
 
 /// MD5 de un archivo de la carpeta compartida (para verificar firmware en el equipo).

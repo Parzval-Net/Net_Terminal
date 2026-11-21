@@ -11,10 +11,15 @@ import {
   Action,
   Proto,
   RECOVERY_VENDORS,
+  type RecoveryValue,
   VENDORS,
   Vendor,
+  type SharedAdded,
+  addedNote,
   backupName,
+  commandSafeName,
   detectOs,
+  deviceFileName,
   guessVendor,
   ipAllowed,
   isLinkLocal,
@@ -23,6 +28,7 @@ import {
   rate,
   recipe,
   recoveryGuide,
+  recoveryNetIssues,
   sameSubnet,
   suggestDeviceIp,
 } from "../../lib/transferCmds";
@@ -44,6 +50,8 @@ interface Transfer {
   total: number | null;
   done: boolean;
   error: string | null;
+  /** "client": es este PC el que descarga o sube a `client` (cliente FTP), no un equipo. */
+  origin?: "client";
   /** Primera y última vez que llegó un aviso (para la hora de inicio y la velocidad). */
   start: number;
   ts: number;
@@ -319,14 +327,18 @@ function SendReceive({
     setError("");
     setNote(list.length === 1 ? "Copiando a la carpeta compartida…" : `Copiando ${list.length} archivos a la carpeta compartida…`);
     let last = "";
+    const notes: string[] = [];
     for (const p of list) {
       try {
-        last = await invoke<string>("tftp_add", { path: p });
+        const a = await invoke<SharedAdded>("tftp_add", { path: p });
+        last = a.name;
+        notes.push(addedNote(a));
       } catch (e) {
         setError(String(e));
       }
     }
-    setNote("");
+    // Si quedó con otro nombre (espacios) o ya estaba, se avisa; el comando usa el nombre final.
+    setNote(notes.filter(Boolean).join(" "));
     reload();
     if (last) setSelFile(last);
   };
@@ -351,7 +363,9 @@ function SendReceive({
       .catch((e) => setMd5((m) => ({ ...m, [name]: `Error: ${e}` })));
   };
 
-  const file = files.some(([n]) => n === selFile) ? selFile : (files[0]?.[0] ?? "");
+  // Elegido por el usuario (clic o recién agregado); si no, se propone el primero y el paso 2 lo pide confirmar.
+  const fileChosen = files.some(([n]) => n === selFile);
+  const file = fileChosen ? selFile : (files[0]?.[0] ?? "");
   const rejects = (["tftp", "http"] as const).filter((k) => running.includes(k) && (stats[k]?.rejected ?? 0) > 0);
   const active = transfers.filter((t) => !t.done).length;
   const finished = transfers.length - active;
@@ -419,6 +433,8 @@ function SendReceive({
       {/* La tarea principal: equipo y tarea, archivo, verificación y comando. */}
       <Assistant
         file={file}
+        fileChosen={fileChosen}
+        chooseFile={setSelFile}
         terminals={terminals}
         tftpOn={tftpOn}
         httpOn={httpOn}
@@ -542,7 +558,14 @@ function SendReceive({
                     <p className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted tabular-nums">
                       <span className="font-mono">{t.client}</span>
                       <span>
-                        {t.proto.toUpperCase()} · {t.dir === "get" ? "el equipo descarga" : "el equipo envía"}
+                        {t.proto.toUpperCase()} ·{" "}
+                        {t.origin === "client"
+                          ? t.dir === "get"
+                            ? `este PC descarga de ${t.client}`
+                            : `este PC sube a ${t.client}`
+                          : t.dir === "get"
+                            ? "el equipo descarga"
+                            : "el equipo envía"}
                       </span>
                       <span>inicio {time(t.start)}</span>
                       <span>
@@ -668,6 +691,8 @@ const ASSIST_KEY = "transfer.assist";
  */
 function Assistant({
   file,
+  fileChosen,
+  chooseFile,
   terminals,
   tftpOn,
   httpOn,
@@ -688,6 +713,9 @@ function Assistant({
   filesActions,
 }: {
   file: string;
+  /** El usuario eligió el archivo (si no, `file` es el primero de la carpeta, propuesto). */
+  fileChosen: boolean;
+  chooseFile: (name: string) => void;
   terminals: TerminalRef[];
   tftpOn: boolean;
   httpOn: boolean;
@@ -717,12 +745,15 @@ function Assistant({
   const [remote, setRemote] = useState("");
   const [sent, setSent] = useState("");
   const [mode, setMode] = useState<"command" | "recover">("command");
+  // El paso 1 queda listo con una pestaña o una elección del usuario, no con los valores de inicio.
+  const [touched, setTouched] = useState(false);
   const canRecover = RECOVERY_VENDORS.includes(vendor);
   const recovering = mode === "recover" && canRecover;
 
   useEffect(() => persist(ASSIST_KEY, { vendor, action, proto }), [vendor, action, proto]);
   // Al elegir una pestaña se sugiere su fabricante (plataforma detectada o resaltado).
   const chooseTerm = (id: string) => {
+    setTouched(true);
     setConn(id);
     setSent("");
     const t = terminals.find((x) => x.connId === id);
@@ -738,19 +769,33 @@ function Assistant({
   const firstAction = ACTIONS.find((a) => protocolsFor(vendor, a.id).length)?.id ?? "firmware";
   const act = protos.length ? action : firstAction;
   const needsFile = act === "firmware" || act === "copy";
-  const name = needsFile ? file : remote.trim() || (act === "backup" ? backupName(term?.name ?? "equipo", new Date()) : "");
+  // "flash:config.txt" se escribe como config.txt: el comando ya agrega el sistema de archivos.
+  const pulled = act === "pull" ? deviceFileName(remote) : remote.trim();
+  const name = needsFile ? file : pulled || (act === "backup" ? backupName(term?.name ?? "equipo", new Date()) : "");
   const r = p ? recipe(vendor, act, p, { ip: p === "http" ? httpIp : tftpIp, port: httpPort, file: name }) : null;
   const serverOn = p === "http" ? httpOn : tftpOn;
 
   const checks: CheckItem[] = [];
+  // Sin IP el comando lleva IP_DE_ESTE_PC: no se da por listo.
+  checks.push({ ok: !!pcIp, text: pcIp ? `IP de este PC: ${pcIp}` : "Elige la IP de este PC en la barra del servidor" });
   if (p) checks.push({ ok: serverOn, text: serverOn ? `Servidor ${p.toUpperCase()} activo` : `El servidor ${p.toUpperCase()} está detenido`, fix: serverOn ? undefined : { label: `Iniciar ${p.toUpperCase()}`, run: () => startServer(p) } });
   if (r?.needsWrite) checks.push({ ok: tftpWrite, text: tftpWrite ? "El equipo puede enviar archivos a este PC" : "Falta permitir que el equipo envíe archivos", fix: tftpWrite ? undefined : { label: "Permitir", run: allowWrite } });
-  if (needsFile) checks.push({ ok: !!file, text: file ? `Archivo: ${file}` : "Elige o agrega el archivo en el paso 2" });
-  if (act === "pull") checks.push({ ok: !!remote.trim(), text: remote.trim() ? `Archivo del equipo: ${remote.trim()}` : "Escribe en el paso 2 el nombre del archivo en el equipo" });
+  if (needsFile)
+    checks.push(
+      !file
+        ? { ok: false, text: "Elige o agrega el archivo en el paso 2" }
+        : fileChosen
+          ? { ok: true, text: `Archivo: ${file}` }
+          : { ok: false, text: `Confirma el archivo del paso 2 (se propone ${file})`, fix: { label: "Usar este", run: () => chooseFile(file) } },
+    );
+  if (act === "pull") checks.push({ ok: !!pulled, text: pulled ? `Archivo del equipo: ${pulled}` : "Escribe en el paso 2 el nombre del archivo en el equipo" });
+  // Con espacios u otros caracteres el comando toma argumentos de más o la URL queda mal formada.
+  if (name && !commandSafeName(name))
+    checks.push({ ok: false, text: `"${name}" tiene espacios o caracteres especiales: renómbralo con letras, números, punto, guion o guion bajo` });
   const ready = !!r && checks.every((c) => c.ok);
   // Paso 2 listo: hay archivo elegido, o el nombre del archivo que se trae del equipo (un respaldo
   // tiene nombre sugerido).
-  const fileDone = needsFile || recovering ? !!file : act === "pull" ? !!remote.trim() : true;
+  const fileDone = needsFile || recovering ? !!file && fileChosen : act === "pull" ? !!pulled : true;
 
   const write = () => {
     if (!r || !term) return;
@@ -778,7 +823,7 @@ function Assistant({
     // Flex en vez de grid: el paso 1 crece más que Archivo (3:2) y cada tarjeta queda con su alto
     // natural (items-start), sin estirarse a la altura de la vecina.
     <ol aria-label="Enviar o recibir un archivo en 3 pasos" className="flex flex-wrap items-start gap-4">
-      <Step n={1} title="Equipo y tarea" hint={`${term ? term.name : "Sin pestaña (solo copiar)"} · ${vendorLabel} · ${taskLabel}`} done={recovering || !!r} className="flex-[3_1_460px]">
+      <Step n={1} title="Equipo y tarea" hint={`${term ? term.name : "Sin pestaña (solo copiar)"} · ${vendorLabel} · ${taskLabel}`} done={(!!term || touched) && (recovering || !!r)} className="flex-[3_1_460px]">
         {/* Bajo 30rem (480 px) del paso, selects y tareas van en una columna para no cortar textos. */}
         <div className="@container space-y-3">
           <div className="grid gap-3 @[30rem]:grid-cols-2">
@@ -794,7 +839,14 @@ function Assistant({
               </select>
             </Label>
             <Label text="Fabricante">
-              <select className="field" value={vendor} onChange={(e) => setVendor(e.target.value as Vendor)}>
+              <select
+                className="field"
+                value={vendor}
+                onChange={(e) => {
+                  setTouched(true);
+                  setVendor(e.target.value as Vendor);
+                }}
+              >
                 {VENDORS.map((v) => (
                   <option key={v.id} value={v.id}>
                     {v.label}
@@ -817,6 +869,7 @@ function Assistant({
                   disabled={!can}
                   title={can ? a.hint : `${vendorLabel} no lo hace con TFTP/HTTP desde este asistente`}
                   onClick={() => {
+                    setTouched(true);
                     setAction(a.id);
                     setMode("command");
                   }}
@@ -833,7 +886,10 @@ function Assistant({
               aria-checked={recovering}
               disabled={!canRecover}
               title={canRecover ? "El equipo no arranca o no tiene firmware: se carga desde su menú de arranque por la consola" : "Aún sin guía de recuperación para este fabricante"}
-              onClick={() => setMode("recover")}
+              onClick={() => {
+                setTouched(true);
+                setMode("recover");
+              }}
               className={`@[30rem]:col-span-2 px-2.5 py-1.5 rounded-md border text-left text-[12px] disabled:opacity-40 ${recovering ? "border-[var(--accent)] bg-[var(--selected)]" : "border-line hover:bg-hover"}`}
             >
               <span className="block font-medium">Recuperar desde el arranque (consola)</span>
@@ -845,7 +901,15 @@ function Assistant({
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11.5px] font-medium text-muted">Protocolo</span>
               <span title="TFTP: el más compatible · HTTP: más rápido para imágenes grandes">
-                <Segmented label="Protocolo" value={p ?? "tftp"} options={protos.map((x) => [x, x.toUpperCase()] as const)} onChange={setProto} />
+                <Segmented
+                  label="Protocolo"
+                  value={p ?? "tftp"}
+                  options={protos.map((x) => [x, x.toUpperCase()] as const)}
+                  onChange={(x) => {
+                    setTouched(true);
+                    setProto(x);
+                  }}
+                />
               </span>
             </div>
           )}
@@ -873,7 +937,7 @@ function Assistant({
             <input
               className="field font-mono"
               value={remote}
-              placeholder={act === "backup" ? backupName(term?.name ?? "equipo", new Date()) : vendor === "huawei" ? "vrpcfg.zip" : "flash:archivo"}
+              placeholder={act === "backup" ? backupName(term?.name ?? "equipo", new Date()) : vendor === "huawei" ? "vrpcfg.zip" : "config.txt"}
               onChange={(e) => setRemote(e.target.value)}
             />
           </Label>
@@ -892,6 +956,7 @@ function Assistant({
           <Recovery
             vendor={vendor}
             file={file}
+            onConfirm={onConfirm}
             pcIp={pcIp}
             term={term}
             tftpOn={tftpOn}
@@ -994,6 +1059,7 @@ function OsTips() {
 function Recovery({
   vendor,
   file,
+  onConfirm,
   pcIp,
   term,
   tftpOn,
@@ -1006,6 +1072,7 @@ function Recovery({
 }: {
   vendor: Vendor;
   file: string;
+  onConfirm: (req: { title: string; message: string; label: string; danger?: boolean; action: () => void }) => void;
   pcIp: string;
   term?: TerminalRef;
   tftpOn: boolean;
@@ -1040,15 +1107,22 @@ function Recovery({
     { ok: tftpOn, text: tftpOn ? "Servidor TFTP activo" : "El servidor TFTP está detenido", fix: tftpOn || tftpPort !== 69 ? undefined : { label: "Iniciar TFTP", run: startTftp } },
     { ok: !!file, text: file ? `Imagen: ${file}` : "Elige o agrega la imagen en el paso 2" },
     { ok: sameSubnet(pcIp, dev, mask), text: sameSubnet(pcIp, dev, mask) ? `Equipo ${dev} en la misma red que este PC` : `El equipo (${dev}) y este PC no están en la misma red con ${mask}` },
+    ...recoveryNetIssues(vendor, { pcIp, deviceIp: dev, mask, gateway: gw }).map((text) => ({ ok: false, text })),
     { ok: serial, text: serial ? `Consola: ${term!.name}` : term ? `${term.name} no es una consola serial: el menú de arranque solo sale por el puerto de consola` : "Elige en el paso 1 la pestaña de la consola serial para enviar los valores" },
   ];
 
-  const send = (value: string, key?: boolean) => {
-    if (!term) return;
+  // Los valores del menú de arranque solo van a una consola serial; los de la CLI normal (cli), a cualquier pestaña.
+  const canSend = (v: RecoveryValue) => !!term && (serial || !!v.cli);
+  const send = (v: RecoveryValue) => {
+    if (!term || !canSend(v)) return;
     // Las teclas de menú del boot loader van solas; los valores y comandos, con Enter.
-    invoke("write", { id: term.connId, data: key ? value : `${value}\r` })
-      .then(() => setSent(`Enviado a ${term.name}: ${value}`))
-      .catch((e) => setSent(`No se pudo enviar: ${e}`));
+    const go = () =>
+      invoke("write", { id: term.connId, data: v.key ? v.value : `${v.value}\r` })
+        .then(() => setSent(`Enviado a ${term.name}: ${v.value}`))
+        .catch((e) => setSent(`No se pudo enviar: ${e}`));
+    // Lo que borra, reemplaza o reinicia se confirma antes: se envía con Enter y el equipo actúa de inmediato.
+    if (v.confirm) onConfirm({ title: `Enviar "${v.value}" a ${term.name}`, message: v.confirm, label: "Enviar", danger: true, action: go });
+    else go();
   };
 
   return (
@@ -1084,7 +1158,22 @@ function Recovery({
                         <CopyText text={v.value} />
                       </span>
                       {v.send && (
-                        <Btn kind="ghost" className="!h-6 !px-2 !text-[11.5px]" disabled={!term} title={term ? (v.key ? `Presiona ${v.value} en ${term.name}` : `Escribe ${v.value} y Enter en ${term.name}`) : "Elige la pestaña de la consola en el paso 1"} onClick={() => send(v.value, v.key)}>
+                        <Btn
+                          kind="ghost"
+                          className="!h-6 !px-2 !text-[11.5px]"
+                          disabled={!canSend(v)}
+                          aria-label={`Enviar ${v.label}`}
+                          title={
+                            !term
+                              ? "Elige la pestaña de la consola en el paso 1"
+                              : !canSend(v)
+                                ? `${term.name} no es una consola serial: el menú de arranque solo responde por la consola`
+                                : v.key
+                                  ? `Presiona ${v.value} en ${term.name}`
+                                  : `Escribe ${v.value} y Enter en ${term.name}`
+                          }
+                          onClick={() => send(v)}
+                        >
                           <SquareTerminal size={12} /> Enviar
                         </Btn>
                       )}

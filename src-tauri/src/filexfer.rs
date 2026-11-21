@@ -25,6 +25,8 @@ struct Patterns {
     prompt: Regex,
     confirm: Regex,
     yes_no: Regex,
+    /// Pregunta que borra, formatea, sobrescribe o reinicia: no se confirma nunca sola.
+    destructive: Regex,
     error: Regex,
 }
 
@@ -54,13 +56,18 @@ fn patterns() -> &'static Patterns {
         confirm: Regex::new(r"(?i)(\[confirm\]|\[[^\]\n]*\]\s*\?)\s*$").unwrap(),
         // Huawei / H3C: "(y/n)[n]:", "[Y/N]:"
         yes_no: Regex::new(r"(?i)(\(y/n\)(\[\w\])?|\[y/n\])\s*:?\s*$").unwrap(),
+        // "Erase flash: before copying? [confirm]" (IOS clase B/C), "Do you want to over write? [confirm]",
+        // "Delete filename [x]?", "Proceed with reload? [confirm]", VRP "Overwrite it? (y/n)[n]:" y
+        // "Format flash:? (y/n)", FortiOS "...and reboot the system! Do you want to continue? (y/n)".
+        destructive: Regex::new(r"(?i)\b(eras(e|ing)|format(ting)?|delet(e|ing)|over[\s-]?writ(e|ten|ing)|reload(ing)?|reboot(ing)?|squeez(e|ing)|restart(ing)?)\b").unwrap(),
         error: Regex::new(r"(?im)^\s*(%\s*error|%\s*invalid|error:|.*timed out|.*no such file|.*permission denied|.*not enough space|.*failed)").unwrap(),
     })
 }
 
 /// Ejecuta un comando en la sesión y transmite su salida. Responde Enter a
 /// confirmaciones con valor por defecto, "y" a preguntas sí/no y espacio a "--More--".
-/// Termina cuando vuelve a aparecer el prompt o vence el plazo.
+/// Las preguntas destructivas (borrar, formatear, sobrescribir, reiniciar) se responden que no
+/// siempre (ver `destructive_question`). Termina cuando vuelve a aparecer el prompt o vence el plazo.
 /// Tope de la salida de un comando: evita agotar memoria si el equipo no deja de enviar datos.
 const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 /// Texto final que se conserva para reconocer preguntas de confirmación.
@@ -90,7 +97,7 @@ enum Auto {
 struct AutoReplies {
     pages: u32,
     confirms: u32,
-    /// Pregunta del equipo respondida con "no" (solo con `answer = false`).
+    /// Pregunta del equipo respondida con "no" (con `answer = false`, o destructiva con cualquier `answer`).
     declined: Option<String>,
 }
 
@@ -109,6 +116,9 @@ impl AutoReplies {
         if self.confirms > MAX_CONFIRMS {
             return Auto::Stop(TOO_MANY_CONFIRMS);
         }
+        // "Erase flash: before copying? [confirm]" dentro de un copy borraría la imagen en uso: lo que
+        // borra, formatea, sobrescribe o reinicia lo decide el usuario en la terminal, aunque `answer`.
+        let answer = answer && !destructive_question(p, tail);
         if !answer {
             self.declined.get_or_insert_with(|| tail.lines().last().unwrap_or("").trim().chars().take(200).collect());
         }
@@ -119,6 +129,31 @@ impl AutoReplies {
             (false, false) => "\x03",
         })
     }
+}
+
+/// La pregunta del equipo borra, formatea, sobrescribe o reinicia. Se miran las últimas 3 líneas
+/// (FortiOS avisa el reinicio en la línea anterior a "Do you want to continue? (y/n)"), sin lo que va
+/// entre corchetes (el valor por defecto) ni palabras con "/", ":" o "." en medio (rutas y nombres de
+/// archivo): "Destination filename [erase-me.bin]?" o "tftp://10.0.0.5/format.cfg" no cuentan.
+fn destructive_question(p: &Patterns, tail: &str) -> bool {
+    tail.lines().rev().map(str::trim).filter(|l| !l.is_empty()).take(3).any(|line| {
+        let mut plain = String::with_capacity(line.len());
+        let mut depth = 0u32;
+        for c in line.chars() {
+            match c {
+                '[' => depth += 1,
+                ']' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => plain.push(c),
+                _ => {}
+            }
+        }
+        let words: Vec<&str> = plain
+            .split_whitespace()
+            .map(|w| w.trim_end_matches(['?', '!', ',', ';', ':', '.']))
+            .filter(|w| !w.contains(['/', ':', '.', '\\']))
+            .collect();
+        p.destructive.is_match(&words.join(" "))
+    })
 }
 
 /// Un solo comando a la vez por sesión: dos trabajos en paralelo escribirían su comando mientras el
@@ -164,7 +199,8 @@ fn take_turn<'a>(lock: &'a Mutex<()>, max: Duration, mut waiting: impl FnMut()) 
 }
 
 /// `answer = false`: no confirma nada; ante una pregunta responde que no (Ctrl+C en "[confirm]"),
-/// espera el prompt y lo informa en el resultado (`declined`).
+/// espera el prompt y lo informa en el resultado (`declined`). Con `answer = true` pasa lo mismo con
+/// las preguntas destructivas (`destructive_question`): quien llama muestra `declined`.
 pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, answer: bool) -> Result<String, String> {
     if command.contains(['\r', '\n']) {
         return Err("Un solo comando por operación".into());
@@ -199,7 +235,7 @@ pub struct RunOutcome {
     pub output: String,
     /// Sin errores reconocidos en la salida ni preguntas rechazadas.
     pub ok: bool,
-    /// Pregunta del equipo respondida con "no" (solo con `answer = false`).
+    /// Pregunta del equipo respondida con "no" (con `answer = false`, o destructiva con cualquier `answer`).
     pub declined: Option<String>,
     /// Por qué se cortó (plazo, sesión cerrada, tope de salida, solo lectura).
     pub error: Option<String>,
@@ -534,7 +570,38 @@ mod tests {
         assert_eq!(auto.next(p, "Are you sure to download file? (y/n)[n]:", false), Auto::Reply("n\r"));
         assert_eq!(auto.next(p, "Proceed with reload? [confirm]", false), Auto::Reply("\x03"));
         assert_eq!(auto.declined.as_deref(), Some("Are you sure to download file? (y/n)[n]:"));
-        assert_eq!(AutoReplies::default().next(p, "Overwrite? (y/n)[n]:", true), Auto::Reply("y\r"));
+        assert_eq!(AutoReplies::default().next(p, "Copy flash:/a.cfg to flash:/b.cfg? (y/n)[n]:", true), Auto::Reply("y\r"));
+    }
+
+    #[test]
+    fn destructive_questions_are_declined_even_when_answering() {
+        let p = patterns();
+        // Borrar, formatear, sobrescribir o reiniciar: "no" (Ctrl+C o "n") y queda en `declined`.
+        for (tail, reply) in [
+            ("Loading c2960.bin from 10.0.0.5 (via Vlan1): !!!\nErase flash: before copying? [confirm]", "\x03"),
+            ("%Warning:There is a file already existing with this name\nDo you want to over write? [confirm]", "\x03"),
+            ("Delete filename [old.bin]?", "\x03"),
+            ("Proceed with reload? [confirm]", "\x03"),
+            ("Info: The file flash:/b.cfg exists. Overwrite it? (y/n)[n]:", "n\r"),
+            ("All data will be lost. Format flash:? (y/n)[n]:", "n\r"),
+            ("This operation will replace the current firmware version and reboot the system!\nDo you want to continue? (y/n)", "n\r"),
+            ("Squeeze operation may take a while. Continue? [confirm]", "\x03"),
+        ] {
+            let mut auto = AutoReplies::default();
+            assert_eq!(auto.next(p, tail, true), Auto::Reply(reply), "{tail}");
+            assert_eq!(auto.declined.as_deref(), Some(tail.lines().last().unwrap()), "{tail}");
+        }
+        // Nombres de archivo, rutas y valores por defecto con esas palabras no cuentan.
+        for tail in [
+            "Destination filename [erase-me.bin]?",
+            "Accessing tftp://10.0.0.5/format.cfg...\nDestination filename [format.cfg]?",
+            "Address or name of remote host [10.0.0.5]?",
+            "Destination filename [startup-config]?",
+        ] {
+            let mut auto = AutoReplies::default();
+            assert_eq!(auto.next(p, tail, true), Auto::Reply("\r"), "{tail}");
+            assert_eq!(auto.declined, None, "{tail}");
+        }
     }
 
     #[test]

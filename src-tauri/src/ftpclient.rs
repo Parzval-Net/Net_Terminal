@@ -195,7 +195,8 @@ pub fn ftp_list(params: FtpParams) -> Result<Listing, String> {
     Ok(Listing { cwd, entries, tls: params.tls })
 }
 
-/// Progreso en el mismo evento "transfer" que TFTP/HTTP (lista de transferencias).
+/// Progreso en el mismo evento "transfer" que TFTP/HTTP (lista de transferencias). `origin: "client"`:
+/// es este PC el que descarga o sube (`dir` "get" o "put") a `client`, el servidor remoto.
 struct Ev<'a> {
     app: &'a AppHandle,
     id: &'a str,
@@ -208,7 +209,7 @@ impl Ev<'_> {
     fn send(&self, bytes: u64, total: Option<u64>, error: Option<String>, done: bool) {
         let _ = self.app.emit(
             "transfer",
-            json!({ "id": self.id, "proto": "ftp", "client": self.host, "file": self.file, "dir": self.dir, "bytes": bytes, "total": total, "done": done, "error": error }),
+            json!({ "id": self.id, "proto": "ftp", "origin": "client", "client": self.host, "file": self.file, "dir": self.dir, "bytes": bytes, "total": total, "done": done, "error": error }),
         );
     }
 }
