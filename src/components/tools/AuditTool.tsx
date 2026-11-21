@@ -28,7 +28,8 @@ import type { Risk } from "../../lib/packs";
 import { AUDIT_VENDORS, MAX_CONFIG_BYTES, VENDOR_LABEL, detectVendor, type AuditVendor } from "../../lib/auditParse";
 import { ISO_TITLES, LAYER_LABEL, SEVERITY_LABEL, SEVERITY_WEIGHT, STATUS_LABEL, isIsoFramework, resolveRules, validateRulePack, type Layer, type ParamSpec, type RulePack, type Severity } from "../../lib/auditRules";
 import { BUILTIN_RULE_PACKS } from "../../lib/auditBuiltin";
-import { AUDIT_DISCLAIMER, RISK_LABEL, auditToCsv, auditToHtml, auditToJson, buildPlan, filterParams, fmtPct, paramValueError, runAudit, type AuditResult, type Finding, type RiskLevel } from "../../lib/audit";
+import { AUDIT_DISCLAIMER, RISK_LABEL, auditToCsv, auditToHtml, auditToJson, buildPlan, filterParams, fmtPct, paramValueError, type AuditResult, type Finding, type RiskLevel } from "../../lib/audit";
+import { runAuditAsync } from "../../lib/auditAsync";
 import {
   READ_COMMAND,
   USER_PACK_ID,
@@ -301,15 +302,21 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
     persist(FILTER_PARAMS_KEY, all);
   };
 
+  // La auditoría corre en un Web Worker (lib/auditAsync): la interfaz sigue respondiendo con
+  // configuraciones grandes. Solo se aplica el resultado de la última pedida.
+  const auditSeq = useRef(0);
   const audit = useCallback(
-    (l: Loaded, v: "auto" | AuditVendor, dev: string, quiet = false) => {
+    async (l: Loaded, v: "auto" | AuditVendor, dev: string, quiet = false): Promise<AuditResult | null> => {
+      const seq = ++auditSeq.current;
       try {
-        const r = runAudit({ text: l.text, vendor: v === "auto" ? undefined : v, device: dev.trim() || undefined, source: l.source }, resolved, { params: auditParams });
+        const r = await runAuditAsync({ text: l.text, vendor: v === "auto" ? undefined : v, device: dev.trim() || undefined, source: l.source }, resolved, { params: auditParams });
+        if (seq !== auditSeq.current) return null;
         setResult(r);
         setAuditError("");
         if (!quiet) setMsg("");
         return r;
       } catch (e) {
+        if (seq !== auditSeq.current) return null;
         setResult(null);
         setAuditError(String(e instanceof Error ? e.message : e));
         return null;
@@ -321,9 +328,7 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
   const runNow = async () => {
     if (!loaded) return;
     setRunning(true);
-    // Se cede el hilo para que se vea "Auditando…" antes del cálculo.
-    await new Promise((r) => setTimeout(r, 0));
-    const r = audit(loaded, vendorChoice, device);
+    const r = await audit(loaded, vendorChoice, device);
     setRunning(false);
     if (r) {
       setSelection(new Set(defaultSelection(r)));
@@ -336,8 +341,9 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
     if (lastAudit.current === audit) return;
     lastAudit.current = audit;
     if (loaded && result) {
-      const r = audit(loaded, vendorChoice, device, true);
-      if (r) setSelection((s) => new Set([...s].filter((id) => plannable(r).some((f) => f.ruleId === id))));
+      void audit(loaded, vendorChoice, device, true).then((r) => {
+        if (r) setSelection((s) => new Set([...s].filter((id) => plannable(r).some((f) => f.ruleId === id))));
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audit]);

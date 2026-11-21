@@ -95,8 +95,35 @@ async function page(scene, wait = 3500) {
   return p;
 }
 
+/**
+ * Espera a que la página quede quieta (600 ms sin tareas largas, máximo 10 s): cada escenario mide
+ * la interacción, no lo que queda pendiente de la carga (en CI, más lento, la carga se extiende).
+ */
+async function settle(p) {
+  await p.evaluate(
+    () =>
+      new Promise((done) => {
+        let last = performance.now();
+        const obs = new PerformanceObserver((l) => {
+          for (const e of l.getEntries()) last = Math.max(last, e.startTime + e.duration);
+        });
+        obs.observe({ type: "longtask", buffered: true });
+        const start = performance.now();
+        const tick = () => {
+          const now = performance.now();
+          if (now - last >= 600 || now - start > 10000) {
+            obs.disconnect();
+            done();
+          } else setTimeout(tick, 100);
+        };
+        tick();
+      }),
+  );
+}
+
 /** Cuadros durante `action`: fps promedio y cuadros lentos (> 18 ms). */
 async function frames(p, name, action) {
+  await settle(p);
   await p.evaluate(() => {
     window.__f = [];
     window.__run = true;
