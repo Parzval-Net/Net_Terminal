@@ -46,6 +46,8 @@ interface Props {
   /** Conexión de una pestaña, si sigue conectada. */
   connOf: (tabId: string) => string | undefined;
   onClose: () => void;
+  /** Script precargado por otra herramienta (plan de Auditoría): reemplaza el borrador, no se ejecuta solo. */
+  initialScript?: string;
 }
 
 /**
@@ -72,7 +74,7 @@ const statusColor = { pending: "text-muted", running: "text-accent", ok: "text-o
  * del equipo salvo que se pida (o sea un comando de guardado).
  */
 export function CliLab(p: Props) {
-  const [text, setText] = useState(() => stored(DRAFT, { text: "" }).text ?? "");
+  const [text, setText] = useState(() => p.initialScript ?? stored(DRAFT, { text: "" }).text ?? "");
   /** Nota abierta en el Lab y su texto guardado (para saber si hay cambios). */
   const [note, setNote] = useState<{ name: string; saved: string } | null>(null);
   const [notes, setNotes] = useState<NoteInfo[]>([]);
@@ -84,7 +86,9 @@ export function CliLab(p: Props) {
   const [values, setValues] = useState<Record<string, string>>({});
   const [confirm, setConfirm] = useState<{ text: string; shown: string; resolved: Resolved } | null>(null);
   const [view, setView] = useState<string | null>(null);
-  const [msg, setMsg] = useState("");
+  const [msg, setMsg] = useState(() =>
+    p.initialScript ? "Script precargado desde otra herramienta: revísalo, completa las variables y elige el destino. Nada se envía sin confirmar." : "",
+  );
   /** Nombre en edición al guardar un script nuevo (sin window.prompt: no existe en todas las webviews). */
   const [naming, setNaming] = useState<string | null>(null);
   /** Nota elegida con cambios sin guardar: se confirma antes de reemplazar el texto. */

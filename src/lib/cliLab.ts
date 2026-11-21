@@ -98,10 +98,22 @@ export function scriptLines(text: string): string[] {
 export const cliError = commandError;
 
 const runStore = store<LabRun | null>(null);
-/** Ventana abierta o null (`n` cambia en cada apertura). */
-const openStore = store<{ n: number } | null>(null);
+/**
+ * Ventana abierta o null (`n` cambia en cada apertura). `script`: texto que otra herramienta (por
+ * ejemplo el plan de Auditoría) deja precargado en el editor. Solo se precarga: ejecutarlo sigue
+ * pidiendo la confirmación de equipos y riesgo del Lab.
+ */
+const openStore = store<{ n: number; script?: string } | null>(null);
 export const useLabOpen = () => useSyncExternalStore(openStore.subscribe, openStore.get);
-export const openLab = () => openStore.set({ n: (openStore.get()?.n ?? 0) + 1 });
+/** Estado de apertura actual (fuera de React, para pruebas). */
+export const labOpenState = () => openStore.get();
+/** Tope del script precargado (el editor no está pensado para textos mayores). */
+export const LAB_SCRIPT_MAX = 200_000;
+export const openLab = (script?: unknown) => {
+  // Usado también como manejador de clic: un evento no es un script.
+  const text = typeof script === "string" && script.trim() ? script.slice(0, LAB_SCRIPT_MAX) : undefined;
+  openStore.set({ n: (openStore.get()?.n ?? 0) + 1, ...(text !== undefined ? { script: text } : {}) });
+};
 export const closeLab = () => openStore.set(null);
 let stopFlag = false;
 /** Despierta la espera de la línea en curso al pulsar Detener (el backend no la cancela). */

@@ -1474,6 +1474,7 @@ pub fn walk_full(layout: &Layout) -> Walked {
     let d = &layout.data;
     scan_dir(d, &|n, _| data_root_file(n), &mut out);
     scan_dir(&d.join("notes"), &|n, _| ext_is(n, &["txt"]), &mut out);
+    scan_dir(&d.join(crate::auditrules::DIR), &|n, _| ext_is(n, &["json"]), &mut out);
     if let Ok(rd) = fs::read_dir(d.join("backups")) {
         for e in rd.flatten() {
             if e.file_type().is_ok_and(|t| t.is_dir()) {
@@ -1494,7 +1495,7 @@ pub fn walk_full(layout: &Layout) -> Walked {
     w.found.append(&mut out);
     // Una carpeta de logs no recorre las otras carpetas de la app que pueda contener.
     let canon = |p: &Path| p.canonicalize().ok();
-    let skip: Vec<PathBuf> = ["notes", "backups", "mcp-audit", "tftp", "scripts", "plugins", "command-packs", "syslog"]
+    let skip: Vec<PathBuf> = ["notes", "backups", "mcp-audit", "tftp", "scripts", "plugins", "command-packs", "syslog", crate::auditrules::DIR]
         .iter()
         .filter_map(|s| canon(&d.join(s)))
         .chain(canon(d))

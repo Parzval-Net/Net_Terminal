@@ -1785,6 +1785,7 @@ function Workspace({
       {labOpen && (
         <CliLab
           key={labOpen.n}
+          initialScript={labOpen.script}
           // Comando de guardado según el fabricante de la pestaña activa (su resaltado), no el del catálogo.
           vendor={activeTab && activeTab.session.highlight && activeTab.session.highlight !== "default" ? vendorFor(activeTab.session.highlight) : settings.catalogVendor}
           compiled={notesRules}

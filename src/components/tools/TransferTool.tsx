@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -33,7 +33,7 @@ import {
   suggestDeviceIp,
 } from "../../lib/transferCmds";
 import { Segmented } from "../controls";
-import { Btn, Collapsible, CopyText, IpSelect, Label, Section, StatusPill, Toggle, fmtBytes, ToolHeader } from "./ui";
+import { Btn, Collapsible, CopyText, IpSelect, Label, Section, StatusPill, Step, Toggle, fmtBytes, ToolHeader } from "./ui";
 import { useLocalIp } from "./useLocalIp";
 import { FileManager, ScpRequest, TerminalRef } from "./FileManager";
 import { FtpClientSection, FtpServerSection, SftpSection } from "./FtpPanels";
@@ -629,56 +629,6 @@ function ServerSwitch({ label, detail, on, onToggle }: { label: string; detail: 
         {on ? "Detener" : "Iniciar"}
       </Btn>
     </div>
-  );
-}
-
-/**
- * Paso numerado del flujo de envío. El número (o un check cuando está listo) va junto al título y el
- * estado se anuncia también en texto, no solo con color.
- */
-function Step({
-  n,
-  title,
-  hint,
-  done,
-  right,
-  className = "",
-  children,
-}: {
-  n: number;
-  title: string;
-  hint?: string;
-  done?: boolean;
-  right?: React.ReactNode;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  const id = useId();
-  return (
-    <li aria-labelledby={id} className={`min-w-0 rounded-xl border border-line bg-panel ${className}`}>
-      <header className="flex items-start gap-2.5 px-4 pt-3 pb-2">
-        <span
-          aria-hidden
-          className={`mt-px shrink-0 w-6 h-6 grid place-items-center rounded-full text-[12px] font-semibold tabular-nums ${done ? "bg-ok text-white" : "border-2 border-[var(--accent)] text-[var(--accent)]"}`}
-        >
-          {done ? <Check size={13} strokeWidth={3} /> : n}
-        </span>
-        <div className="flex-1 min-w-0">
-          <h3 id={id} className="text-[13px] font-semibold truncate">
-            <span className="sr-only">Paso {n} de 3: </span>
-            {title}
-            <span className="sr-only">{done ? " (listo)" : " (pendiente)"}</span>
-          </h3>
-          {hint && (
-            <p className="text-[11.5px] text-muted line-clamp-2" title={hint}>
-              {hint}
-            </p>
-          )}
-        </div>
-        {right}
-      </header>
-      <div className="px-4 pb-4">{children}</div>
-    </li>
   );
 }
 
