@@ -1614,3 +1614,14 @@ assert.deepEqual(T.parseDismissed([1, 2]), {});
 }
 
 console.log("topology: ok");
+
+// Restos del paginador en el descubrimiento por consola (forma que entrega el mirror, sin \b ni ESC):
+// la línea del separador de CDP y la del vecino de Huawei quedaban detrás del marcador.
+{
+  const C = await import("../../src/lib/cliText.ts");
+  const blk = (n, local) => `-------------------------\nDevice ID: ${n}\nEntry address(es): \n  IP address: 192.0.2.9\nPlatform: cisco C9300-48P,  Capabilities: Switch\nInterface: ${local},  Port ID (outgoing port): Gi1/0/1\nHoldtime : 150 sec\n`;
+  const raw = blk("sw1", "Gi1/0/1") + " --More--         " + blk("sw2", "Gi1/0/2").trimStart() + blk("sw3", "Gi1/0/3");
+  assert.deepEqual(T.parseCdp(C.stripPager(raw)).map((n) => n.name), ["sw1", "sw2", "sw3"], "CDP: el vecino al inicio de página no se pierde");
+  assert.equal(C.stripPager("  ---- More ----" + " ".repeat(42) + "GE0/0/2"), "GE0/0/2", "VRP");
+  assert.equal(C.stripPager("---(more 45%)---   ge-0/0/1"), "ge-0/0/1", "Junos");
+}

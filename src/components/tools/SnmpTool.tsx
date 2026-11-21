@@ -539,26 +539,31 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
     setBusy(null);
   };
 
-  /** Segunda lectura de los contadores para calcular bits/s por interfaz. */
+  /**
+   * Bits/s por interfaz: dos lecturas propias de los contadores separadas por RATE_INTERVAL, y la
+   * tasa sobre el tiempo real entre ambas. Antes la primera era la de la carga de la tabla (quizá de
+   * hace minutos) y el delta se dividía por 10 s, inflando la tasa.
+   */
   const measure = async () => {
     if (!res?.table) return;
     const t0 = res.table;
     const counters = t0.columns.map((c, i) => (c.fmt === "counter" ? i : -1)).filter((i) => i >= 0);
+    const cols = counters.map((i) => t0.columns[i]);
     setBusy("rates");
     setMsg(`Midiendo durante ${RATE_INTERVAL} s…`);
-    const start = performance.now();
-    await new Promise((r) => setTimeout(r, RATE_INTERVAL * 1000));
     try {
-      const { table: t1 } = await walkColumns(counters.map((i) => t0.columns[i]));
-      const secs = (performance.now() - start) / 1000;
-      const now = new Map(t1.rows.map((r) => [r.index, r.cells]));
+      const { table: a } = await walkColumns(cols);
+      const startA = performance.now();
+      await new Promise((r) => setTimeout(r, RATE_INTERVAL * 1000));
+      const { table: b } = await walkColumns(cols);
+      const secs = (performance.now() - startA) / 1000;
+      const first = new Map(a.rows.map((r) => [r.index, r.cells]));
+      const now = new Map(b.rows.map((r) => [r.index, r.cells]));
       const rates: PresetResult["rates"] = {};
       for (const r of t0.rows) {
+        const c0 = first.get(r.index);
         const c1 = now.get(r.index);
-        rates[r.index] = [
-          rate(r.cells[counters[0]]?.value, c1?.[0]?.value, secs, !res.bits32),
-          rate(r.cells[counters[1]]?.value, c1?.[1]?.value, secs, !res.bits32),
-        ];
+        rates[r.index] = [rate(c0?.[0]?.value, c1?.[0]?.value, secs, !res.bits32), rate(c0?.[1]?.value, c1?.[1]?.value, secs, !res.bits32)];
       }
       setRes({ ...res, rates });
       setMsg(`Tasas promedio de ${secs.toFixed(1)} s`);

@@ -182,6 +182,7 @@ const ERRORS: [RegExp, string][] = [
   [/authentication (?:failed|failure)|permission denied|access denied|login invalid|bad (?:passwords|secrets)|too many authentication/i, "autenticación rechazada"],
   [/unable to negotiate|no matching (?:key|host key|cipher|mac|kex)|ssh version mismatch|protocol (?:major )?version|failed to connect|unable to connect/i, "no se pudo negociar SSH con el equipo"],
   [/connection (?:closed by|reset by)|closed by foreign host/i, "el equipo cerró la conexión"],
+  [/can'?t connect|cannot connect|could not connect|connection to \S+ aborted|connection aborted|unable to open connection/i, "no se pudo conectar con el equipo"],
   [/% ?invalid (?:input|command)|% ?unrecognized command|error: ?unrecognized command|% ?incomplete command/i, "el equipo no reconoce el comando de salto"],
 ];
 
@@ -527,8 +528,10 @@ export function stepHop(job: HopJob, screen: string, now: number): { job: HopJob
     });
   }
   if (s.kind === "prompt") {
-    // Mismo hostname en el pivote y el vecino: llegó si hubo login o banner del vecino antes del prompt.
-    const atPivot = samePrompt(s.name, j.pivot ?? "") && (!!err || !arrivedSameName(after));
+    // El prompt es el del pivote: si el vecino esperado tiene otro nombre, se volvió al pivote (un
+    // fallo con un mensaje no reconocido, p. ej. "Error: Can't connect" de VRP). Solo con el mismo
+    // hostname en ambos se decide por el login o banner del vecino antes del prompt.
+    const atPivot = samePrompt(s.name, j.pivot ?? "") && (!!err || !expected(j.neighbor, s.name) || !arrivedSameName(after));
     if (!atPivot) {
       if (quiet >= PROMPT_STABLE_MS) {
         const mism = expected(j.neighbor, s.name) ? undefined : `Llegó a ${s.name} y se esperaba ${j.neighbor}.`;

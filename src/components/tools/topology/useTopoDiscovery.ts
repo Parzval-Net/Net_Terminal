@@ -1,6 +1,7 @@
 import { Dispatch, MutableRefObject, SetStateAction, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { runOnDevice } from "../../../lib/deviceRun";
+import { stripPager } from "../../../lib/cliText";
 import { plural } from "../../../lib/plural";
 import { CameFrom, TabRoute, discoveryIdentity, newCameFrom } from "../../../lib/hopTab";
 import { SnmpProfile, targetParams } from "../../../lib/snmp";
@@ -119,11 +120,13 @@ export function useTopoDiscovery({
   const runIn = async (conn: string, cmd: string): Promise<string> => {
     setMsg(`Ejecutando: ${cmd}`);
     const onWait = (text: string) => setMsg(`${text} (${cmd})`);
-    const out = await runOnDevice(conn, cmd, 60, onWait);
+    // Sin los restos del paginador: la primera línea de cada página llegaba como " --More-- <línea>"
+    // y los parsers perdían o cambiaban de puerto vecinos, interfaces y rutas.
+    const out = stripPager(await runOnDevice(conn, cmd, 60, onWait));
     const alt = FALLBACK_COMMANDS[cmd];
     if (alt && isCliError(out)) {
       setMsg(`Ejecutando: ${alt}`);
-      return runOnDevice(conn, alt, 60, onWait);
+      return stripPager(await runOnDevice(conn, alt, 60, onWait));
     }
     return out;
   };

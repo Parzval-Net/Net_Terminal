@@ -5,7 +5,7 @@
  * los comandos de TRAFFIC_COMMANDS (computeRisk === "read", con test).
  */
 import type { LinkTraffic, TopoLink, TopoVendor } from "./topology";
-import { plainCli } from "./cliText";
+import { plainCli, stripPager } from "./cliText";
 import { canonPort, isCliError, knownAddrs } from "./topology";
 import type { TopoNode } from "./topology";
 import { OID } from "./topoSnmp";
@@ -272,7 +272,6 @@ const MAX_CLI_LEN = 4_000_000;
  * "--More--" (IOS, NX-OS), "---- More ----" (VRP) y "---(more)---" (Junos) con el borrado que envía el
  * equipo al avanzar de página: "\r" + espacios + "\r", retrocesos o ESC[K.
  */
-const PAGER = /[ \t]*-{2,}[ \t]*\(?more\)?(?: \d+%)?[ \t]*-{2,}[ \t]*(?:\r[ \t]*\r|\x08+[ \t]*\x08+|\x1b\[K)?/gi;
 
 const UNIT = { k: 1e3, m: 1e6, g: 1e9, t: 1e12 } as const;
 
@@ -336,7 +335,7 @@ export function parseCliCounters(out: string): Map<string, CliCounters> {
   // Lo que dejó el paginador ("--More--" y su borrado con retrocesos o ESC[K) queda pegado a la
   // primera línea de cada página; si es el encabezado de una interfaz, esta se perdía y sus
   // contadores se atribuían a la anterior. Se lee como lo muestra la terminal.
-  const lines = plainCli(out.slice(0, MAX_CLI_LEN).replace(PAGER, "")).split("\n");
+  const lines = plainCli(stripPager(out.slice(0, MAX_CLI_LEN))).split("\n");
   let name: string | undefined;
   let buf: string[] = [];
   const flush = () => {
