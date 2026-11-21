@@ -26,6 +26,7 @@ export function Collapsible({
   title,
   summary,
   badge,
+  badgeTone,
   open,
   onToggle,
   right,
@@ -36,6 +37,8 @@ export function Collapsible({
   summary?: string;
   /** Contador junto al título, p. ej. cantidad de sugerencias. */
   badge?: number;
+  /** Tono del contador: danger o warn si cuenta problemas (ver CountBadge). */
+  badgeTone?: BadgeTone;
   open: boolean;
   onToggle: (open: boolean) => void;
   /** Acciones a la derecha del encabezado (fuera del botón que pliega). */
@@ -58,7 +61,7 @@ export function Collapsible({
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1.5 text-[13px] font-semibold">
                 <span className="truncate">{title}</span>
-                {badge !== undefined && badge > 0 && <CountBadge n={badge} />}
+                {badge !== undefined && badge > 0 && <CountBadge n={badge} tone={badgeTone} />}
               </span>
               {summary && (
                 <span className="block text-[11.5px] font-normal text-muted truncate" title={summary}>
@@ -77,10 +80,24 @@ export function Collapsible({
   );
 }
 
-/** Contador redondo con el color de acento (contraste AA en ambos temas). */
-export function CountBadge({ n }: { n: number }) {
+/**
+ * Tono de un contador. El acento queda para acción, selección y foco: lo que avisa un problema usa
+ * danger o warn, y un conteo informativo (filtros, diferencias) usa neutral.
+ */
+export type BadgeTone = "accent" | "danger" | "warn" | "neutral";
+
+const BADGE_TONE: Record<BadgeTone, string> = {
+  accent: "bg-accent text-accent-fg",
+  danger: "bg-danger text-danger-fg",
+  warn: "bg-warn text-warn-fg",
+  // Sin relleno de color: texto principal y borde de control (≥3:1) para que se lea como contador.
+  neutral: "bg-hover text-fg ring-1 ring-inset ring-control-line",
+};
+
+/** Contador redondo. Texto con contraste AA en ambos temas en todos los tonos (App.css). */
+export function CountBadge({ n, tone = "accent" }: { n: number; tone?: BadgeTone }) {
   return (
-    <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-accent text-accent-fg text-[11px] font-semibold leading-none tabular-nums">
+    <span className={`inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full text-[11px] font-semibold leading-none tabular-nums ${BADGE_TONE[tone]}`}>
       {n}
     </span>
   );
@@ -91,16 +108,19 @@ export function Btn({
   className = "",
   ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & { kind?: "default" | "primary" | "danger" | "ghost" }) {
+  // Deshabilitado neutro (Fluent 2): fondo gris y texto atenuado, sin el color de la variante. Con
+  // opacidad, el primario quedaba celeste y parecía un botón activo de estilo suave.
   const styles = {
-    default: "border border-line hover:bg-hover",
-    primary: "bg-accent text-accent-fg font-medium hover:opacity-90",
-    danger: "bg-danger text-danger-fg font-medium hover:opacity-90",
-    ghost: "text-muted hover:text-fg hover:bg-hover",
+    default: "border border-line hover:bg-hover disabled:bg-hover disabled:text-muted disabled:border-transparent",
+    primary: "bg-accent text-accent-fg font-medium hover:opacity-90 disabled:bg-hover disabled:text-muted",
+    danger: "bg-danger text-danger-fg font-medium hover:opacity-90 disabled:bg-hover disabled:text-muted",
+    // Sin fondo propio: un fondo gris lo confundiría con el hover; se atenúa.
+    ghost: "text-muted hover:text-fg hover:bg-hover disabled:opacity-40",
   }[kind];
   return (
     <button
       {...props}
-      className={`shrink-0 whitespace-nowrap inline-flex items-center justify-center gap-1.5 px-3 h-8 rounded-md text-[12.5px] disabled:opacity-40 disabled:pointer-events-none ${styles} ${className}`}
+      className={`shrink-0 whitespace-nowrap inline-flex items-center justify-center gap-1.5 px-3 h-8 rounded-md text-[12.5px] disabled:pointer-events-none ${styles} ${className}`}
     />
   );
 }

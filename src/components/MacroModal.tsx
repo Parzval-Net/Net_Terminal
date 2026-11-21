@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Macro } from "../lib/settings";
 import { useDragResize } from "../lib/useDragResize";
 import { useModal } from "../lib/useModal";
+import { Segmented } from "./controls";
 
 interface Props {
   initial: Macro | null;
@@ -64,24 +65,17 @@ export function MacroModal({ initial, onSave, onClose }: Props) {
               onChange={(e) => setM({ ...m, label: e.target.value })}
             />
           </label>
-          <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-hover">
-            {(
-              [
-                ["send", "Enviar texto"],
-                ["script", "Script Python"],
-              ] as const
-            ).map(([k, label]) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setM({ ...m, kind: k })}
-                aria-pressed={m.kind === k}
-                className={`h-8 rounded-md text-[12.5px] ${m.kind === k ? "bg-panel shadow-sm" : "text-muted hover:text-fg"}`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <Segmented
+            fill
+            size="lg"
+            label="Tipo de botón"
+            value={m.kind}
+            onChange={(kind) => setM({ ...m, kind })}
+            options={[
+              ["send", "Enviar texto"],
+              ["script", "Script Python"],
+            ]}
+          />
           {m.kind === "send" ? (
             <label className="block">
               <span className="block mb-1 text-[11.5px] font-medium text-muted">

@@ -219,12 +219,22 @@ export function SettingsModal({
               {g.items.map(({ id, label, Icon }) => (
                 <button
                   key={id}
-                  onClick={() => setSection(id)}
+                  onClick={(e) => {
+                    setSection(id);
+                    // El foco sigue a la sección elegida. En WebKit un clic no enfoca el botón y el anillo
+                    // quedaba en la sección anterior, que se leía como la activa. Abierto con el mouse,
+                    // :focus-visible no dibuja anillo; con teclado, coincide con la selección.
+                    e.currentTarget.focus({ preventScroll: true });
+                  }}
                   title={label}
                   aria-label={label}
                   aria-current={section === id ? "page" : undefined}
-                  className={`w-full flex items-center gap-2 px-2 h-8 rounded-md text-left ${
-                    section === id ? "bg-selected text-fg shadow-[inset_2px_0_0_0_var(--accent)]" : "text-muted hover:text-fg hover:bg-hover"
+                  // Selección: fondo, barra de acento de 3 px y semibold (no solo color, WCAG 1.4.1). El foco
+                  // de teclado es el contorno de :focus-visible (App.css), separado del borde por 2 px.
+                  className={`w-full flex items-center gap-2 px-2 h-8 rounded-md text-left focus-visible:outline-offset-2 ${
+                    section === id
+                      ? "bg-selected text-fg font-semibold shadow-[inset_3px_0_0_0_var(--accent)]"
+                      : "text-muted hover:text-fg hover:bg-hover"
                   }`}
                 >
                   <Icon size={15} className="shrink-0" />

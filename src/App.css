@@ -15,6 +15,10 @@
   --accent-fg: #ffffff;
   /* Borde de controles de formulario y pistas de switches: ≥3:1 (WCAG 1.4.11). */
   --field-border: #858c97;
+  /* Borde que marca el estado de un control (opción activa de un segmentado, contadores neutros).
+     Más oscuro que field-border: 4,2:1 sobre panel y 3,5:1 sobre la pista bg-hover aun encima de
+     chrome (WCAG 1.4.11). --border queda para divisores y tarjetas decorativas. */
+  --control-border: #767d88;
   /* Intensidad del fondo de líneas agregadas/quitadas en diffs (texto ≥4.5:1). */
   --diff-tint: 8%;
   --hover: rgba(15, 23, 42, 0.05);
@@ -23,6 +27,8 @@
   --danger-fg: #ffffff;
   --ok: #1a7f37;
   --warn: #8a5a00;
+  /* Texto sobre fondo warn (contadores): 5,9:1 en claro, 9:1 en oscuro. */
+  --warn-fg: #ffffff;
   /* Tráfico sin velocidad conocida en Topología: gris violeta, distinto del azul de
      selección y ruta (5,6:1 sobre panel claro, 6,6:1 sobre panel oscuro). */
   --util-unknown: #6e5f99;
@@ -46,6 +52,8 @@
   /* Texto oscuro sobre el azul: el blanco daba 3,2:1. */
   --accent-fg: #0b1220;
   --field-border: #6b7280;
+  /* 4,3:1 sobre panel y ≥3,7:1 sobre la pista bg-hover. */
+  --control-border: #7a8290;
   --diff-tint: 14%;
   --hover: rgba(255, 255, 255, 0.05);
   --selected: rgba(91, 141, 239, 0.16);
@@ -53,6 +61,7 @@
   --danger-fg: #0e1116;
   --ok: #4cc472;
   --warn: #e0aa45;
+  --warn-fg: #0e1116;
   --util-unknown: #a99bd6;
   --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
   color-scheme: dark;
@@ -65,6 +74,7 @@
   --color-field: var(--field);
   --color-line: var(--border);
   --color-field-line: var(--field-border);
+  --color-control-line: var(--control-border);
   --color-fg: var(--text);
   --color-muted: var(--muted);
   --color-accent: var(--accent);
@@ -79,6 +89,7 @@
   --color-term-fg: var(--term-fg, var(--text));
   --color-ok: var(--ok);
   --color-warn: var(--warn);
+  --color-warn-fg: var(--warn-fg);
   --shadow-pop: var(--shadow);
   --font-sans: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, Ubuntu,
     Cantarell, "Noto Sans", sans-serif;
@@ -116,6 +127,18 @@ button {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* Segmentado (controls.tsx): reserva el ancho del texto en semibold para que elegir una opción no
+   desplace a las vecinas. El texto alternativo vacío evita que un lector de pantalla lo lea dos veces. */
+.seg-reserve::after {
+  content: attr(data-label);
+  content: attr(data-label) / "";
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  font-weight: 600;
+  pointer-events: none;
 }
 
 .field {
