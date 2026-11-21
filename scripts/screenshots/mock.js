@@ -496,7 +496,7 @@ function emitTraps() {
   emit("snmp-trap", list.map((t, i) => ({ ts: Date.now() - (list.length - i) * 4000, uptime: "412345600 (47d 17h 30m 56.00s)", user: null, note: null, ...t })));
 }
 
-let recentTargets = ["ssh admin@192.0.2.50 22", "telnet 203.0.113.9 23"];
+let recentTargets = ["ssh admin@192.0.2.50 22", "telnet 203.0.113.9 23", "ssh noc@198.51.100.7 22", "ssh admin@192.0.2.11 22"];
 const cmdHistory = { s0: [{ cmd: "show ip interface brief", ts: now - 60000 }, { cmd: "show version", ts: now - 3600000 }] };
 
 
@@ -533,6 +533,21 @@ const mcpAudit = [
   { ts: new Date(now - 60000).toISOString(), client: "Gemini CLI", clientVersion: "0.9", tool: "run_command", connection: "t2#1", target: "dist-sw01", command: "show clock", risk: null, decision: "solo_lectura" },
 ];
 
+// Escena "transfer": un FortiGate que terminó de descargar la imagen y un Catalyst a mitad de camino
+// (direcciones de documentación, RFC 5737).
+function demoTransfers() {
+  const start = Date.now();
+  emit("transfer", { id: "d1", proto: "tftp", client: "192.0.2.10:2071", file: "FGT_200F-v7.4.5.out", dir: "get", bytes: 0, total: 92_340_224, done: false, error: null });
+  emit("transfer", { id: "d2", proto: "tftp", client: "192.0.2.21:49152", file: "c9300-universalk9.17.12.04.SPA.bin", dir: "get", bytes: 0, total: 1_163_845_632, done: false, error: null });
+  emit("transfer", { id: "d3", proto: "tftp", client: "192.0.2.33:51200", file: "sw-acceso-01_20261121-0905.cfg", dir: "put", bytes: 0, total: null, done: false, error: null });
+  const tick = () => {
+    const t = (Date.now() - start) / 1000;
+    emit("transfer", { id: "d1", proto: "tftp", client: "192.0.2.10:2071", file: "FGT_200F-v7.4.5.out", dir: "get", bytes: Math.min(92_340_224, t * 30e6), total: 92_340_224, done: t * 30e6 >= 92_340_224, error: null });
+    emit("transfer", { id: "d2", proto: "tftp", client: "192.0.2.21:49152", file: "c9300-universalk9.17.12.04.SPA.bin", dir: "get", bytes: t * 9.5e6, total: 1_163_845_632, done: false, error: null });
+    emit("transfer", { id: "d3", proto: "tftp", client: "192.0.2.33:51200", file: "sw-acceso-01_20261121-0905.cfg", dir: "put", bytes: 48_211, total: null, done: t > 1, error: null });
+  };
+  setInterval(tick, 300);
+}
 const handlers = {
   mcp_configure: ({ enabled }) => (enabled ? "Escuchando en http://127.0.0.1:47821/mcp" : "Servidor MCP detenido"),
   mcp_decide: (args) => void mcpLog.decisions.push(args),
@@ -562,8 +577,8 @@ const handlers = {
   get_settings: () => settings,
   save_settings: () => null,
   save_topology: () => null,
-  app_version: () => "0.9.23",
-  update_check: () => ({ current: "0.9.23", latest: "0.9.23", newer: false, url: "", notes: "", published: "", supported: true, reason: null }),
+  app_version: () => "0.9.24",
+  update_check: () => ({ current: "0.9.24", latest: "0.9.24", newer: false, url: "", notes: "", published: "", supported: true, reason: null }),
   app_repo: () => "Parzval-Net/Net_Terminal",
   cmdpacks_list: () => [],
   list_notes: () => [
@@ -645,6 +660,9 @@ const handlers = {
   },
   cmd_history_clear: ({ key }) => (key ? delete cmdHistory[key] : Object.keys(cmdHistory).forEach((k) => delete cmdHistory[k]), null),
   plugins_list: () => [],
+  tftp_delete: () => null,
+  tftp_add: ({ path }) => path.split(/[\\/]/).pop(),
+  write: () => null,
   tftp_files: () => [["c9300-universalk9.17.12.04.SPA.bin", 1_163_845_632], ["AR6100-V300R022C10SPC100.cc", 168_820_736], ["FGT_200F-v7.4.5.out", 92_340_224]],
   // Como el backend: primero la de la ruta por defecto, luego físicas y al final virtuales.
   local_ips: () => [
@@ -915,7 +933,7 @@ const handlers = {
   bundle_inspect: ({ password }) => {
     if (password !== "respaldo-de-prueba") throw "Contraseña incorrecta, o el archivo está dañado o fue modificado";
     return {
-      token: "tok1", app: "0.9.23", created: "2026-11-02T10:00:00Z",
+      token: "tok1", app: "0.9.24", created: "2026-11-02T10:00:00Z",
       sessions: [
         { id: "b1", name: "core-sw03", type: "ssh", host: "192.0.2.3", username: "admin", folder: "Sitio Central/Core", created_at: "" },
         { id: "b2", name: "sw-acceso-norte", type: "telnet", host: "203.0.113.99", folder: "Sucursales/Norte", created_at: "" },
@@ -1620,6 +1638,8 @@ function find(label) {
   const all = [...document.querySelectorAll("button, [role=button], [title], div, span, a, li")];
   return (
     all.find((e) => e.title === label || e.title?.startsWith(label + " (")) ||
+    // Botones con tooltip propio (barra de actividad): el nombre va en aria-label, sin title nativo.
+    [...document.querySelectorAll("button[aria-label]")].find((e) => { const a = e.getAttribute("aria-label"); const base = label.split(":")[0]; return a === label || a === base || a.startsWith(base + ",") || a.startsWith(base + " ("); }) ||
     all.find((e) => e.textContent?.trim() === label && e.children.length <= 2)
   );
 }
@@ -1651,9 +1671,12 @@ async function svgNode(name) {
   await wait(250);
 }
 const open = (l) => act("dblclick", l);
-const key = (k) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code: `Key${k.toUpperCase()}`, metaKey: true, bubbles: true, cancelable: true }));
+// Atajo de la app: ⌘ en macOS y Ctrl+Shift en Windows/Linux (isMod de src/lib/platform.ts), según el navegador que captura.
+const MAC_UA = /Mac|iPhone|iPad/.test(navigator.userAgent);
+const key = (k) =>
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: MAC_UA ? k : k.toUpperCase(), code: `Key${k.toUpperCase()}`, metaKey: MAC_UA, ctrlKey: !MAC_UA, shiftKey: !MAC_UA, bubbles: true, cancelable: true }));
 async function quickTo(host) {
-  await click("Conexión rápida sin guardar");
+  key("o"); await wait(300);
   typeInto(document.querySelector('input[placeholder="192.0.2.10 o hostname"]'), host);
   await click("Conectar");
 }
@@ -1675,10 +1698,10 @@ const scenes = {
   about: async () => { await click("Ajustes"); await click("Acerca de"); },
   settings: async () => { await open("core-sw01"); await click("Ajustes"); },
   logs: async () => { await open("core-sw01"); await click("Ajustes"); await click("Logs"); },
-  quick: async () => { await click("Conexión rápida sin guardar"); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); if (h) { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); } },
-  quickserial: async () => { await click("Conexión rápida sin guardar"); await click("Serial"); },
+  quick: async () => { key("o"); await wait(300); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); if (h) { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); } },
+  quickserial: async () => { key("o"); await wait(300); await click("Serial"); },
   // Pestaña abierta por conexión rápida: "Guardar como sesión…" en la barra de estado.
-  quicktab: async () => { await click("Conexión rápida sin guardar"); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); await click("Conectar"); },
+  quicktab: async () => { key("o"); await wait(300); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); await click("Conectar"); },
   packs: async () => { await open("core-sw01"); await click("Catálogo de comandos"); await click("Packs de comandos"); },
   split: async () => { await open("core-sw01"); await open("ar-wan01"); await open("dist-sw01"); await open("sw-acceso-sur"); await click("Vista dividida: ver 2 o 4 pestañas a la vez"); await click("4 en cuadrícula (2x2)"); },
   backup: async () => { await open("core-sw01"); await open("ar-wan01"); await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Respaldos"); await click("Comparar A y B"); },
@@ -1722,7 +1745,14 @@ const scenes = {
     while (sc && sc.scrollHeight <= sc.clientHeight) sc = sc.parentElement;
     if (sc) sc.scrollTop -= 90;
   },
-  transfer: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Transferencias"); await wait(400); [...document.querySelectorAll("h3")].find((h) => h.textContent === "Servidor TFTP")?.scrollIntoView(); },
+  transfer: async () => {
+    await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins");
+    await click("Transferencias");
+    await wait(400);
+    document.querySelector("[aria-label='Iniciar TFTP']")?.click();
+    await wait(300);
+    demoTransfers();
+  },
   // ---- Escenas de QA visual del contenedor de la app ----
   empty: async () => {},
   palette: async () => { await wait(300); key("k"); await wait(300); },
@@ -1763,7 +1793,15 @@ const scenes = {
     document.querySelector(".xterm")?.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
     await wait(300);
   },
-  toasts: async () => { await open("core-sw01"); await open("ar-wan01"); await wait(1200); },
+  // Avisos: uno informativo y uno de error, como los de un script (evento script-event).
+  toasts: async () => {
+    await open("core-sw01");
+    await open("ar-wan01");
+    await wait(600);
+    emit("script-event", { run: "r1", script: "respaldo-nocturno", kind: "log", message: "3 de 3 equipos respaldados" });
+    emit("script-event", { run: "r2", script: "verificar-ntp", kind: "error", message: "ar-wan01: tiempo agotado esperando el prompt" });
+    await wait(400);
+  },
   // Barra de difusión en curso: se arranca un envío ficticio directo en el módulo.
   bcastbar: async () => {
     await open("core-sw01"); await open("core-sw02");
@@ -1774,7 +1812,17 @@ const scenes = {
     await wait(300);
     await click("Ver detalle");
   },
-  macros: async () => { await open("core-sw01"); await wait(300); },
+  macros: async () => { await open("core-sw01"); await wait(300); await click("Nuevo botón"); await wait(400); },
+  // Difusión activa: destino la carpeta "Sitio Central" con tres equipos abiertos de ella.
+  "broadcast-active": async () => {
+    await open("core-sw01"); await open("core-sw02"); await open("dist-sw01");
+    await wait(300);
+    const m = await import("/src/lib/broadcast.ts");
+    m.setBroadcastTarget({ mode: "folder", folder: "Sitio Central" });
+    await wait(400);
+  },
+  // Buscar en logs (Herramientas › Operar).
+  logsearch: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Buscar en logs"); await wait(500); },
   broadcast: async () => { await open("core-sw01"); await open("core-sw02"); await open("Shell local"); await click("Notas"); await click("Elegir a qué sesiones se envía"); },
 };
 // Escenas de QA visual (modales, ajustes y herramientas).
@@ -1801,7 +1849,7 @@ Object.assign(scenes, {
   "s-vault": async () => { await click("Ajustes"); await wait(300); await click("Credenciales"); },
   "session-new": async () => { await click("Nueva sesión"); },
   "session-edit": async () => { await wait(300); const row = [...document.querySelectorAll("[title]")].find((e) => e.title.startsWith("192.0.2.1")); row?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })); const ed = row?.querySelector('[title="Editar"]') ?? find("Editar"); ed?.dispatchEvent(new MouseEvent("click", { bubbles: true })); },
-  "quick-telnet": async () => { await click("Conexión rápida sin guardar"); await click("Telnet"); },
+  "quick-telnet": async () => { key("o"); await wait(300); await click("Telnet"); },
   confirm: async () => { await open("core-sw01"); await open("ar-wan01"); await wait(300); window.dispatchEvent(new KeyboardEvent("keydown", { key: "w", metaKey: true, ctrlKey: true, bubbles: true })); },
   approval: async () => { await wait(800); emit("mcp-approval", { id: "a1", tool: "send_command", target: "core-sw01 (192.0.2.1)", detail: "configure terminal\ninterface GigabitEthernet1/0/4\n no shutdown\nend" }); },
   // Con &mcp=1: aprobación de una consulta con la conexión real de la pestaña (ofrece la ventana de consultas)
@@ -2063,4 +2111,191 @@ Object.assign(scenes, {
   },
 });
 const scene = new URLSearchParams(location.search).get("scene");
+// ---- Auditoría de seguridad (?scene=audit*): respaldos ficticios ya enmascarados de un FortiGate y un
+// router Cisco (IPs de documentación RFC 5737, nombres y hashes inventados) y un pack "Mis reglas" con un
+// cambio, una regla propia y una excepción. Las reglas se guardan solo en memoria.
+const AUDIT_FORTI = `#config-version=FG200F-7.2.5-FW-build1517:opmode=0:vdom=0
+config system global
+    set admin-sport 443
+    set admintimeout 480
+    set hostname "fw-perimetro"
+    set strong-crypto disable
+    set timezone "America/Santiago"
+end
+config system admin
+    edit "admin"
+        set accprofile "super_admin"
+        set password ENC ****
+    next
+    edit "breakglass"
+        set accprofile "super_admin"
+        set password ENC ****
+    next
+    edit "ops-redes"
+        set accprofile "super_admin"
+        set trusthost1 192.0.2.0 255.255.255.0
+        set two-factor fortitoken
+        set fortitoken "FTKMOB0000000001"
+        set password ENC ****
+    next
+end
+config system interface
+    edit "wan1"
+        set ip 203.0.113.2 255.255.255.252
+        set allowaccess ping https ssh http
+        set role wan
+        set description "Internet ISP-A"
+    next
+    edit "internal"
+        set ip 192.0.2.1 255.255.255.0
+        set allowaccess ping https ssh telnet
+        set role lan
+    next
+    edit "dmz"
+        set ip 198.51.100.1 255.255.255.0
+        set allowaccess ping
+        set role dmz
+    next
+end
+config system snmp community
+    edit 1
+        set name "****"
+    next
+end
+config firewall policy
+    edit 1
+        set name "LAN a Internet"
+        set srcintf "internal"
+        set dstintf "wan1"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic disable
+        set nat enable
+    next
+    edit 2
+        set name "Web DMZ"
+        set srcintf "wan1"
+        set dstintf "dmz"
+        set srcaddr "all"
+        set dstaddr "srv-web"
+        set action accept
+        set schedule "always"
+        set service "HTTPS"
+        set utm-status enable
+        set ssl-ssh-profile "certificate-inspection"
+        set logtraffic all
+    next
+end
+`;
+const AUDIT_CISCO = `!
+version 15.4
+service timestamps log datetime msec
+hostname rt-borde01
+!
+enable secret 5 ****
+username ops privilege 15 password 7 ****
+!
+ip domain name ejemplo.test
+ip http server
+service tcp-small-servers
+snmp-server community **** RW
+ntp server 192.0.2.123
+logging host 192.0.2.50
+!
+interface GigabitEthernet0/0
+ description Internet ISP-A
+ ip address 203.0.113.6 255.255.255.252
+!
+interface GigabitEthernet0/1
+ description LAN core
+ ip address 192.0.2.40 255.255.255.0
+ no ip proxy-arp
+!
+line con 0
+ exec-timeout 0 0
+line vty 0 4
+ exec-timeout 30 0
+ transport input telnet ssh
+line vty 5 15
+ transport input ssh
+!
+end
+`;
+const auditPacks = new Map();
+if (scene?.startsWith("audit")) {
+  backups["fw-perimetro"] = { "2026-11-18_101500.txt": AUDIT_FORTI.replace("set admintimeout 480", "set admintimeout 480\n    set admin-https-ssl-versions tlsv1-1 tlsv1-2"), "2026-11-20_184500.txt": AUDIT_FORTI };
+  backups["rt-borde01"] = { "2026-11-20_090000.txt": AUDIT_CISCO };
+  auditPacks.set("user-mis-reglas.json", {
+    layer: "user",
+    file: "user-mis-reglas.json",
+    pack: {
+      format: "netterminal-rules",
+      formatVersion: 1,
+      id: "mis-reglas",
+      name: "Mis reglas",
+      version: "1.0.4",
+      rules: [
+        {
+          id: "USR-IOS-DOM-001",
+          title: "Dominio DNS configurado (requisito de llaves SSH)",
+          severity: "low",
+          vendor: "cisco",
+          controls: [{ framework: "ISO/IEC 27001:2022", control: "A.8.9" }, { framework: "Estándar interno", control: "HRD-NET-07" }],
+          check: { type: "present", match: "^ip domain[ -]name \\S+" },
+          fix: "manual",
+          tests: [{ name: "Ejemplo del editor", config: "ip domain name ejemplo.test\n", expect: "pass" }],
+        },
+      ],
+      overrides: [{ rule: "NT-FOS-IF-001", enabled: false, reason: "Las interfaces se documentan en la CMDB" }],
+      waivers: [{ rule: "NT-FOS-ADM-002", match: 'edit "breakglass"', reason: "Cuenta de emergencia con control compensatorio (bóveda física)", approvedBy: "CISO", expires: "2027-03-31", ticket: "CHG-1042" }],
+    },
+  });
+}
+Object.assign(handlers, {
+  auditrules_list: () => [...auditPacks.values()],
+  auditrules_save: ({ layer, pack }) => (auditPacks.set(`${layer}-${pack.id}.json`, { layer, file: `${layer}-${pack.id}.json`, pack }), pack.id),
+  auditrules_delete: ({ layer, id }) => (auditPacks.delete(`${layer}-${id}.json`), null),
+  auditrules_read: () => JSON.stringify({ format: "netterminal-rules", formatVersion: 1, id: "hardening-campus", name: "Hardening campus", version: "2.1.0", owner: "equipo-redes", rules: [] }),
+  audit_read_config: () => AUDIT_CISCO,
+});
+const auditPick = async (device) => {
+  await tool("Auditoría")();
+  await wait(500);
+  const sel = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.value === device));
+  if (sel) setVal(sel, device);
+  await wait(500);
+  [...document.querySelectorAll("button:not([role=radio])")].find((b) => /^(Auditar|Volver a auditar)$/.test(b.textContent.trim()))?.click();
+  await wait(700);
+};
+Object.assign(scenes, {
+  audit: async () => {
+    await auditPick("fw-perimetro");
+    document.querySelector("ol[aria-label^='Auditar'] li:nth-child(2) ul button[aria-expanded]")?.click();
+    await wait(300);
+  },
+  "audit-cisco": async () => {
+    await auditPick("rt-borde01");
+    document.querySelector("ol[aria-label^='Auditar'] li:nth-child(2) ul button[aria-expanded]")?.click();
+    await wait(300);
+  },
+  "audit-plan": async () => {
+    await auditPick("fw-perimetro");
+    // Agrega "Administradores sin restricción de origen" y completa su parámetro (red de gestión).
+    [...document.querySelectorAll("label")].find((l) => l.textContent.includes("NT-FOS-ADM-002"))?.querySelector("input[type=checkbox]")?.click();
+    await wait(300);
+    const inp = [...document.querySelectorAll("input")].find((x) => x.placeholder === "192.0.2.0 255.255.255.0");
+    if (inp) setVal(inp, "192.0.2.0 255.255.255.0");
+    await wait(300);
+    [...document.querySelectorAll("h3")].find((h) => h.textContent.includes("Plan de corrección"))?.scrollIntoView();
+  },
+  "audit-library": async () => {
+    await tool("Auditoría")();
+    await wait(400);
+    [...document.querySelectorAll("[role=radio]")].find((b) => b.textContent.startsWith("Biblioteca de reglas"))?.click();
+    await wait(400);
+  },
+});
 if (scene && scenes[scene]) window.addEventListener("load", () => wait(600).then(scenes[scene]));

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { ChevronRight, Copy, Eye, ExternalLink, FolderOpen, Search, Square } from "lucide-react";
+import { ChevronRight, Copy, Eye, ExternalLink, FolderOpen, Info, Search, Square } from "lucide-react";
 import { FileViewer } from "../FileViewer";
 import { datacryptStatus } from "../../lib/api";
 import { persist, stored } from "../../lib/prefs";
@@ -15,6 +15,7 @@ import {
   LineData,
   MAX_QUERY,
   MAX_RESULTS_CHOICES,
+  PER_FILE_HITS,
   ResultsState,
   SearchForm,
   SearchKind,
@@ -33,7 +34,7 @@ import {
   todayISO,
   totalHits,
 } from "../../lib/logSearch";
-import { fmtBytes, Btn, Collapsible, Label, Section } from "./ui";
+import { fmtBytes, Btn, Collapsible, Label, Section, ToolHeader } from "./ui";
 
 const FORM_KEY = "logSearchForm";
 
@@ -149,7 +150,7 @@ function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit) => void }) {
           onClick={() => onCopy(hit)}
           title="Copiar línea"
           aria-label={`Copiar la línea ${hit.line}`}
-          className="shrink-0 w-6 h-6 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover focus-visible:opacity-100 opacity-60 group-hover:opacity-100"
+          className="shrink-0 w-6 h-6 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
         >
           <Copy size={12} />
         </button>
@@ -250,7 +251,17 @@ function FileGroup({
   );
 }
 
-export default function LogSearchTool({ visible }: { visible?: boolean }) {
+export default function LogSearchTool({
+  visible,
+  autoLog,
+  onEnableAutoLog,
+}: {
+  visible?: boolean;
+  /** Ajuste "Grabar logs automáticamente". Si viene apagado se avisa que solo hay logs grabados a mano. */
+  autoLog?: boolean;
+  /** Enciende ese ajuste desde el aviso (sin él, el aviso solo indica dónde activarlo). */
+  onEnableAutoLog?: () => void;
+}) {
   const [form, setForm] = useState<SearchForm>(() => sanitizeForm(stored<unknown>(FORM_KEY, null)));
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -323,10 +334,35 @@ export default function LogSearchTool({ visible }: { visible?: boolean }) {
 
   return (
     <div className="space-y-4" onKeyDown={(e) => e.key === "Escape" && running && (e.stopPropagation(), stop())}>
-      <Section
-        title="Buscar en logs y respaldos"
-        hint="Texto o regex en logs, respaldos y notas. Sin índice: lee archivo por archivo."
-      >
+      <ToolHeader
+        title="Buscar en logs"
+        description="Texto o regex en logs, respaldos y notas. Sin índice: lee archivo por archivo."
+      />
+      <Section title="Qué buscar">
+        {autoLog === false && (
+          // Sin grabación automática una búsqueda vacía no prueba que el evento no ocurrió.
+          <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-line bg-hover px-3 py-2 text-[12px]">
+            <Info size={14} aria-hidden className="shrink-0 text-warn" />
+            <p className="min-w-0 flex-1">
+              <span className="font-medium">La grabación automática de logs está apagada.</span>{" "}
+              <span className="text-muted">
+                Solo se buscan los logs grabados a mano{onEnableAutoLog ? "" : "; actívala en Ajustes › Logs"}.
+              </span>
+            </p>
+            {onEnableAutoLog && (
+              <Btn
+                type="button"
+                className="!h-7"
+                onClick={() => {
+                  onEnableAutoLog();
+                  setNote("Grabación automática activada: se graban las sesiones que conectes desde ahora.");
+                }}
+              >
+                Activar
+              </Btn>
+            )}
+          </div>
+        )}
         <form
           ref={formEl}
           className="space-y-3"
@@ -413,7 +449,7 @@ export default function LogSearchTool({ visible }: { visible?: boolean }) {
               </Label>
             </div>
             <p className="mt-2 text-[11.5px] text-muted">
-              La fecha de un respaldo es la de su nombre; la de un log o una nota, la de su última modificación. De un archivo más grande que el máximo se lee solo el inicio.
+              La fecha de un respaldo es la de su nombre; la de un log o una nota, la de su última modificación. De un archivo más grande que el máximo se lee solo el inicio, y de cada archivo se muestran hasta {PER_FILE_HITS.toLocaleString("es-CL")} coincidencias.
             </p>
           </Collapsible>
         </form>
@@ -422,7 +458,8 @@ export default function LogSearchTool({ visible }: { visible?: boolean }) {
         </p>
       </Section>
 
-      <div role="status" aria-live="polite" className="space-y-1.5">
+      <div className="space-y-1.5">
+        {/* El avance cambia cada 150 ms: queda fuera de la región viva para no encolar anuncios que tapen el resumen final. */}
         {running && (
           <div>
             <p className="text-[12px]">{progress.total ? progressText(progress) : "Recorriendo carpetas…"}</p>
@@ -432,13 +469,15 @@ export default function LogSearchTool({ visible }: { visible?: boolean }) {
             <p className="mt-1 text-[11.5px] text-muted">Esc cancela la búsqueda. Los resultados aparecen a medida que se encuentran.</p>
           </div>
         )}
-        {!running && lines.map((l, i) => (
-          <p key={i} className={`text-[12px] ${i === 0 ? "" : "text-warn"}`}>
-            {l}
-          </p>
-        ))}
-        {note && !error && <p className="text-[12px] text-muted">{note}</p>}
-        {error && <p className="text-[12px] text-danger">{error}</p>}
+        <div role="status" aria-live="polite" className="space-y-1.5">
+          {!running && lines.map((l, i) => (
+            <p key={i} className={`text-[12px] ${i === 0 ? "" : "text-warn"}`}>
+              {l}
+            </p>
+          ))}
+          {note && !error && <p className="text-[12px] text-muted">{note}</p>}
+          {error && <p className="text-[12px] text-danger">{error}</p>}
+        </div>
       </div>
 
       {files.length > 0 && (
@@ -459,7 +498,11 @@ export default function LogSearchTool({ visible }: { visible?: boolean }) {
           </div>
         </Section>
       )}
-      {!running && summary && files.length === 0 && !error && <p className="text-[12.5px] text-muted">Sin coincidencias.</p>}
+      {!running && summary && files.length === 0 && !error && (
+        <p className="text-[12.5px] text-muted">
+          Sin coincidencias.{autoLog === false ? " Con la grabación automática apagada, solo se revisaron los logs grabados a mano." : ""}
+        </p>
+      )}
       {viewing && <FileViewer kind={viewing.kind} rel={viewing.rel} onClose={() => setViewing(null)} />}
     </div>
   );

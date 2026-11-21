@@ -1,7 +1,8 @@
 import { Dispatch, MutableRefObject, SetStateAction, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { runOnDevice } from "../../../lib/deviceRun";
+import { runOnDeviceResult } from "../../../lib/deviceRun";
 import { plural } from "../../../lib/plural";
+import { commandReader, partialNote } from "../../../lib/topoRun";
 import { CameFrom, TabRoute, discoveryIdentity, newCameFrom } from "../../../lib/hopTab";
 import { SnmpProfile, targetParams } from "../../../lib/snmp";
 import { TopoScope, scopeNeighbors } from "../../../lib/topoInsights";
@@ -23,7 +24,6 @@ import {
 import {
   ADDRESS_COMMANDS,
   CommandOutput,
-  FALLBACK_COMMANDS,
   MAC_COMMANDS,
   MacPort,
   NEIGHBOR_COMMANDS,
@@ -34,13 +34,17 @@ import {
   TopoVendor,
   Topology,
   buildMacPorts,
+  completeProtos,
+  deviceNode,
   isCliError,
   isIpv4,
   isIpv6,
+  isStale,
   junosDetailCommand,
   knownAddrs,
   macPortsFromRows,
   mergeNeighbors,
+  nameCollisions,
   nodeId,
   parseNeighbors,
   parseOwnAddresses,
@@ -115,17 +119,25 @@ export function useTopoDiscovery({
    */
   const busyRef = useRef(false);
 
-  /** Ejecuta un comando en la conexión `conn`; si el equipo no lo reconoce, prueba la sintaxis alternativa. */
-  const runIn = async (conn: string, cmd: string): Promise<string> => {
-    setMsg(`Ejecutando: ${cmd}`);
-    const onWait = (text: string) => setMsg(`${text} (${cmd})`);
-    const out = await runOnDevice(conn, cmd, 60, onWait);
-    const alt = FALLBACK_COMMANDS[cmd];
-    if (alt && isCliError(out)) {
-      setMsg(`Ejecutando: ${alt}`);
-      return runOnDevice(conn, alt, 60, onWait);
-    }
-    return out;
+  /**
+   * Lector de comandos de un descubrimiento en la conexión `conn` (ver topoRun.ts): prueba la sintaxis
+   * alternativa si el equipo no reconoce el comando, pide la salida sin paginador donde se puede, quita
+   * los restos del paginador (la primera línea de cada página llegaba como " --More-- <línea>" y los
+   * parsers perdían vecinos, interfaces y rutas) y anota si una salida se cortó, para no tomarla por completa.
+   */
+  const readerFor = (conn: string, vendor: TopoVendor) =>
+    commandReader(
+      (cmd) => runOnDeviceResult(conn, cmd, 60, true, (text) => setMsg(`${text} (${cmd})`)),
+      vendor,
+      (cmd) => setMsg(`Ejecutando: ${cmd}`),
+    );
+
+  /** Cuántos enlaces quedan como "no vistos" que antes no lo estaban. */
+  const staleNote = (before: Topology, after: Topology) => {
+    const n = after.links.filter(isStale).length - before.links.filter(isStale).length;
+    return n > 0
+      ? `${plural(n, "enlace ya no se informa", "enlaces ya no se informan")}: ${n === 1 ? "queda" : "quedan"} en el mapa como no ${n === 1 ? "visto" : "vistos"} hasta que ${n === 1 ? "lo" : "los"} quites en "Requieren atención".`
+      : "";
   };
 
   const selectedVendor = vendor;
@@ -152,11 +164,17 @@ export function useTopoDiscovery({
   /** Comandos de descubrimiento en la conexión `conn` (la de la pestaña `tab`, fija durante todo el descubrimiento). */
   const discoverWith = async (tab: TerminalRef, conn: string, forced?: TopoVendor): Promise<void> => {
     const vendor = forced ?? selectedVendor;
-    const run = (cmd: string) => runIn(conn, cmd);
+    const reader = readerFor(conn, vendor);
+    const run = reader.run;
+    // El prompt a la vista antes de enviar nada: identifica al equipo si la primera salida se corta.
+    const startPrompt = promptName((tab.screen?.(4) ?? "").replace(/\r/g, "").trimEnd());
     try {
       const outputs: string[] = [];
+      /** Salidas de los comandos de vecinos, para saber qué protocolo se leyó completo. */
+      const nbOuts: { cmd: string; out: string; cut: boolean }[] = [];
       for (const cmd of NEIGHBOR_COMMANDS[vendor]) {
         const out = await run(cmd);
+        nbOuts.push({ cmd, out, cut: reader.wasCut(cmd) });
         // Tras un salto el equipo puede ser de otra marca: su prompt lo dice y se repite con su sintaxis.
         if (!forced && !outputs.length) {
           const seen = vendorFromPrompt(out);
@@ -212,11 +230,12 @@ export function useTopoDiscovery({
         const results: CommandOutput[] = [];
         for (const cmd of MAC_COMMANDS[vendor]) results.push({ cmd, out: await run(cmd) });
         const { lookupOui } = await import("../../../lib/oui");
-        macs = buildMacPorts(results, lookupOui);
+        // La tabla MAC es una foto que reemplaza a la anterior: una cortada no la reemplaza.
+        macs = results.some((x) => reader.wasCut(x.cmd)) ? undefined : buildMacPorts(results, lookupOui);
         outputs.push(...results.map((x) => x.out));
       }
-      const last = [...outputs].reverse().find((o) => o.trim()) ?? "";
-      const seenName = promptName(last) ?? tab.name;
+      // El prompt de la última salida que lo trae (una salida cortada no termina en el prompt).
+      const seenName = [...outputs].reverse().map((o) => (o.trim() ? promptName(o) : null)).find(Boolean) ?? startPrompt ?? tab.name;
       // Dentro de un salto la IP es la del equipo de la ruta donde está la pestaña, no la de la sesión del PC.
       const route = tab.tabId ? routesRef.current[tab.tabId] : undefined;
       const who = discoveryIdentity({ name: tab.name, host: tab.host, session: tab.session, hasTabId: !!tab.tabId }, route, seenName);
@@ -225,15 +244,26 @@ export function useTopoDiscovery({
       // La ruta se ajusta a lo que dice el prompt (un "exit" tecleado a mano también cuenta).
       if (route && upto && who.at < route.steps.length) setRoutes((m) => ({ ...m, [tab.tabId!]: upto }));
       const before = topoRef.current;
-      const sc = scopeNeighbors(before, name, [...neighbors, ...routing], scope);
+      // El prompt puede no coincidir con el nombre que anunciaron los vecinos ("mx-edge-re0" y
+      // "mx-edge.example.net"): si tiene su misma IP de gestión es ese equipo, no uno nuevo.
+      const known = deviceNode(before, name, ip);
+      const shown = known?.name ?? name;
+      const selfId = known?.id ?? nodeId(name);
+      const sc = scopeNeighbors(before, shown, [...neighbors, ...routing], scope);
       // Los equipos nuevos recuerdan desde dónde se descubrieron: saltar a ellos usa esa ruta más un paso.
       if (upto) {
-        const fresh = newCameFrom({ ids: new Set(before.nodes.map((n) => n.id)), addrs: before.nodes.flatMap((n) => knownAddrs(n)) }, sc.kept, nodeId(name), upto, cameFromRef.current);
+        const fresh = newCameFrom({ ids: new Set(before.nodes.map((n) => n.id)), addrs: before.nodes.flatMap((n) => knownAddrs(n)) }, sc.kept, selfId, upto, cameFromRef.current);
         for (const [id, cf] of fresh) cameFromRef.current.set(id, cf);
         while (cameFromRef.current.size > 5000) cameFromRef.current.delete(cameFromRef.current.keys().next().value!);
       }
-      onTopo((t) => mergeNeighbors(t, { name, ip, ports, addrs, macs }, sc.kept));
-      setSelected(nodeId(name));
+      // Solo de los protocolos leídos completos se da por retirado un enlace que el equipo dejó de
+      // informar; `seen` lleva todo lo leído, antes del alcance (un vecino descartado también ocupa su puerto).
+      const opts = { complete: completeProtos(vendor, nbOuts), seen: neighbors, now: Date.now() };
+      const device = { name, ip, ports, addrs, macs };
+      onTopo((t) => mergeNeighbors(t, device, sc.kept, opts));
+      setSelected(selfId);
+      const stale = staleNote(before, mergeNeighbors(before, device, sc.kept, opts));
+      const collisions = nameCollisions(before, neighbors);
       const parts = [
         `${plural(neighbors.length, "vecino", "vecinos")} CDP/LLDP`,
         routingOn && ROUTING_COMMANDS[vendor].length ? `${routing.length} de ruteo` : "",
@@ -252,7 +282,10 @@ export function useTopoDiscovery({
           : "";
       // Vecinos descartados por el alcance (profundidad, redes, teléfonos): se dice cómo traerlos, no queda en silencio.
       const scopeHint = sc.skipped.length ? 'Cambia el "Alcance del descubrimiento" (panel) y vuelve a descubrir para traerlos.' : "";
-      setMsg([`${name}: ${parts.join(", ")}.`, neighbors.length ? "" : l2Hint, routingHint, scopeHint].filter(Boolean).join(" "));
+      const aliasNote = known && known.id !== nodeId(name) && !known.aliases?.includes(nodeId(name)) ? `El prompt dice ${name}: se tomó como ${known.name} (misma IP de gestión).` : "";
+      const collisionNote = collisions.length ? `Aviso: ${collisions.join("; ")}: se dibujan como un solo equipo.` : "";
+      // Una lectura cortada va primero y a la vista: lo leído es parcial.
+      setMsg([partialNote(reader), `${shown}: ${parts.join(", ")}.`, aliasNote, stale, collisionNote, neighbors.length || reader.cut ? "" : l2Hint, routingHint, scopeHint].filter(Boolean).join(" "));
     } catch (e) {
       setMsg(String(e));
     }
@@ -323,10 +356,21 @@ export function useTopoDiscovery({
       }
       const host = p.host.trim();
       const name = d.name ?? (p.name.trim() || host);
-      const sc = scopeNeighbors(topoRef.current, name, [...d.neighbors, ...d.routing], scope);
-      onTopo((t) => mergeNeighbors(t, { name, ip: isIpv4(host) || isIpv6(host) ? host : undefined, ports: d.ports, addrs: d.addrs, macs }, sc.kept));
-      setSelected(nodeId(name));
-      prime(nodeId(name), p.id, d.ifIndex);
+      const before = topoRef.current;
+      const ip = isIpv4(host) || isIpv6(host) ? host : undefined;
+      // Mismo criterio que por consola: sysName puede no coincidir con el nombre que anunciaron los vecinos.
+      const known = deviceNode(before, name, ip);
+      const selfId = known?.id ?? nodeId(name);
+      const sc = scopeNeighbors(before, known?.name ?? name, [...d.neighbors, ...d.routing], scope);
+      const mergeOpts = { complete: d.complete, seen: d.neighbors, now: Date.now() };
+      const device = { name, ip, ports: d.ports, addrs: d.addrs, macs };
+      onTopo((t) => mergeNeighbors(t, device, sc.kept, mergeOpts));
+      setSelected(selfId);
+      // El índice de interfaces solo se guarda para el tráfico si ifName e ifDescr vinieron completas.
+      if (d.ifIndexComplete) prime(selfId, p.id, d.ifIndex);
+      const stale = staleNote(before, mergeNeighbors(before, device, sc.kept, mergeOpts));
+      const collisions = nameCollisions(before, d.neighbors);
+      if (collisions.length) d.notes.push(`${collisions.join("; ")}: se dibujan como un solo equipo`);
       const parts = [
         `${plural(d.neighbors.length, "vecino", "vecinos")} CDP/LLDP`,
         routingOn ? `${d.routing.length} de ruteo` : "",
@@ -337,7 +381,7 @@ export function useTopoDiscovery({
         ? "LLDP y CDP vacíos por SNMP: el protocolo está apagado en el equipo (o su agente no publica LLDP-MIB, LLDP-V2-MIB ni CISCO-CDP-MIB)."
         : "";
       const notes = d.notes.length ? `Avisos: ${d.notes.slice(0, 3).join("; ")}${d.notes.length > 3 ? ` y ${d.notes.length - 3} más` : ""}.` : "";
-      setMsg([`${name}: ${parts.join(", ")} por SNMP en ${(r.ms / 1000).toFixed(1)} s.`, l2, notes].filter(Boolean).join(" "));
+      setMsg([`${known?.name ?? name}: ${parts.join(", ")} por SNMP en ${(r.ms / 1000).toFixed(1)} s.`, stale, l2, notes].filter(Boolean).join(" "));
     } catch (e) {
       setMsg(`SNMP: ${String(e)}`);
     }

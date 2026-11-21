@@ -107,6 +107,11 @@ export function DetailSection({
             <span className="text-muted">{sel.addrOnly ? "Dirección:" : "Gestión:"}</span> <span className="font-mono">{sel.ip}</span>
           </p>
         )}
+        {!!sel.aliases?.length && (
+          <p className="text-muted" title="Nombre que muestra su prompt, distinto del que anuncian sus vecinos por CDP/LLDP">
+            También: <span className="font-mono">{sel.aliases.join(", ")}</span>
+          </p>
+        )}
         {sel.addrOnly && knownAddrs(sel).length > 1 && (
           <p className="text-muted">
             Conocido por: <span className="font-mono">{knownAddrs(sel).slice(0, 6).join(", ")}</span>
@@ -450,6 +455,7 @@ export function SnapshotsSection({
     <Collapsible
       title="Snapshots y cambios"
       badge={diffCount || undefined}
+      badgeTone="neutral"
       summary={snapshot ? `Comparando con "${snapshot.name}"` : snapshots.length ? `${snapshots.length} guardados` : "Guarda una copia para comparar después"}
       open={open}
       onToggle={onToggle}

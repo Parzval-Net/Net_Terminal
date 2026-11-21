@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Play, Square } from "lucide-react";
-import { Sample, stats } from "../../lib/monitors";
-import { LineChart, StatTile } from "./LineChart";
-import { Btn, Console, Label, Section, fmtMs } from "./ui";
+import { MAX_PORTS, PortState, Sample, parsePortList, portState, stats } from "../../lib/monitors";
+import { LineChart } from "./LineChart";
+import { Btn, Console, Label, Metric, Section, ToolHeader, fmtMs } from "./ui";
 import { useJob } from "./useJob";
 
 const QUICK = "quick-ping";
@@ -21,23 +21,20 @@ const COMMON: Record<number, string> = {
   8443: "HTTPS alt", 49: "TACACS+",
 };
 
-/** "22,23,80-85" -> [22,23,80,81,82,83,84,85] */
-export function parsePorts(text: string): number[] {
-  const out = new Set<number>();
-  for (const part of text.split(/[\s,;]+/).filter(Boolean)) {
-    const m = part.match(/^(\d+)(?:-(\d+))?$/);
-    if (!m) continue;
-    const a = Number(m[1]);
-    const b = m[2] ? Number(m[2]) : a;
-    for (let p = Math.min(a, b); p <= Math.max(a, b) && out.size < 1024; p++) if (p > 0 && p < 65536) out.add(p);
-  }
-  return [...out];
-}
+const PORT_LABEL: Record<PortState, [string, string]> = {
+  open: ["● Abierto", "text-ok"],
+  refused: ["○ Cerrado (rechaza)", "text-muted"],
+  filtered: ["◌ Filtrado (sin respuesta)", "text-warn"],
+  error: ["✕ Error", "text-danger"],
+};
 
 export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
   const [pingHost, setPingHost] = useState("");
   const [pinging, setPinging] = useState(false);
   const [pingErr, setPingErr] = useState("");
+  // Host e inicio del ping en curso: las muestras de "quick-ping" viven en App y se acumulan entre
+  // corridas; sin este corte se mezclaban las de un host anterior en el gráfico y la pérdida.
+  const [pingRun, setPingRun] = useState<{ host: string; since: number } | null>(null);
   const [traceHost, setTraceHost] = useState("");
   const trace = useJob();
   const [portHost, setPortHost] = useState("");
@@ -46,33 +43,46 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
   const [scanning, setScanning] = useState(false);
   const [portErr, setPortErr] = useState("");
 
-  useEffect(() => () => void invoke("monitor_stop", { id: QUICK }), []);
+  useEffect(() => () => void invoke("monitor_stop", { id: QUICK }).catch(() => {}), []);
 
   const togglePing = async () => {
     if (pinging) {
-      await invoke("monitor_stop", { id: QUICK });
+      // Aunque detener falle (el monitor ya no existe), el botón vuelve a "Iniciar".
+      await invoke("monitor_stop", { id: QUICK }).catch(() => {});
       return setPinging(false);
     }
     setPingErr("");
+    const host = pingHost.trim();
     try {
+      const since = Date.now();
       await invoke("monitor_start", {
-        cfg: { id: QUICK, kind: "icmp", host: pingHost.trim(), interval_ms: 1000, timeout_ms: 1000 },
+        cfg: { id: QUICK, kind: "icmp", host, interval_ms: 1000, timeout_ms: 1000 },
       });
+      setPingRun({ host, since });
       setPinging(true);
     } catch (e) {
       setPingErr(String(e));
     }
   };
 
-  const quick = (samples[QUICK] ?? []).slice(-300);
+  const quick = useMemo(
+    () => (pingRun ? (samples[QUICK] ?? []).filter((s) => s.ts >= pingRun.since).slice(-300) : []),
+    [samples, pingRun],
+  );
   const st = stats(quick);
+  const portList = useMemo(() => parsePortList(portText), [portText]);
+  const portMsg = portList.invalid.length
+    ? `${portList.invalid.map((x) => `"${x}"`).join(", ")} no ${portList.invalid.length === 1 ? "es un puerto válido" : "son puertos válidos"} (1 a 65535)`
+    : portList.truncated
+      ? `Máximo ${MAX_PORTS} puertos por consulta: acota el rango`
+      : "";
 
   const scan = async () => {
     setScanning(true);
     setPortErr("");
     setPorts(null);
     try {
-      setPorts(await invoke<PortRow[]>("tool_ports", { host: portHost.trim(), ports: parsePorts(portText), timeoutMs: 1500 }));
+      setPorts(await invoke<PortRow[]>("tool_ports", { host: portHost.trim(), ports: portList.ports, timeoutMs: 1500 }));
     } catch (e) {
       setPortErr(String(e));
     }
@@ -81,7 +91,12 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
 
   return (
     <div className="space-y-4">
-      <Section title="Ping continuo" hint="Usa el ping del sistema; no requiere permisos de administrador.">
+      {/* Sin acción primaria en el encabezado: cada prueba tiene la suya y corren por separado. */}
+      <ToolHeader title="Diagnóstico" description="Ping continuo, traceroute y revisión de puertos TCP desde este PC hacia un equipo." />
+      <Section
+        title={pingRun ? `Ping continuo a ${pingRun.host}` : "Ping continuo"}
+        hint="Usa el ping del sistema; no requiere permisos de administrador."
+      >
         <form
           className="flex gap-2 mb-3"
           onSubmit={(e) => {
@@ -89,18 +104,18 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
             togglePing();
           }}
         >
-          <input className="field flex-1" placeholder="8.8.8.8 o router.lab" value={pingHost} disabled={pinging} onChange={(e) => setPingHost(e.target.value)} />
+          <input className="field flex-1" aria-label="Host para ping" placeholder="8.8.8.8 o router.lab" value={pingHost} disabled={pinging} onChange={(e) => setPingHost(e.target.value)} />
           <Btn type="submit" kind={pinging ? "default" : "primary"} disabled={!pingHost.trim()}>
             {pinging ? <Square size={13} /> : <Play size={13} />} {pinging ? "Detener" : "Iniciar"}
           </Btn>
         </form>
-        {pingErr && <p className="mb-2 text-[12px] text-danger">{pingErr}</p>}
-        <div className="grid grid-cols-5 gap-2 mb-3">
-          <StatTile label="Actual" value={st.last?.ok ? fmtMs(st.last.rtt) : st.last ? "Sin resp." : "—"} tone={st.last && !st.last.ok ? "danger" : undefined} />
-          <StatTile label="Promedio" value={fmtMs(st.avg)} />
-          <StatTile label="Mín / máx" value={st.min == null ? "—" : `${st.min.toFixed(0)} / ${st.max!.toFixed(0)}`} />
-          <StatTile label="Jitter" value={fmtMs(st.jitter)} />
-          <StatTile label={`Pérdida (${st.lost}/${st.sent})`} value={`${st.loss.toFixed(1)} %`} tone={st.loss >= 5 ? "danger" : st.loss > 0 ? "warn" : undefined} />
+        {pingErr && <p className="mb-2 text-body-sm text-danger">{pingErr}</p>}
+        <div className="grid grid-cols-5 gap-x-3 gap-y-2 mb-3">
+          <Metric label="Actual" value={st.last?.ok ? fmtMs(st.last.rtt) : st.last ? "Sin resp." : "—"} tone={st.last && !st.last.ok ? "danger" : undefined} />
+          <Metric label="Promedio" value={fmtMs(st.avg)} />
+          <Metric label="Mín / máx" value={st.min == null ? "—" : `${st.min.toFixed(0)} / ${st.max!.toFixed(0)}`} />
+          <Metric label="Jitter" value={fmtMs(st.jitter)} />
+          <Metric label={`Pérdida (${st.lost}/${st.sent})`} value={st.sent ? `${st.loss.toFixed(1)} %` : "—"} tone={st.loss >= 5 ? "danger" : st.loss > 0 ? "warn" : undefined} />
         </div>
         <LineChart
           title="Latencia del ping continuo"
@@ -121,12 +136,12 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
               else trace.start("tool_traceroute", { host: traceHost.trim() });
             }}
           >
-            <input className="field flex-1" placeholder="Destino" value={traceHost} onChange={(e) => setTraceHost(e.target.value)} />
+            <input className="field flex-1" aria-label="Destino del traceroute" placeholder="Destino" value={traceHost} onChange={(e) => setTraceHost(e.target.value)} />
             <Btn type="submit" kind={trace.running ? "default" : "primary"} disabled={!traceHost.trim()}>
               {trace.running ? "Detener" : "Trazar"}
             </Btn>
           </form>
-          {trace.error && <p className="mb-2 text-[12px] text-danger">{trace.error}</p>}
+          {trace.error && <p className="mb-2 text-body-sm text-danger">{trace.error}</p>}
           <Console lines={trace.lines} empty="La ruta aparecerá aquí" />
         </Section>
 
@@ -142,36 +157,51 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
               <input className="field" value={portHost} placeholder="192.0.2.10" onChange={(e) => setPortHost(e.target.value)} />
             </Label>
             <Label text="Puertos">
-              <input className="field font-mono !text-[12px]" value={portText} onChange={(e) => setPortText(e.target.value)} />
+              <input
+                className="field font-mono !text-body-sm"
+                value={portText}
+                aria-invalid={!!portMsg}
+                aria-describedby="diag-ports-msg"
+                onChange={(e) => setPortText(e.target.value)}
+              />
             </Label>
             <div className="self-end">
-              <Btn type="submit" kind="primary" disabled={scanning || !portHost.trim() || !parsePorts(portText).length}>
+              <Btn type="submit" kind="primary" disabled={scanning || !portHost.trim() || !portList.ports.length || !!portMsg}>
                 {scanning ? "Revisando…" : "Revisar"}
               </Btn>
             </div>
           </form>
-          {portErr && <p className="mb-2 text-[12px] text-danger">{portErr}</p>}
+          {/* Cuántos puertos se revisarán o por qué no: antes "1-65535" revisaba 1..1024 y "abc" se ignoraba sin aviso. */}
+          <p id="diag-ports-msg" className={`-mt-1 mb-2 text-body-sm ${portMsg ? "text-danger" : "text-muted"}`} aria-live="polite">
+            {portMsg || `${portList.ports.length} ${portList.ports.length === 1 ? "puerto" : "puertos"}${scanning && portList.ports.length > 64 ? ": puede tardar unos segundos" : ""}`}
+          </p>
+          {portErr && <p className="mb-2 text-body-sm text-danger">{portErr}</p>}
           <div className="max-h-[220px] overflow-y-auto">
-            <table className="w-full text-[12px]">
+            <table className="w-full text-body-sm tabular-nums">
               <thead className="text-muted text-left">
                 <tr>
                   <th className="font-medium py-1">Puerto</th>
                   <th className="font-medium">Servicio</th>
                   <th className="font-medium">Estado</th>
+                  <th className="font-medium">Detalle</th>
                   <th className="font-medium text-right">Tiempo</th>
                 </tr>
               </thead>
               <tbody>
-                {ports?.map((r) => (
-                  <tr key={r.port} className="border-t border-line">
-                    <td className="py-1 font-mono">{r.port}</td>
-                    <td className="text-muted">{COMMON[r.port] ?? ""}</td>
-                    <td className={r.open ? "text-ok" : "text-muted"} title={r.error ?? ""}>
-                      {r.open ? "● Abierto" : "○ Cerrado / filtrado"}
-                    </td>
-                    <td className="text-right tabular-nums">{r.open ? fmtMs(r.rtt) : ""}</td>
-                  </tr>
-                ))}
+                {/* Cerrado (RST) y filtrado (sin respuesta) se distinguen, y el motivo va en una columna
+                    visible: en un tooltip no se leía con teclado y una falla de DNS parecía un puerto cerrado. */}
+                {ports?.map((r) => {
+                  const [text, color] = PORT_LABEL[portState(r)];
+                  return (
+                    <tr key={r.port} className="border-t border-line">
+                      <td className="py-1 font-mono">{r.port}</td>
+                      <td className="text-muted">{COMMON[r.port] ?? ""}</td>
+                      <td className={`whitespace-nowrap ${color}`}>{text}</td>
+                      <td className="text-muted [overflow-wrap:anywhere]">{r.open ? "" : (r.error ?? "")}</td>
+                      <td className="text-right tabular-nums">{r.open ? fmtMs(r.rtt) : ""}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

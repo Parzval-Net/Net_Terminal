@@ -76,6 +76,21 @@ assert.ok(L.buildParams(form({ query: "(?i)error", regex: true })).params);
   assert.ok(warn.some((l) => l.includes("2 archivos superan")));
   assert.ok(warn.some((l) => l.includes("1 archivo binario omitido")));
   assert.ok(warn.some((l) => l.includes("3 archivos no se pudieron leer")));
+  // El aviso del recorrido no promete que se revisaron los más recientes (se corta en el orden del disco).
+  const walk = warn.find((l) => l.includes("50.000"));
+  assert.ok(walk && !walk.includes("se revisaron los más recientes") && walk.includes("no necesariamente los más recientes"));
+  // Tope por archivo: se dice como tal, sin pedir subir el máximo de resultados.
+  const perFile = L.summaryLines({ ...base, truncated: true, resultsCapped: false, filesCapped: 2 });
+  assert.equal(perFile.length, 2);
+  assert.ok(perFile[1].startsWith("2 archivos tienen más de 200 coincidencias"));
+  assert.ok(!perFile.some((l) => l.includes("tope de resultados")));
+  const one = L.summaryLines({ ...base, truncated: true, resultsCapped: false, filesCapped: 1 });
+  assert.ok(one[1].startsWith("1 archivo tiene más de 200"));
+  // Ambos topes: dos avisos distintos.
+  const both = L.summaryLines({ ...base, truncated: true, resultsCapped: true, filesCapped: 1 });
+  assert.ok(both.some((l) => l.includes("tope de resultados")) && both.some((l) => l.includes("1 archivo tiene")));
+  // Resumen sin el detalle (backend anterior): truncated se toma como tope total.
+  assert.ok(L.summaryLines({ ...base, truncated: true }).some((l) => l.includes("tope de resultados")));
 }
 
 // ---- Resaltado por puntos de código (el backend cuenta caracteres, JS UTF-16) ----

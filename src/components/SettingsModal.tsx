@@ -58,6 +58,7 @@ const MODULES: [ModuleId, string, string][] = [
   ["plugins", "Plugins", "Extensiones instalables en Python"],
   ["backup", "Respaldos", "Respaldo de configuración por fabricante y comparación de versiones"],
   ["logsearch", "Buscar en logs", "Búsqueda de texto o regex en los logs de sesión, los respaldos y las notas"],
+  ["audit", "Auditoría de seguridad", "Revisa la configuración de Cisco IOS/IOS-XE y FortiOS con reglas editables y arma un plan de corrección con rollback"],
 ];
 
 /**
@@ -73,7 +74,7 @@ const sections: { id: Section; label: string; Icon: typeof Palette; group: strin
   { id: "data", label: "Logs", Icon: ScrollText, group: "Sesiones y datos", keywords: "logs grabar automáticamente hora en cada línea nombre del archivo patrón anexar rotación diaria ocultar secretos carpeta de logs" },
   { id: "credentials", label: "Credenciales", Icon: KeyRound, group: "Sesiones y datos", keywords: "contraseñas guardadas bóveda llavero contraseña maestra portable credenciales vecinos saltos topología bloqueo automático inactividad suspender" },
   { id: "sessions", label: "Importar y exportar", Icon: ArrowLeftRight, group: "Sesiones y datos", keywords: "sesiones importar exportar portapapeles json putty securecrt mobaxterm ssh config csv carpeta de datos portable archivo cifrado ntx respaldo" },
-  { id: "modules", label: "Módulos", Icon: Blocks, group: "Herramientas", keywords: "módulos monitoreo diagnóstico topología subredes velocidad tftp http syslog plugins respaldos herramientas" },
+  { id: "modules", label: "Módulos", Icon: Blocks, group: "Herramientas", keywords: "módulos monitoreo diagnóstico topología subredes velocidad tftp http syslog plugins respaldos auditoría seguridad hardening herramientas" },
   { id: "alerts", label: "Alertas", Icon: BellRing, group: "Herramientas", keywords: "alertas palabra clave reglas sonido aviso pestaña expresión regular" },
   { id: "ai", label: "Agentes IA", Icon: Bot, group: "Integraciones", keywords: "agentes ia mcp claude gemini codex puerto token aprobación solo lectura servidor sesiones visibles marcadas auditoría registro ventana consultas recursos prompts" },
   { id: "about", label: "Acerca de", Icon: Info, group: "Acerca de", keywords: "versión actualizaciones buscar ahora github repositorio autor" },
@@ -219,12 +220,22 @@ export function SettingsModal({
               {g.items.map(({ id, label, Icon }) => (
                 <button
                   key={id}
-                  onClick={() => setSection(id)}
+                  onClick={(e) => {
+                    setSection(id);
+                    // El foco sigue a la sección elegida. En WebKit un clic no enfoca el botón y el anillo
+                    // quedaba en la sección anterior, que se leía como la activa. Abierto con el mouse,
+                    // :focus-visible no dibuja anillo; con teclado, coincide con la selección.
+                    e.currentTarget.focus({ preventScroll: true });
+                  }}
                   title={label}
                   aria-label={label}
                   aria-current={section === id ? "page" : undefined}
-                  className={`w-full flex items-center gap-2 px-2 h-8 rounded-md text-left ${
-                    section === id ? "bg-selected text-fg shadow-[inset_2px_0_0_0_var(--accent)]" : "text-muted hover:text-fg hover:bg-hover"
+                  // Selección: fondo, barra de acento de 3 px y semibold (no solo color, WCAG 1.4.1). El foco
+                  // de teclado es el contorno de :focus-visible (App.css), separado del borde por 2 px.
+                  className={`w-full flex items-center gap-2 px-2 h-8 rounded-md text-left focus-visible:outline-offset-2 ${
+                    section === id
+                      ? "bg-selected text-fg font-semibold shadow-[inset_3px_0_0_0_var(--accent)]"
+                      : "text-muted hover:text-fg hover:bg-hover"
                   }`}
                 >
                   <Icon size={15} className="shrink-0" />
@@ -251,7 +262,10 @@ export function SettingsModal({
             </button>
           </header>
 
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {/* Las ayudas de cada fila (Item, id terminado en -hint) muestran hasta dos líneas en vez de
+              cortarse en una: truncar dejaba "…se ab…" justo antes del dato útil. El texto completo
+              sigue en el tooltip. */}
+          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5 [&_[id$=-hint]]:whitespace-normal [&_[id$=-hint]]:line-clamp-2 [&_[id$=-hint]]:[overflow-wrap:anywhere]">
             {section === "appearance" && (
               <>
                 <Item label="Interfaz">
@@ -605,7 +619,8 @@ export function SettingsModal({
             ) : (
               <span />
             )}
-            <span className="text-[11.5px] text-muted">Los cambios se aplican al instante</span>
+            {/* En Acerca de no hay ajustes que cambiar: el pie no aplica. */}
+            {section !== "about" && <span className="text-[11.5px] text-muted">Los cambios se aplican al instante</span>}
           </footer>
           {confirmReset &&
             createPortal(
@@ -883,10 +898,11 @@ function ThemeCard({
           ))}
         </div>
       </div>
-      <div className="flex items-center justify-between px-2.5 h-7 text-[12px]">
-        <span className="truncate" title={hint ? `${preset.name} · ${hint}` : preset.name}>
-          {preset.name}
-          {hint && <span className="text-muted"> · {hint}</span>}
+      {/* Nombre en una línea y subtítulo debajo: en la misma línea el subtítulo se cortaba ("Sigue la int…"). */}
+      <div className="flex items-center justify-between gap-1 px-2.5 min-h-7 py-1 text-[12px] leading-tight">
+        <span className="min-w-0" title={hint ? `${preset.name} · ${hint}` : preset.name}>
+          <span className="block truncate">{preset.name}</span>
+          {hint && <span className="block truncate text-[11px] text-muted">{hint}</span>}
         </span>
         {selected && <Check size={13} className="text-accent shrink-0" />}
       </div>

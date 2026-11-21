@@ -1,7 +1,10 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ArchiveRestore, FileCode2, FileSearch, FolderOpen, MousePointerClick, Pencil, Plus, Square, Trash2, X } from "lucide-react";
 import { Macro } from "../lib/settings";
+import { macroRisk } from "../lib/bundle";
+import { type Risk, riskLabel } from "../lib/packs";
+import { RISK_MARK, RISK_TEXT } from "./CodeEditor";
 import { ContextMenu } from "./Sidebar";
 import type { MenuItem } from "./tabMenu";
 
@@ -27,6 +30,9 @@ export const ButtonBar = memo(function ButtonBar(p: Props) {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
   const [scripts, setScripts] = useState<string[]>([]);
+  // Riesgo de cada botón de texto (computeRisk, memorizado): solo se recalcula al cambiar los botones.
+  // Los de script no se marcan: al ejecutarlos se eligen destinos y modo, y cada línea pasa por scriptGate.
+  const risks = useMemo(() => new Map<string, Risk>(p.macros.map((m) => [m.id, m.kind === "script" ? "read" : macroRisk(m)])), [p.macros]);
 
   useEffect(() => {
     invoke<string[]>("list_scripts").then(setScripts).catch(() => {});
@@ -125,29 +131,48 @@ export const ButtonBar = memo(function ButtonBar(p: Props) {
         <MousePointerClick size={13} aria-hidden />
         <span className="hidden @[40rem]:inline">Botones</span>
       </span>
-      {p.macros.map((m) => (
+      {p.macros.map((m) => {
+        const risk = risks.get(m.id) ?? "read";
+        return (
         <button
           key={m.id}
-          disabled={!p.connected}
-          onClick={() => p.onRun(m)}
+          // aria-disabled y no disabled: sigue en el orden de Tab, con su menú (tecla Menú o
+          // Mayús+F10) y un aviso que explica por qué no se ejecuta.
+          aria-disabled={!p.connected}
+          onClick={() => (p.connected ? p.onRun(m) : p.onNotice?.("Conecta una sesión para usar los botones", "error"))}
           onContextMenu={(e) => {
             e.preventDefault();
+            // Desde el teclado el evento llega sin coordenadas (0, 0): el menú se ancla al botón.
+            const r = e.currentTarget.getBoundingClientRect();
+            const at = e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { x: r.left, y: r.bottom + 4 };
+            // Eliminar se confirma en el mismo menú, con "Cancelar" primero (como los scripts).
+            const confirmDelete = () =>
+              setMenu({
+                ...at,
+                items: [
+                  ["Cancelar", <X size={13} />, () => {}],
+                  [`Eliminar el botón ${m.label}`, <Trash2 size={13} />, () => p.onDelete(m)],
+                ],
+              });
             setMenu({
-              x: e.clientX,
-              y: e.clientY,
+              ...at,
               items: [
                 ["Editar", <Pencil size={13} />, () => p.onEdit(m)],
-                ["Eliminar", <Trash2 size={13} />, () => p.onDelete(m)],
+                ["Eliminar…", <Trash2 size={13} />, () => setTimeout(confirmDelete)],
               ],
             });
           }}
-          title={`${m.kind === "script" ? `Script: ${m.script}\nAl ejecutarlo eliges los destinos y el modo` : m.text}\nClic derecho para editar`}
-          className="shrink-0 flex items-center gap-1.5 px-2.5 h-6 rounded-md border border-line text-[12px] hover:bg-hover disabled:opacity-40 disabled:hover:bg-transparent"
+          title={`${m.kind === "script" ? `Script: ${m.script}\nAl ejecutarlo eliges los destinos y el modo` : m.text}${risk !== "read" ? `\n${RISK_MARK[risk]} ${riskLabel[risk]}` : ""}${p.connected ? "" : "\nConecta una sesión para usarlo"}\nClic derecho para editar`}
+          className="shrink-0 flex items-center gap-1.5 px-2.5 h-6 rounded-md border border-line text-[12px] hover:bg-hover aria-disabled:opacity-40 aria-disabled:hover:bg-transparent"
         >
           {m.kind === "script" && <FileCode2 size={12} className="text-muted" />}
+          {/* Mismo ícono del catálogo (▲ cambio, ✕ disruptivo); el texto accesible lo nombra, no solo el color. */}
+          {risk !== "read" && <span aria-hidden className={`text-[10px] leading-none ${RISK_TEXT[risk]}`}>{RISK_MARK[risk]}</span>}
           {m.label}
+          {risk !== "read" && <span className="sr-only">, {riskLabel[risk].toLowerCase()}</span>}
         </button>
-      ))}
+        );
+      })}
       <button
         onClick={() => p.onEdit(null)}
         title="Nuevo botón"

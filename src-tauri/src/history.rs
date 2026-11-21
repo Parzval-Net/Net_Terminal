@@ -110,12 +110,32 @@ pub fn looks_secret(cmd: &str) -> bool {
         "authentication-key",
         "set psk",
     ];
+    // Palabras cortas que también llevan secretos ("tacacs-server key X", "snmp-server user u g v3
+    // auth sha X priv aes 128 Y"). Deben ser palabra completa y, como son comunes, no cuentan en
+    // las líneas de consulta (show/display), donde no hay valores que proteger.
+    const SHORT: [&str; 3] = ["key", "auth", "priv"];
     let lower = cmd.to_lowercase();
-    WORDS.iter().any(|w| {
-        lower.match_indices(w).any(|(i, _)| {
-            // Debe venir seguido de un valor (ej. "enable secret X"), no solo mencionarse.
-            let after = &lower[i + w.len()..];
-            after.starts_with(char::is_whitespace) && !after.trim().is_empty()
+    // Debe venir seguido de un valor (ej. "enable secret X"), no solo mencionarse.
+    let with_value = |text: &str, i: usize, w: &str| {
+        let after = &text[i + w.len()..];
+        after.starts_with(char::is_whitespace) && !after.trim().is_empty()
+    };
+    if WORDS.iter().any(|w| lower.match_indices(w).any(|(i, _)| with_value(&lower, i, w))) {
+        return true;
+    }
+    lower.lines().any(|line| {
+        let first = line.split_whitespace().next().unwrap_or("");
+        if matches!(first, "show" | "sh" | "display" | "dis") {
+            return false;
+        }
+        SHORT.iter().any(|w| {
+            line.match_indices(w).any(|(i, _)| {
+                let before = &line[..i];
+                // "crypto key generate rsa" no lleva secreto (la llave la crea el equipo).
+                (i == 0 || before.ends_with(char::is_whitespace))
+                    && !before.trim_end().ends_with("crypto")
+                    && with_value(line, i, w)
+            })
         })
     })
 }
@@ -245,5 +265,29 @@ mod tests {
         assert!(looks_secret("set psksecret ENC xyz"));
         assert!(!looks_secret("show password-policy"));
         assert!(!looks_secret("show snmp community"));
+    }
+
+    #[test]
+    fn detects_short_secret_words() {
+        // Plantillas con {{tacacs_key}}, {{auth}} o {{priv_key}} ya completadas.
+        assert!(looks_secret("tacacs-server key S3cr3t!"));
+        assert!(looks_secret("radius-server host 10.0.0.1 key 7 0822455D0A16"));
+        assert!(looks_secret("snmp-server user u g v3 auth sha AuthPass1 priv aes 128 PrivPass1"));
+        assert!(looks_secret("crypto isakmp key MiClave address 0.0.0.0"));
+        assert!(looks_secret("interface Gi1/0/1\n ip ospf message-digest-key 1 md5 x\n key 1"));
+        // Sin valor, como parte de otra palabra, en consultas o al generar llaves: se guardan.
+        assert!(!looks_secret("key"));
+        assert!(!looks_secret("show crypto key mypubkey rsa"));
+        assert!(!looks_secret("display snmp-agent usm-user auth sha"));
+        assert!(!looks_secret("crypto key generate rsa modulus 2048"));
+        assert!(!looks_secret("aaa authorization exec default local"));
+        assert!(!looks_secret("ip ssh pubkey-chain"));
+        assert!(!looks_secret("privilege exec level 15 show"));
+        // Se revisa el historial guardado en disco: el comando con secreto no queda.
+        let dir = tmp("shortsecret");
+        assert!(!cmd_add(&dir, "sw1", "tacacs-server key S3cr3t!").unwrap());
+        assert!(cmd_add(&dir, "sw1", "crypto key generate rsa modulus 2048").unwrap());
+        assert_eq!(cmd_list(&dir, "sw1").len(), 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

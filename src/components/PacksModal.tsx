@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
+import { packsCall } from "../lib/api";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, Download, FileJson, Lock, Search, Trash2, Upload, X } from "lucide-react";
+import { AlertTriangle, Download, FileJson, Lock, Search, Upload, X } from "lucide-react";
 import { OS_VENDORS, Pack, Risk, Validation, buildCatalog, riskLabel, validatePack } from "../lib/packs";
 import { useDragResize } from "../lib/useDragResize";
+import { InlineConfirm } from "./InlineConfirm";
 
 interface Props {
   packs: Pack[];
@@ -52,7 +54,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
     if (packs.some((p) => p.builtin && p.id === pack.id)) return setError("Ese id corresponde a un pack incluido; cambia el id del pack");
     try {
       // Se guarda la versión ya validada y normalizada, nunca el archivo original.
-      await invoke("cmdpack_save", { pack: { ...pack, builtin: undefined } });
+      await packsCall("cmdpack_save", { pack: { ...pack, builtin: undefined } });
       setPreview(null);
       onChanged();
     } catch (e) {
@@ -63,7 +65,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
   const exportPack = async (id: string) => {
     const dest = await save({ defaultPath: `${id}.json`, filters: [{ name: "Pack de comandos", extensions: ["json"] }] });
     if (!dest) return;
-    await invoke("cmdpack_export", { id, dest }).catch((e) => setError(String(e)));
+    await packsCall("cmdpack_export", { id, dest }).catch((e) => setError(String(e)));
   };
 
   // Memorizado: mover o redimensionar la ventana vuelve a dibujar el modal.
@@ -182,6 +184,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
                           checked={enabled}
                           onChange={(e) => onToggle(p.id, e.target.checked)}
                           title={enabled ? "Desactivar" : "Activar"}
+                          aria-label={`Usar ${p.name} en el catálogo`}
                         />
                       </label>
                       <div className="min-w-0 flex-1">
@@ -197,21 +200,27 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
                       </div>
                       {!p.builtin && (
                         <>
-                          <button title="Exportar para compartir" onClick={() => exportPack(p.id)} className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover">
-                            <Download size={14} />
-                          </button>
-                          <button
-                            title={confirmDelete === p.id ? "Clic para confirmar" : "Eliminar"}
-                            onMouseLeave={() => setConfirmDelete(null)}
-                            onClick={async () => {
-                              if (confirmDelete !== p.id) return setConfirmDelete(p.id);
-                              await invoke("cmdpack_delete", { id: p.id }).catch((e) => setError(String(e)));
+                          {confirmDelete !== p.id && (
+                            <button
+                              title="Exportar para compartir"
+                              aria-label={`Exportar ${p.name}`}
+                              onClick={() => exportPack(p.id)}
+                              className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
+                            >
+                              <Download size={14} />
+                            </button>
+                          )}
+                          <InlineConfirm
+                            name={p.name}
+                            asking={confirmDelete === p.id}
+                            onAsk={() => setConfirmDelete(p.id)}
+                            onCancel={() => setConfirmDelete((c) => (c === p.id ? null : c))}
+                            onConfirm={async () => {
+                              setConfirmDelete(null);
+                              await packsCall("cmdpack_delete", { id: p.id }).catch((e) => setError(String(e)));
                               onChanged();
                             }}
-                            className={`w-7 h-7 grid place-items-center rounded-md hover:bg-hover ${confirmDelete === p.id ? "text-danger" : "text-muted hover:text-danger"}`}
-                          >
-                            <Trash2 size={14} />
-                          </button>
+                          />
                         </>
                       )}
                     </div>

@@ -1,8 +1,9 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Search, Send, Trash2 } from "lucide-react";
 import { stepIndex } from "../lib/kbNav";
 import { returnTarget } from "../lib/useModal";
+import { anchorBelow, type PopoverPos } from "../lib/popoverAnchor";
 
 interface Entry {
   cmd: string;
@@ -26,7 +27,7 @@ interface Props {
 
 /**
  * Historial de comandos enviados desde Notas, catálogo y botones para el equipo de UNA pestaña.
- * Se abre desde la barra de estado, el menú de la pestaña, la paleta o el atajo; se lee solo al montarse (sin costo cerrado).
+ * Se abre desde la barra de pestañas, el menú de la pestaña, la paleta o el atajo; se lee solo al montarse (sin costo cerrado).
  * El panel pertenece a su pestaña: al cambiar de pestaña activa sigue mostrando la suya (lo dice el título),
  * reenviar va siempre a ella y, si se cierra, el panel se cierra.
  * Teclado (panel emergente, no un modal: sin trampa de foco): al abrirse el foco va al filtro; Abajo/Arriba/Inicio/Fin
@@ -51,6 +52,22 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
   }, [items, q]);
   const given = useRef(false);
   const pressed = useRef(false);
+  /** Posición bajo el botón Historial de la barra de pestañas; null hasta medir (arriba a la derecha). */
+  const [pos, setPos] = useState<PopoverPos | null>(null);
+
+  // Se ancla al botón visible al abrir y se recalcula si cambia el tamaño de la ventana.
+  useLayoutEffect(() => {
+    const place = () => {
+      const btn = Array.from(document.querySelectorAll<HTMLElement>("[data-history-btn]"))
+        .map((b) => b.getBoundingClientRect())
+        .find((r) => r.width > 0 && r.height > 0);
+      const width = box.current?.offsetWidth ?? 420;
+      setPos(anchorBelow(btn ?? null, width, { width: window.innerWidth, height: window.innerHeight }));
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, []);
 
   /** Cierra y devuelve el foco a quien abrió el panel. */
   const closeBack = () => {
@@ -75,7 +92,7 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
     invoke<Entry[]>("cmd_history", { key: historyKey })
       .then(setItems)
       .catch(() => setItems([]));
-    // El botón del historial en la barra de estado alterna el panel: no lo cierra aquí para que el clic no lo reabra.
+    // El botón del historial en la barra de pestañas alterna el panel: no lo cierra aquí para que el clic no lo reabra.
     const onDown = (e: MouseEvent) =>
       !box.current?.contains(e.target as Node) && !(e.target as Element).closest?.("[data-history-btn]") && onClose();
     const onKey = (e: KeyboardEvent) => {
@@ -155,9 +172,10 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
           }, 0);
         }
       }}
-      className="outline-none fixed bottom-9 right-3 z-40 w-[420px] max-w-[calc(100vw-1.5rem)] bg-panel border border-line rounded-lg shadow-pop text-[12px] text-fg overflow-hidden"
+      style={pos ? { top: pos.top, left: pos.left, maxHeight: pos.maxHeight } : undefined}
+      className={`outline-none fixed z-40 flex flex-col w-[420px] max-w-[calc(100vw-1.5rem)] bg-panel border border-line rounded-lg shadow-pop text-[12px] text-fg overflow-hidden ${pos ? "" : "top-11 right-3"}`}
     >
-      <div className="flex items-center justify-between gap-2 px-3 h-8 border-b border-line text-muted">
+      <div className="shrink-0 flex items-center justify-between gap-2 px-3 h-8 border-b border-line text-muted">
         <span className="min-w-0 truncate" title="Últimos comandos enviados desde Notas, el catálogo y los botones">
           Historial de <b className="font-semibold text-fg">{tabName}</b>
           {!isActiveTab && " (otra pestaña)"}
@@ -176,12 +194,12 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
       </div>
       {/* Sin conexión los comandos no se pueden reenviar: se dice por qué (y no solo en el tooltip). */}
       {!connected && !!items?.length && (
-        <p id={noteId} className="px-3 py-1.5 border-b border-line text-[11px] text-warn">
+        <p id={noteId} className="shrink-0 px-3 py-1.5 border-b border-line text-[11px] text-warn">
           {tabName} no está conectada: reconecta para reenviar un comando.
         </p>
       )}
       {!!items?.length && (
-        <div className="relative px-2 pt-2 pb-1">
+        <div className="shrink-0 relative px-2 pt-2 pb-1">
           <Search size={13} className="absolute left-4 top-1/2 -translate-y-[40%] text-muted pointer-events-none" />
           <input
             ref={filterRef}
@@ -205,7 +223,7 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
           />
         </div>
       )}
-      <ul className="max-h-[320px] overflow-y-auto p-1">
+      <ul className="min-h-0 max-h-[320px] overflow-y-auto p-1">
         {items === null && <li className="px-2 py-3 text-muted">Cargando…</li>}
         {!!items?.length && shown?.length === 0 && <li className="px-2 py-3 text-muted">Sin coincidencias con «{q.trim()}».</li>}
         {items?.length === 0 && (

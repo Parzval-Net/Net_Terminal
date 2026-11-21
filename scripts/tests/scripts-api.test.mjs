@@ -26,6 +26,16 @@ const SECRETO = "Cl4ve-Sup3r";
     shutdown: "disruptive",
     "no ip address": "disruptive",
     "show clock ; reload": "disruptive",
+    // Comentarios de IOS y shells.
+    "!": "read",
+    "!-----": "read",
+    "# respaldo": "read",
+    // En bash, «!x» repite un comando del historial (no se sabe cuál) y «! cmd» lo ejecuta.
+    "!!": "disruptive",
+    "!rel": "disruptive",
+    "!-2": "disruptive",
+    "! reload": "disruptive",
+    "! interface Gi1/0/1": "change",
   };
   for (const [l, r] of Object.entries(casos)) assert.equal(scriptLineRisk(l, false), r, l);
   assert.equal(scriptLineRisk("show ver⇥", true), "disruptive", "una línea opaca se confirma siempre");
@@ -38,6 +48,8 @@ const SECRETO = "Cl4ve-Sup3r";
   assert.equal(autoDecision({ ...p, line: "interface Gi1/0/1", allowChanges: false }), null);
   assert.equal(autoDecision({ ...p, line: "interface Gi1/0/1", allowChanges: true }), true);
   assert.equal(autoDecision({ ...p, line: "reload", allowChanges: true }), null);
+  assert.equal(autoDecision({ ...p, line: "!rel", allowChanges: true }), null, "historial de bash: se confirma siempre");
+  assert.equal(autoDecision({ ...p, line: "!", allowChanges: false }), true);
 }
 
 // ---------- Tres equipos ficticios ----------

@@ -34,20 +34,8 @@ export const FILL_SETTLE_MS = 400;
 /** Tope de saltos de una ruta (el pivote no cuenta: pivote + hasta 8 saltos). Pasado el tope se avisa, no se calla. */
 export const MAX_ROUTE_STEPS = 8;
 
-/**
- * Saltos en curso (destino de cada uno), para que quien cierra Herramientas avise antes de cortarlos:
- * Topología los publica al cambiar y los borra al desmontarse. Solo nombres, nunca credenciales.
- */
-let running: string[] = [];
-export const runningHops = (): string[] => running;
-export const setRunningHops = (names: string[]) => {
-  running = [...names];
-};
-/** Frase para el aviso al cerrar Herramientas: los saltos en curso se cortan (vacía si no hay). */
-export const hopCloseNote = (names: string[]): string =>
-  names.length
-    ? `${names.length === 1 ? `Hay un salto en curso hacia ${names[0]}` : `Hay ${names.length} saltos en curso (${names.slice(0, 4).join(", ")}${names.length > 4 ? "…" : ""})`}: al cerrar Herramientas se detiene${names.length === 1 ? "" : "n"} y su pestaña queda en el último equipo alcanzado, sin escribir contraseñas. `
-    : "";
+// Saltos en curso y aviso al cerrar Herramientas: en un módulo liviano que App importa directo.
+export { runningHops, setRunningHops, hopCloseNote } from "./hopRegistry";
 
 /** Sesión de la pestaña de salto: la misma del pivote, sin reconectar sola ni repetir comandos de inicio. */
 export function hopTabSession(base: Session, title: string): Session {
@@ -182,6 +170,7 @@ const ERRORS: [RegExp, string][] = [
   [/authentication (?:failed|failure)|permission denied|access denied|login invalid|bad (?:passwords|secrets)|too many authentication/i, "autenticación rechazada"],
   [/unable to negotiate|no matching (?:key|host key|cipher|mac|kex)|ssh version mismatch|protocol (?:major )?version|failed to connect|unable to connect/i, "no se pudo negociar SSH con el equipo"],
   [/connection (?:closed by|reset by)|closed by foreign host/i, "el equipo cerró la conexión"],
+  [/can'?t connect|cannot connect|could not connect|connection to \S+ aborted|connection aborted|unable to open connection/i, "no se pudo conectar con el equipo"],
   [/% ?invalid (?:input|command)|% ?unrecognized command|error: ?unrecognized command|% ?incomplete command/i, "el equipo no reconoce el comando de salto"],
 ];
 
@@ -242,6 +231,24 @@ export const truncateRoute = (r: TabRoute, idx: number): TabRoute => (idx >= r.s
 /** Mismo equipo por nombre: sin dominio ni mayúsculas, y con guion bajo y guion como lo mismo (un hostname "acc_sw01" y su CDP "acc-sw01"). */
 const looseId = (n: string) => nodeId(n).replace(/[_\s]+/g, "-");
 export const samePrompt = (a: string, b: string) => looseId(a) === looseId(b);
+
+/** El nombre es el del equipo `id` del diagrama o uno de sus alias. */
+const isDevice = (name: string, id: string, aliases?: string[]) => nodeId(name) === id || !!aliases?.includes(nodeId(name));
+
+/**
+ * El prompt es del equipo `id` del diagrama: por su nombre, por uno de sus alias (el nombre del
+ * prompt cuando difiere del que anuncian sus vecinos) o por la ruta de la pestaña, que guarda el
+ * prompt de cada equipo al que saltó (`RouteStep.prompt`). Antes la lectura de tráfico comparaba el
+ * prompt con el id a secas y, con un alias, siempre decía "su pestaña está ahora en X".
+ */
+export function promptIsDevice(prompt: string, id: string, aliases?: string[], route?: TabRoute): boolean {
+  const mine = [id, ...(aliases ?? [])];
+  if (mine.some((x) => samePrompt(prompt, x))) return true;
+  if (!route) return false;
+  const shown = routePrompts(route);
+  const names = routeNames(route);
+  return shown.some((p, i) => (samePrompt(prompt, p) || samePrompt(prompt, names[i])) && mine.some((x) => samePrompt(names[i], x)));
+}
 
 /**
  * En qué equipo de la ruta está la pestaña según su pantalla: el índice (0 = pivote), `-1` si el
@@ -527,8 +534,10 @@ export function stepHop(job: HopJob, screen: string, now: number): { job: HopJob
     });
   }
   if (s.kind === "prompt") {
-    // Mismo hostname en el pivote y el vecino: llegó si hubo login o banner del vecino antes del prompt.
-    const atPivot = samePrompt(s.name, j.pivot ?? "") && (!!err || !arrivedSameName(after));
+    // El prompt es el del pivote: si el vecino esperado tiene otro nombre, se volvió al pivote (un
+    // fallo con un mensaje no reconocido, p. ej. "Error: Can't connect" de VRP). Solo con el mismo
+    // hostname en ambos se decide por el login o banner del vecino antes del prompt.
+    const atPivot = samePrompt(s.name, j.pivot ?? "") && (!!err || !expected(j.neighbor, s.name) || !arrivedSameName(after));
     if (!atPivot) {
       if (quiet >= PROMPT_STABLE_MS) {
         const mism = expected(j.neighbor, s.name) ? undefined : `Llegó a ${s.name} y se esperaba ${j.neighbor}.`;
@@ -608,6 +617,8 @@ export interface PlanNode {
   name: string;
   ip?: string;
   platform?: string;
+  /** Otros nombres del equipo (el de su prompt cuando difiere del que anuncian sus vecinos). */
+  aliases?: string[];
 }
 
 /** De dónde salió un equipo del diagrama: el equipo que lo descubrió (id) y la ruta de la pestaña que estaba en él. */
@@ -769,7 +780,7 @@ const rank = (t: PlanTab) => (t.status === "connected" ? 0 : t.status === "conne
  */
 export function planOpen(inp: PlanInput): OpenPlan {
   const { target } = inp;
-  const here = inp.tabs.filter((t) => t.device && nodeId(t.device.name) === target.id).sort((a, b) => rank(a) - rank(b));
+  const here = inp.tabs.filter((t) => t.device && isDevice(t.device.name, target.id, target.aliases)).sort((a, b) => rank(a) - rank(b));
   const live = here.find((t) => t.status === "connected");
   const dead = here.find((t) => t.status === "closed");
   // Descubierto desde una pestaña: su ruta heredada. Si no, la más corta por el diagrama.
@@ -839,6 +850,7 @@ export function tabAtDevice<T extends { name: string; host?: string; screen?: (n
   tabs: T[],
   routes?: Record<string, TabRoute>,
   busy?: ReadonlySet<string>,
+  aliases?: string[],
 ): { tab: T; verified: boolean } | undefined {
   let best: { tab: T; verified: boolean; r: number } | undefined;
   for (const t of tabs) {
@@ -846,7 +858,7 @@ export function tabAtDevice<T extends { name: string; host?: string; screen?: (n
     const d = tabDevice(t, route);
     if (!d) continue;
     let r: number;
-    if (nodeId(d.name) === id) r = d.verified ? 0 : 2;
+    if (isDevice(d.name, id, aliases)) r = d.verified ? 0 : 2;
     else if (!route && !d.verified && t.host && addrs.includes(t.host)) r = 3;
     else continue;
     // Una pestaña con un salto en curso (esperando el prompt del pivote para saltar) solo si no hay otra.
@@ -899,4 +911,4 @@ export function newCameFrom(
 }
 
 /** El nodo como equipo del plan. */
-export const planNode = (n: TopoNode): PlanNode => ({ id: n.id, name: n.name, ip: n.ip, platform: n.platform });
+export const planNode = (n: TopoNode): PlanNode => ({ id: n.id, name: n.name, ip: n.ip, platform: n.platform, ...(n.aliases?.length ? { aliases: n.aliases } : {}) });

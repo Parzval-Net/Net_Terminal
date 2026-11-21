@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowUpToLine,
@@ -7,6 +7,8 @@ import {
   ChevronUp,
   Check,
   ChevronsDownUp,
+  ClipboardCopy,
+  Columns2,
   Copy,
   FileDown,
   FileUp,
@@ -20,7 +22,10 @@ import {
   Zap,
   Search,
   Trash2,
+  UserRound,
+  ArrowDownUp,
 } from "lucide-react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ConnStatus, Session, sessionTarget } from "../types";
 import { SessionIcon } from "./SessionIcon";
 import { modLabel } from "../lib/platform";
@@ -86,12 +91,22 @@ interface Props {
   onExportFile?: (folder?: string) => void;
   /** Conexión rápida sin guardar (SSH, Telnet, Serial). */
   onQuickConnect?: () => void;
+  /** Conecta la sesión en vista dividida junto a la pestaña actual (sin manejador, el ítem no aparece). */
+  onOpenSplit?: (s: Session) => void;
+  /** Conecta con otro usuario sin cambiar la sesión guardada (sin manejador, el ítem no aparece). */
+  onOpenAs?: (s: Session) => void;
 }
 
-/** [etiqueta, icono, acción, deshabilitado, atajo que se muestra a la derecha]. */
-type MenuItem = [string, React.ReactNode, () => void, boolean?, string?, boolean?];
-/** `radio`: el cuarto elemento de cada ítem marca la opción elegida (menuitemradio con check) en vez de deshabilitarla. */
-type Menu = { x: number; y: number; items: MenuItem[]; radio?: boolean };
+/**
+ * [etiqueta, icono, acción, deshabilitado, atajo que se muestra a la derecha, separador antes, submenú].
+ * Con submenú la acción no se usa: el ítem abre la lista con clic, Enter o flecha derecha.
+ */
+type MenuItem = [string, React.ReactNode, () => void, boolean?, string?, boolean?, MenuItem[]?];
+/**
+ * `radio`: el cuarto elemento de cada ítem marca la opción elegida (menuitemradio con check) en vez de deshabilitarla.
+ * `owner`: quién lo abrió (para el aria-expanded del botón que lo despliega).
+ */
+type Menu = { x: number; y: number; items: MenuItem[]; radio?: boolean; owner?: string };
 type Selected = { kind: "session"; id: string } | { kind: "folder"; path: string } | null;
 
 /** Dónde cae lo arrastrado sobre una fila: antes, después o dentro de una carpeta. */
@@ -103,6 +118,24 @@ const DND_FOLDER = "application/x-nt-folder";
 const VIRTUAL_FROM = 200;
 /** Filas extra arriba y abajo de la ventana (scroll sin parpadeo). */
 const OVERSCAN = 12;
+
+/** Une grupos de ítems con un separador entre ellos (los grupos vacíos no cuentan). */
+function grouped(...groups: MenuItem[][]): MenuItem[] {
+  return groups
+    .filter((g) => g.length)
+    .flatMap((g, gi) =>
+      g.map((it, i): MenuItem => {
+        if (gi === 0 || i > 0) return it;
+        const [label, icon, action, disabled, shortcut, , sub] = it;
+        return [label, icon, action, disabled, shortcut, true, sub];
+      }),
+    );
+}
+
+/** Lo que copia "Copiar host": IP o nombre del equipo, o el puerto en una serial; nada en la terminal local. */
+function hostOf(s: Session): string | undefined {
+  return (s.type === "serial" ? s.serial_port : s.type === "local" ? undefined : s.host)?.trim() || undefined;
+}
 
 function loadCollapsed(): Record<string, boolean> {
   try {
@@ -123,8 +156,10 @@ export const Sidebar = memo(function Sidebar(p: Props) {
   /** Indicador de reordenamiento: fila (clave de árbol con su carpeta) y posición. */
   const [dropHint, setDropHint] = useState<{ row: string; pos: DropPos } | null>(null);
   const expandTimer = useRef<number | undefined>(undefined);
-  const [notice, setNotice] = useState("");
+  /** Aviso bajo la cabecera: los errores en rojo; una confirmación (p. ej. host copiado) en tono neutro. */
+  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
+  const addWasOpen = useRef(false);
   // Teclado (árbol WAI-ARIA con tabindex móvil): la fila que recibe el foco con Tab y la que debe tomarlo tras el próximo dibujo.
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const pendingFocus = useRef<{ key: string; tries: number } | null>(null);
@@ -140,20 +175,24 @@ export const Sidebar = memo(function Sidebar(p: Props) {
     }
   }, [collapsed]);
 
-  const flash = (msg: string) => {
-    setNotice(msg);
-    window.setTimeout(() => setNotice(""), 3000);
+  const flash = (msg: string, error = true) => {
+    setNotice({ text: msg, error });
+    window.setTimeout(() => setNotice((n) => (n?.text === msg ? null : n)), 3000);
   };
 
   const folders = useMemo(() => allFolders(sessions, extraFolders), [sessions, extraFolders]);
 
-  const q = filter.trim().toLowerCase();
-  const tree = useMemo(() => {
-    if (!q) return buildTree(sessions, extraFolders);
-    const match = (s: Session) =>
-      [s.name, s.host, s.serial_port, s.folder, s.username].some((v) => v?.toLowerCase().includes(q));
-    return buildTree(sessions.filter(match), []);
-  }, [sessions, extraFolders, q]);
+  // Diferido: el campo muestra cada tecla al instante y el árbol (con miles de sesiones, lo caro) se
+  // filtra después con el último texto. Todo lo que depende del árbol usa este mismo valor.
+  const q = useDeferredValue(filter.trim().toLowerCase());
+  const matches = useMemo(
+    () =>
+      q
+        ? sessions.filter((s) => [s.name, s.host, s.serial_port, s.folder, s.username].some((v) => v?.toLowerCase().includes(q)))
+        : null,
+    [sessions, q],
+  );
+  const tree = useMemo(() => (matches ? buildTree(matches, []) : buildTree(sessions, extraFolders)), [sessions, extraFolders, matches]);
 
   // ---------- Operaciones de carpetas ----------
 
@@ -263,26 +302,72 @@ export const Sidebar = memo(function Sidebar(p: Props) {
 
   const folderMenu = (e: React.MouseEvent | HTMLElement, node: FolderNode) => {
     setSelected({ kind: "folder", path: node.path });
-    openMenu(e, [
-      [`Conectar todas (${node.total})`, <Play size={13} />, () => connectAll(node.path), node.total === 0],
-      ["Nueva sesión aquí", <Plus size={13} />, () => p.onNew(node.path)],
-      ["Nueva subcarpeta", <FolderPlus size={13} />, () => createFolder(node.path)],
-      ["Renombrar", <Pencil size={13} />, () => setRenaming(node.path)],
-      ...(p.onExportFile ? [["Exportar sesiones…", <FileDown size={13} />, () => p.onExportFile?.(node.path), node.total === 0] as MenuItem] : []),
-      ...moveItems({ kind: "folder", node }, parentOf(node.path)),
-      ["Eliminar carpeta", <Trash2 size={13} />, () => deleteFolder(node.path)],
-    ]);
+    openMenu(
+      e,
+      grouped(
+        [[`Conectar todas (${node.total})`, <Play size={13} />, () => connectAll(node.path), node.total === 0]],
+        [
+          ["Nueva sesión aquí", <Plus size={13} />, () => p.onNew(node.path)],
+          ["Nueva subcarpeta", <FolderPlus size={13} />, () => createFolder(node.path)],
+        ],
+        [
+          ["Renombrar", <Pencil size={13} />, () => setRenaming(node.path), false, "F2"],
+          ...(p.onExportFile ? [["Exportar sesiones…", <FileDown size={13} />, () => p.onExportFile?.(node.path), node.total === 0] as MenuItem] : []),
+          sortItem({ kind: "folder", node }, parentOf(node.path)),
+        ],
+        [["Eliminar carpeta", <Trash2 size={13} />, () => deleteFolder(node.path), false, "Supr"]],
+      ),
+    );
   };
 
+  const copyHost = (host: string) =>
+    writeText(host).then(
+      () => flash(`Copiado: ${host}`, false),
+      () => flash("No se pudo copiar al portapapeles"),
+    );
+
+  /** Grupos: conectar | copiar | editar y ordenar | eliminar (lo destructivo, aislado al final). */
   const sessionMenu = (e: React.MouseEvent | HTMLElement, s: Session) => {
     setSelected({ kind: "session", id: s.id });
-    openMenu(e, [
-      ["Conectar", <Play size={13} />, () => p.onOpen(s)],
-      ["Editar", <Pencil size={13} />, () => p.onEdit(s)],
-      ["Duplicar", <Copy size={13} />, () => p.onDuplicate(s)],
-      ...moveItems({ kind: "session", session: s }, normPath(s.folder)),
-      ["Eliminar", <Trash2 size={13} />, () => deleteSession(s)],
-    ]);
+    const host = hostOf(s);
+    // La terminal local no tiene usuario ni host: "Conectar como…" no aplica.
+    const remote = s.type !== "local" && s.type !== "serial";
+    openMenu(
+      e,
+      grouped(
+        [
+          ["Conectar", <Play size={13} />, () => p.onOpen(s), false, "Enter"],
+          ...(p.onOpenSplit ? [["Conectar en vista dividida", <Columns2 size={13} />, () => p.onOpenSplit!(s)] as MenuItem] : []),
+          ...(p.onOpenAs && remote ? [["Conectar como…", <UserRound size={13} />, () => p.onOpenAs!(s)] as MenuItem] : []),
+        ],
+        host ? [[s.type === "serial" ? "Copiar puerto serial" : "Copiar host", <ClipboardCopy size={13} />, () => void copyHost(host)]] : [],
+        [
+          ["Editar", <Pencil size={13} />, () => p.onEdit(s)],
+          ["Duplicar", <Copy size={13} />, () => p.onDuplicate(s)],
+          sortItem({ kind: "session", session: s }, normPath(s.folder)),
+        ],
+        [["Eliminar", <Trash2 size={13} />, () => deleteSession(s), false, "Supr"]],
+      ),
+    );
+  };
+
+  /** Lo que agrega o trae sesiones: el "+" de la cabecera y el clic derecho en el fondo del árbol. */
+  const addItems = (folder: string | undefined): MenuItem[] =>
+    grouped(
+      [
+        ["Nueva sesión…", <Plus size={13} />, () => p.onNew(folder || undefined), false, `${modLabel}N`],
+        ["Nueva carpeta", <FolderPlus size={13} />, () => createFolder(folder ?? "")],
+      ],
+      p.onQuickConnect ? [["Conexión rápida…", <Zap size={13} />, p.onQuickConnect, false, `${modLabel}O`]] : [],
+      [
+        ...(p.onImportFile ? [["Importar sesiones…", <FileUp size={13} />, p.onImportFile] as MenuItem] : []),
+        ...(p.onExportFile ? [["Exportar sesiones…", <FileDown size={13} />, () => p.onExportFile?.()] as MenuItem] : []),
+      ],
+    );
+  /** El menú del "+" nace bajo el botón, alineado a su borde izquierdo. */
+  const addMenu = (btn: HTMLElement) => {
+    const r = btn.getBoundingClientRect();
+    setMenu({ x: r.left, y: r.bottom + 4, items: addItems(selectedFolder(selected, sessions)), owner: "add" });
   };
 
   // ---------- Orden manual ----------
@@ -328,6 +413,16 @@ export const Sidebar = memo(function Sidebar(p: Props) {
       ["Mover al final", <ArrowDownToLine size={13} />, () => placeItem(moved, parent, null, "end"), !!q],
     ];
   };
+  /** Las 4 opciones de orden van en un submenú: es una tarea poco frecuente (también se hace arrastrando). */
+  const sortItem = (it: TreeItem, parent: string): MenuItem => [
+    "Ordenar",
+    <ArrowDownUp size={13} />,
+    () => {},
+    !!q,
+    undefined,
+    false,
+    moveItems(it, parent),
+  ];
 
   // ---------- Arrastrar y soltar ----------
 
@@ -726,21 +821,42 @@ export const Sidebar = memo(function Sidebar(p: Props) {
   });
 
   const empty = tree.children.length === 0 && tree.sessions.length === 0;
-  const target = selectedFolder(selected, sessions);
 
   return (
     <aside
       style={{ width: p.width }}
       className="relative shrink-0 h-full flex flex-col bg-chrome border-r border-line"
     >
-      <div className="flex items-center gap-0.5 px-2.5 pt-3 pb-2">
-        <div className="relative flex-1 mr-1">
-          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
+      {/* Cabecera: título con un solo "+" (todo lo que agrega o trae sesiones) y, abajo, el filtro a todo el ancho. */}
+      <div className="px-2.5 pt-2 pb-2 flex flex-col gap-1.5">
+        <div className="flex items-center gap-0.5">
+          <h2 className="flex-1 min-w-0 pl-1 text-[11px] font-semibold uppercase tracking-wide text-muted">Sesiones</h2>
+          <HeadBtn
+            title="Agregar: nueva sesión, carpeta, conexión rápida, importar o exportar"
+            aria-label="Agregar sesión o carpeta"
+            aria-haspopup="menu"
+            aria-expanded={menu?.owner === "add"}
+            // El mousedown fuera del menú ya lo cierra: con el menú abierto, el clic en "+" no lo reabre.
+            onMouseDown={() => (addWasOpen.current = menu?.owner === "add")}
+            onClick={(e) => {
+              const wasOpen = addWasOpen.current && e.detail !== 0;
+              addWasOpen.current = false;
+              if (!wasOpen) addMenu(e.currentTarget);
+            }}
+          >
+            <Plus size={16} />
+          </HeadBtn>
+          <HeadBtn title="Contraer todas las carpetas" onClick={() => setCollapsed(Object.fromEntries(folders.map((f) => [f, true])))}>
+            <ChevronsDownUp size={15} />
+          </HeadBtn>
+        </div>
+        <div className="relative">
+          <Search size={14} aria-hidden className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
           <input
-            className="field !h-7 !pl-8 !text-[12px]"
+            className={`field !h-7 !pl-8 !text-[12px] ${matches ? "!pr-10" : ""}`}
             placeholder="Filtrar sesiones…"
-            title="Filtra las sesiones por nombre, IP o carpeta"
-            aria-label="Filtrar sesiones por nombre, IP o carpeta"
+            title="Filtra las sesiones por nombre, IP, usuario o carpeta. Esc: limpiar"
+            aria-label="Filtrar sesiones por nombre, IP, usuario o carpeta"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             ref={filterRef}
@@ -755,26 +871,21 @@ export const Sidebar = memo(function Sidebar(p: Props) {
               }
             }}
           />
+          {matches && (
+            <span aria-hidden className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-muted tabular-nums">
+              {matches.length}
+            </span>
+          )}
+          {/* El contador se anuncia sin mover el foco del campo. */}
+          <span role="status" className="sr-only">
+            {matches ? (matches.length ? `${plural(matches.length, "sesión", "sesiones")} encontradas` : "Sin coincidencias") : ""}
+          </span>
         </div>
-        {p.onQuickConnect && (
-          <HeadBtn title={`Conexión rápida sin guardar (${modLabel}O)`} aria-label="Conexión rápida sin guardar" onClick={p.onQuickConnect}>
-            <Zap size={15} />
-          </HeadBtn>
-        )}
-        <HeadBtn title={`Nueva sesión (${modLabel}N)`} onClick={() => p.onNew(target)}>
-          <Plus size={16} />
-        </HeadBtn>
-        <HeadBtn title="Nueva carpeta" onClick={() => createFolder(target ?? "")}>
-          <FolderPlus size={15} />
-        </HeadBtn>
-        <HeadBtn title="Contraer todo" onClick={() => setCollapsed(Object.fromEntries(folders.map((f) => [f, true])))}>
-          <ChevronsDownUp size={15} />
-        </HeadBtn>
       </div>
 
       {notice && (
-        <p role="alert" className="px-3 pb-1 text-[11.5px] text-danger">
-          {notice}
+        <p role={notice.error ? "alert" : "status"} className={`px-3 pb-1 text-[11.5px] break-words ${notice.error ? "text-danger" : "text-muted"}`}>
+          {notice.text}
         </p>
       )}
 
@@ -782,16 +893,7 @@ export const Sidebar = memo(function Sidebar(p: Props) {
         ref={navRef}
         aria-label="Sesiones guardadas"
         className={`flex-1 overflow-y-auto px-1.5 pb-3 ${dropTarget === "" ? "bg-selected" : ""}`}
-        onContextMenu={(e) =>
-          openMenu(e, [
-            ["Nueva sesión", <Plus size={13} />, () => p.onNew()],
-            ["Nueva carpeta", <FolderPlus size={13} />, () => createFolder("")],
-            ...(p.onImportFile
-              ? [["Importar sesiones…", <FileUp size={13} />, p.onImportFile] as MenuItem]
-              : []),
-            ...(p.onExportFile ? [["Exportar sesiones…", <FileDown size={13} />, () => p.onExportFile?.()] as MenuItem] : []),
-          ])
-        }
+        onContextMenu={(e) => openMenu(e, addItems(""))}
         {...dropProps("")}
         onClick={(e) => e.target === e.currentTarget && setSelected(null)}
       >
@@ -828,7 +930,11 @@ function selectedFolder(sel: Selected, sessions: Session[]): string | undefined 
 
 export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
+  const subRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x: menu.x, y: menu.y });
+  /** Submenú abierto: índice del ítem padre, su caja y si el foco debe entrar (teclado) o no (mouse). */
+  const [sub, setSub] = useState<{ index: number; anchor: DOMRect; focus: boolean } | null>(null);
+  const hoverTimer = useRef<number | undefined>(undefined);
 
   // Ajusta la posición para que el menú no se salga de la ventana.
   useLayoutEffect(() => {
@@ -838,10 +944,14 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
       x: Math.min(menu.x, window.innerWidth - r.width - 8),
       y: Math.min(menu.y, window.innerHeight - r.height - 8),
     });
+    setSub(null);
   }, [menu]);
 
   useEffect(() => {
-    const onMouse = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && onClose();
+    const onMouse = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!ref.current?.contains(t) && !subRef.current?.contains(t)) onClose();
+    };
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("mousedown", onMouse);
     window.addEventListener("keydown", onKey);
@@ -852,6 +962,7 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
       window.removeEventListener("blur", onClose);
     };
   }, [onClose]);
+  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
 
   // Teclado: el foco entra al primer ítem, las flechas lo mueven y, si la acción no deja el foco
   // en otro lado (un campo, un diálogo), vuelve a donde estaba (p. ej. la terminal).
@@ -865,9 +976,11 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
       if ((!cur || cur === document.body) && prev?.isConnected) prev.focus({ preventScroll: true });
     };
   }, []);
-  const onMenuKey = (e: React.KeyboardEvent) => {
-    const items = Array.from(ref.current?.querySelectorAll<HTMLElement>("button:not([disabled])") ?? []);
-    if (!items.length) return;
+
+  /** Flechas, Inicio y Fin dentro de una lista (menú o submenú); Tab cierra todo, como un menú nativo. */
+  const listKey = (e: React.KeyboardEvent, box: HTMLElement | null) => {
+    const items = Array.from(box?.querySelectorAll<HTMLElement>("button:not([disabled])") ?? []);
+    if (!items.length) return false;
     const i = items.indexOf(document.activeElement as HTMLElement);
     let next = -1;
     if (e.key === "ArrowDown") next = (i + 1) % items.length;
@@ -875,43 +988,158 @@ export function ContextMenu({ menu, onClose }: { menu: Menu; onClose: () => void
     else if (e.key === "Home") next = 0;
     else if (e.key === "End") next = items.length - 1;
     else if (e.key === "Tab") {
-      // Como en un menú nativo: Tab lo cierra y el foco vuelve a donde estaba.
       e.preventDefault();
-      return onClose();
-    } else return;
+      onClose();
+      return true;
+    } else return false;
     e.preventDefault();
     items[next].focus();
+    return true;
+  };
+  const parentBtn = (index: number) => ref.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
+  const openSub = (index: number, el: HTMLElement, focus: boolean) => {
+    window.clearTimeout(hoverTimer.current);
+    setSub({ index, anchor: el.getBoundingClientRect(), focus });
+  };
+  const closeSub = (refocus: boolean) => {
+    if (!sub) return;
+    const btn = parentBtn(sub.index);
+    setSub(null);
+    if (refocus) btn?.focus();
+  };
+  const onMenuKey = (e: React.KeyboardEvent) => {
+    if (listKey(e, ref.current)) return;
+    const active = document.activeElement as HTMLElement | null;
+    const index = Number(active?.dataset.index);
+    if (e.key === "ArrowRight" && menu.items[index]?.[6]?.length && active) {
+      e.preventDefault();
+      openSub(index, active, true);
+    } else if (e.key === "ArrowLeft" && sub) {
+      e.preventDefault();
+      closeSub(true);
+    }
+  };
+  const onSubKey = (e: React.KeyboardEvent) => {
+    if (listKey(e, subRef.current)) return;
+    if (e.key === "ArrowLeft" || e.key === "Escape") {
+      // Esc cierra solo el submenú (no llega al cierre general de la ventana).
+      e.preventDefault();
+      e.stopPropagation();
+      closeSub(true);
+    }
+  };
+  /** Con el mouse, el submenú se abre al quedarse sobre su ítem y se cierra al pasar a otro. */
+  const onHover = (index: number, el: HTMLElement, hasSub: boolean) => {
+    window.clearTimeout(hoverTimer.current);
+    if (hasSub && sub?.index === index) return;
+    if (!hasSub && !sub) return;
+    hoverTimer.current = window.setTimeout(() => (hasSub ? openSub(index, el, false) : setSub(null)), 150);
   };
 
-  return (
-    <div
-      ref={ref}
-      role="menu"
-      onKeyDown={onMenuKey}
-      className="fixed z-50 min-w-48 py-1 bg-panel border border-line rounded-lg shadow-pop"
-      style={{ left: pos.x, top: pos.y }}
-    >
-      {menu.items.map(([label, icon, action, disabled, shortcut, separated]) => (
+  const item = (it: MenuItem, index: number, inSub: boolean) => {
+    const [label, icon, action, disabled, shortcut, separated, children] = it;
+    const radio = !inSub && menu.radio;
+    const hasSub = !inSub && !!children?.length;
+    const open = hasSub && sub?.index === index;
+    return (
+      <Fragment key={label}>
+        {separated && <div role="separator" className="my-1 mx-2 h-px bg-line" />}
         <button
-          key={label}
-          data-sep={separated ? "" : undefined}
-          role={menu.radio ? "menuitemradio" : "menuitem"}
-          aria-checked={menu.radio ? !!disabled : undefined}
-          disabled={menu.radio ? false : disabled}
-          onClick={() => {
+          data-index={inSub ? undefined : index}
+          role={radio ? "menuitemradio" : "menuitem"}
+          aria-checked={radio ? !!disabled : undefined}
+          aria-haspopup={hasSub ? "menu" : undefined}
+          aria-expanded={hasSub ? open : undefined}
+          disabled={radio ? false : disabled}
+          onMouseEnter={inSub ? undefined : (e) => onHover(index, e.currentTarget, hasSub)}
+          onClick={(e) => {
+            // Siempre abre (el paso del mouse ya pudo abrirlo); con teclado (detail 0) el foco entra a la lista.
+            if (hasSub) return openSub(index, e.currentTarget, e.detail === 0);
             onClose();
             action();
           }}
-          className={`w-full flex items-center gap-2.5 px-3 h-7 text-left text-[12.5px] hover:bg-hover focus-visible:bg-hover disabled:opacity-40 ${
+          className={`w-full flex items-center gap-2.5 px-2.5 h-7 rounded-md text-left text-[12.5px] hover:bg-hover focus-visible:bg-hover focus-visible:!outline-offset-[-2px] disabled:opacity-40 ${
             label.startsWith("Eliminar") ? "text-danger" : ""
-          } ${separated ? "mt-1 border-t border-line pt-1 h-8 rounded-none" : ""}`}
+          } ${open ? "bg-hover" : ""}`}
         >
           <span className="text-muted">{icon}</span>
-          <span className={`flex-1 ${menu.radio && disabled ? "font-medium" : ""}`}>{label}</span>
-          {menu.radio && <Check size={13} aria-hidden className={`text-accent ${disabled ? "" : "invisible"}`} />}
+          <span className={`flex-1 ${radio && disabled ? "font-medium" : ""}`}>{label}</span>
+          {radio && <Check size={13} aria-hidden className={`text-accent ${disabled ? "" : "invisible"}`} />}
           {shortcut && <kbd className="ml-4 text-[11px] text-muted font-sans">{shortcut}</kbd>}
+          {hasSub && <ChevronRight size={13} aria-hidden className="ml-4 text-muted" />}
         </button>
-      ))}
+      </Fragment>
+    );
+  };
+
+  const subItems = sub ? menu.items[sub.index]?.[6] : undefined;
+  return (
+    <>
+      <div
+        ref={ref}
+        role="menu"
+        onKeyDown={onMenuKey}
+        className="fixed z-50 min-w-48 p-1 bg-panel border border-line rounded-lg shadow-pop"
+        style={{ left: pos.x, top: pos.y }}
+      >
+        {menu.items.map((it, i) => item(it, i, false))}
+      </div>
+      {sub && subItems && (
+        <SubMenu
+          boxRef={subRef}
+          anchor={sub.anchor}
+          focus={sub.focus}
+          label={menu.items[sub.index][0]}
+          onKeyDown={onSubKey}
+          onMouseEnter={() => window.clearTimeout(hoverTimer.current)}
+        >
+          {subItems.map((it, i) => item(it, i, true))}
+        </SubMenu>
+      )}
+    </>
+  );
+}
+
+/** Lista desplegada a la derecha de su ítem (a la izquierda si no cabe), dentro de la ventana. */
+function SubMenu({
+  boxRef,
+  anchor,
+  focus,
+  label,
+  onKeyDown,
+  onMouseEnter,
+  children,
+}: {
+  boxRef: React.RefObject<HTMLDivElement | null>;
+  anchor: DOMRect;
+  focus: boolean;
+  label: string;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+  onMouseEnter: () => void;
+  children: React.ReactNode;
+}) {
+  const [pos, setPos] = useState({ x: anchor.right + 2, y: anchor.top - 5 });
+  useLayoutEffect(() => {
+    const r = boxRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const right = anchor.right + 2;
+    setPos({
+      x: right + r.width > window.innerWidth - 8 ? Math.max(8, anchor.left - r.width - 2) : right,
+      y: Math.max(8, Math.min(anchor.top - 5, window.innerHeight - r.height - 8)),
+    });
+    if (focus) boxRef.current?.querySelector<HTMLElement>("button:not([disabled])")?.focus({ preventScroll: true });
+  }, [anchor, focus, boxRef]);
+  return (
+    <div
+      ref={boxRef}
+      role="menu"
+      aria-label={label}
+      onKeyDown={onKeyDown}
+      onMouseEnter={onMouseEnter}
+      className="fixed z-50 min-w-44 p-1 bg-panel border border-line rounded-lg shadow-pop"
+      style={{ left: pos.x, top: pos.y }}
+    >
+      {children}
     </div>
   );
 }

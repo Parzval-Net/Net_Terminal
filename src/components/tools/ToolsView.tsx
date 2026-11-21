@@ -1,10 +1,12 @@
 import { Suspense, lazy, memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Activity, ArrowDownUp, Calculator, DatabaseBackup, FileSearch, Gauge, Network, Puzzle, Radar, ScrollText, SquareTerminal, Waypoints, Wrench, X } from "lucide-react";
+import { Activity, ArrowDownUp, Calculator, DatabaseBackup, FileSearch, Gauge, Network, Puzzle, Radar, ScrollText, ShieldCheck, SquareTerminal, Waypoints, Wrench, X } from "lucide-react";
 import { TopologyTool } from "./TopologyTool";
 import type { Session } from "../../types";
 import { ModuleId, Settings, SpeedResult } from "../../lib/settings";
+import type { TopoSnapshot, TopoSources, Topology } from "../../lib/topology";
+import type { SnmpProfile } from "../../lib/snmp";
 import { MonitorStatus, MonitorTarget, Sample } from "../../lib/monitors";
 import { MonitorTool } from "./MonitorTool";
 import { DiagTool } from "./DiagTool";
@@ -24,6 +26,8 @@ const BackupTool = lazy(() => import("./BackupTool"));
 const SnmpTool = lazy(() => import("./SnmpTool"));
 // Búsqueda en logs y respaldos: solo se descarga al abrir el módulo.
 const LogSearchTool = lazy(() => import("./LogSearchTool"));
+// Auditoría de seguridad: motor de reglas y packs integrados, solo al abrir el módulo.
+const AuditTool = lazy(() => import("./AuditTool"));
 
 const NAV: { id: ModuleId; label: string; Icon: typeof Activity }[] = [
   { id: "monitor", label: "Monitoreo", Icon: Activity },
@@ -37,14 +41,20 @@ const NAV: { id: ModuleId; label: string; Icon: typeof Activity }[] = [
   { id: "backup", label: "Respaldos", Icon: DatabaseBackup },
   { id: "logsearch", label: "Buscar en logs", Icon: FileSearch },
   { id: "plugins", label: "Plugins", Icon: Puzzle },
+  { id: "audit", label: "Auditoría", Icon: ShieldCheck },
 ];
 
-/** Encabezados del menú: qué se mira (Monitorear), el mapa y los cálculos (Red) y lo que se ejecuta (Operar). */
+/** Encabezados del menú: qué se mira (Monitorear), el mapa y los cálculos (Red), lo que se ejecuta (Operar) y la revisión de hardening (Seguridad). */
 const GROUPS: { label: string; ids: ModuleId[] }[] = [
   { label: "Monitorear", ids: ["monitor", "diag", "syslog", "snmp"] },
   { label: "Red", ids: ["topology", "subnet", "perf"] },
   { label: "Operar", ids: ["transfer", "backup", "logsearch", "plugins"] },
+  { label: "Seguridad", ids: ["audit"] },
 ];
+
+/** Valores por omisión con identidad fija: un `{}` o `[]` nuevo en cada render anularía el memo de Topología. */
+const NO_SOURCES: TopoSources = {};
+const NO_PROFILES: SnmpProfile[] = [];
 
 /** Último módulo usado, para volver donde se estaba al reabrir Herramientas. */
 const LAST_KEY = "toolsModule";
@@ -90,7 +100,11 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     return enabled.find((n) => n.id === last)?.id ?? enabled[0]?.id ?? "monitor";
   });
   const [visited, setVisited] = useState<Set<ModuleId>>(new Set([current]));
+  const navRef = useRef<HTMLElement>(null);
+  const currentLabel = enabled.find((n) => n.id === current)?.label;
   const [running, setRunning] = useState<string[]>([]);
+  // El servidor iperf3 es un job de Velocidad (no un servidor de server_running): lo informa el módulo.
+  const [iperfServing, setIperfServing] = useState(false);
 
   const refreshRunning = useCallback(() => {
     invoke<string[]>("server_running").then(setRunning);
@@ -109,6 +123,15 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
       un.then((f) => f());
     };
   }, [refreshRunning]);
+
+  // Topología está memorizada: sus callbacks no cambian de identidad, así no se vuelve a dibujar con cada
+  // muestra de Monitoreo (que llega aunque Herramientas esté oculta). `update` ya es estable.
+  const onTopo = useCallback(
+    (t: Topology | ((t: Topology) => Topology)) => update((s) => ({ topology: typeof t === "function" ? t(s.topology) : t })),
+    [update],
+  );
+  const onSnapshots = useCallback((topoSnapshots: TopoSnapshot[]) => update({ topoSnapshots }), [update]);
+  const onSources = useCallback((topoSources: TopoSources) => update({ topoSources }), [update]);
 
   const go = (id: ModuleId) => {
     persist(LAST_KEY, id);
@@ -143,11 +166,11 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
             sessions={sessions}
             topo={settings.topology}
             snapshots={settings.topoSnapshots}
-            onTopo={(t) => update((s) => ({ topology: typeof t === "function" ? t(s.topology) : t }))}
-            onSnapshots={(topoSnapshots) => update({ topoSnapshots })}
-            sources={settings.topoSources ?? {}}
-            onSources={(topoSources) => update({ topoSources })}
-            snmpProfiles={settings.snmpProfiles ?? []}
+            onTopo={onTopo}
+            onSnapshots={onSnapshots}
+            sources={settings.topoSources ?? NO_SOURCES}
+            onSources={onSources}
+            snmpProfiles={settings.snmpProfiles ?? NO_PROFILES}
             visible={active && current === "topology"}
             onOpenSession={onOpenSession}
             tabs={tabs}
@@ -165,6 +188,7 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
             history={settings.speedHistory}
             onResult={(r: SpeedResult) => update((s) => ({ speedHistory: [r, ...s.speedHistory].slice(0, 20) }))}
             onHistory={(speedHistory: SpeedResult[]) => update({ speedHistory })}
+            onServing={setIperfServing}
           />
         );
       case "transfer":
@@ -192,13 +216,19 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
       case "backup":
         return (
           <Suspense fallback={null}>
-            <BackupTool terminals={terminals} />
+            <BackupTool terminals={terminals} totalSessions={sessions.length} />
+          </Suspense>
+        );
+      case "audit":
+        return (
+          <Suspense fallback={null}>
+            <AuditTool terminals={terminals} onConfirm={onConfirm} />
           </Suspense>
         );
       case "logsearch":
         return (
           <Suspense fallback={null}>
-            <LogSearchTool visible={active && current === "logsearch"} />
+            <LogSearchTool visible={active && current === "logsearch"} autoLog={settings.autoLog} onEnableAutoLog={() => update({ autoLog: true })} />
           </Suspense>
         );
     }
@@ -208,24 +238,26 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     const n = enabled.find((x) => x.id === id);
     if (!n) return null;
     const { label, Icon } = n;
+    const serving =
+      (id === "transfer" && (running.includes("tftp") || running.includes("http") || running.includes("ftp"))) ||
+      (id === "snmp" && running.includes("snmptrap")) ||
+      (id === "syslog" && running.includes("syslog")) ||
+      (id === "perf" && iperfServing);
     return (
       <button
         key={id}
         onClick={() => go(id)}
-        title={`${label} (${group})`}
-        aria-label={label}
+        title={`${label} (${group})${serving ? ": servidor activo" : ""}`}
+        // El punto verde no tiene texto: el estado va en el nombre accesible.
+        aria-label={serving ? `${label}, servidor activo` : label}
         aria-current={current === id ? "page" : undefined}
         className={`relative w-full flex items-center gap-2 px-2 h-8 rounded-md text-left ${
-          current === id ? "bg-selected text-fg" : "text-muted hover:text-fg hover:bg-hover"
+          current === id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg hover:bg-hover"
         }`}
       >
-        <Icon size={15} className="shrink-0" />
-        <span className="hidden @[56rem]:inline truncate">{label}</span>
-        {(id === "transfer" && (running.includes("tftp") || running.includes("http") || running.includes("ftp"))) ||
-        (id === "snmp" && running.includes("snmptrap")) ||
-        (id === "syslog" && running.includes("syslog")) ? (
-          <span className="absolute right-1 top-1 @[56rem]:static @[56rem]:ml-auto w-1.5 h-1.5 rounded-full bg-ok" title="Servidor activo" />
-        ) : null}
+        <Icon size={15} className="shrink-0" aria-hidden />
+        <span className="hidden @[36rem]:inline truncate">{label}</span>
+        {serving ? <span aria-hidden className="absolute right-1 top-1 @[36rem]:static @[36rem]:ml-auto w-1.5 h-1.5 shrink-0 rounded-full bg-ok" /> : null}
       </button>
     );
   };
@@ -234,13 +266,37 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     <div className="@container absolute inset-0 flex flex-col bg-bg" style={{ visibility: active ? "visible" : "hidden" }}>
       {/* Encabezado: dónde estás y cómo salir. "Volver" deja Herramientas viva; la X la cierra. */}
       <div className="h-9 shrink-0 flex items-center gap-1 pl-3 pr-1.5 border-b border-line bg-chrome">
-        <Wrench size={14} className="text-muted shrink-0" />
-        <h2 className="flex-1 min-w-0 truncate text-[12.5px] font-medium">Herramientas</h2>
+        <Wrench size={14} className="text-muted shrink-0" aria-hidden />
+        {/* Ruta (patrón breadcrumb de WAI-ARIA): "Herramientas › Monitoreo". El último nivel es la página
+            actual; "Herramientas" lleva el foco al módulo activo del menú. */}
+        <nav aria-label="Ruta de navegación" className="flex-1 min-w-0">
+          <ol className="flex items-center gap-1 min-w-0 text-body-sm">
+            <li className="shrink-0">
+              <button
+                onClick={() => navRef.current?.querySelector<HTMLElement>('[aria-current="page"]')?.focus()}
+                title="Ir al menú de Herramientas"
+                className="px-1 h-6 rounded text-muted hover:text-fg hover:bg-hover"
+              >
+                Herramientas
+              </button>
+            </li>
+            {currentLabel && (
+              <>
+                <li aria-hidden className="shrink-0 text-muted">
+                  ›
+                </li>
+                <li aria-current="page" className="min-w-0 truncate font-medium">
+                  {currentLabel}
+                </li>
+              </>
+            )}
+          </ol>
+        </nav>
         <button
           onClick={onBack}
           title={`Volver a la terminal (${modLabel}E): Herramientas sigue abierta y sus servidores y mediciones siguen activos`}
           aria-label="Volver a la terminal"
-          className="h-7 px-2 flex items-center gap-1.5 rounded-md text-[12px] text-muted hover:text-fg hover:bg-hover"
+          className="h-7 px-2 flex items-center gap-1.5 rounded-md text-body-sm text-muted hover:text-fg hover:bg-hover"
         >
           <SquareTerminal size={14} />
           <span className="hidden @[36rem]:inline">Volver a la terminal</span>
@@ -255,22 +311,26 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         </button>
       </div>
       <div className="flex-1 min-h-0 flex">
-      {/* Menos de 56 rem de ancho: el menú queda solo con íconos (nombre y grupo en el tooltip, una línea entre grupos) para no quitarle espacio a la herramienta. */}
+      {/* El menú conserva sus etiquetas desde 36 rem de ancho de Herramientas (una ventana de 960 px con el
+          árbol de sesiones abierto deja unos 40 rem): con solo íconos, SNMP, Diagnóstico o Subredes no se
+          reconocen (Fluent NavigationView). Bajo 36 rem queda solo con íconos, con nombre y grupo en el
+          tooltip y una línea entre grupos. */}
       <nav
+        ref={navRef}
         aria-label="Módulos de Herramientas"
-        className="w-11 @[56rem]:w-44 shrink-0 border-r border-line bg-chrome p-1.5 @[56rem]:p-2 overflow-y-auto overflow-x-hidden [scrollbar-width:thin]"
+        className="w-11 @[36rem]:w-40 @[56rem]:w-44 shrink-0 border-r border-line bg-chrome p-1.5 @[56rem]:p-2 overflow-y-auto overflow-x-hidden [scrollbar-width:thin]"
       >
         {GROUPS.map((g, i) => {
           const ids = g.ids.filter((id) => enabled.some((n) => n.id === id));
           if (!ids.length) return null;
           return (
-            <div key={g.label} role="group" aria-label={g.label} className={i > 0 ? "mt-1.5 pt-1.5 border-t border-line @[56rem]:border-t-0 @[56rem]:pt-0" : ""}>
-              <div className="hidden @[56rem]:block px-2 pt-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">{g.label}</div>
+            <div key={g.label} role="group" aria-label={g.label} className={i > 0 ? "mt-1.5 pt-1.5 border-t border-line @[36rem]:border-t-0 @[36rem]:pt-0" : ""}>
+              <div aria-hidden className="hidden @[36rem]:block px-2 pt-1 pb-1 text-caption font-semibold uppercase tracking-wide text-muted">{g.label}</div>
               <div className="space-y-0.5">{ids.map((id) => item(id, g.label))}</div>
             </div>
           );
         })}
-        {enabled.length === 0 && <p className="p-2 text-[12px] text-muted">Activa módulos en Ajustes › Módulos.</p>}
+        {enabled.length === 0 && <p className="p-2 text-body-sm text-muted">Activa módulos en Ajustes › Módulos.</p>}
       </nav>
       <div className="@container flex-1 min-w-0 overflow-y-auto">
         {/* Topología ocupa todo el ancho y alto disponibles; el resto mantiene el ancho de lectura. */}

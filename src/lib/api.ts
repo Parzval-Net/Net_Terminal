@@ -1,7 +1,8 @@
 // Comandos del backend (Tauri) que usa App.tsx, con nombre y tipo claros. Cada función es una sola
 // llamada a `invoke` con los mismos argumentos de siempre: el manejo del error (then/catch) sigue
 // en quien la llama. Los nombres de comando son los del backend (src-tauri).
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { inOrder } from "./inOrder";
 import type { Pack } from "./packs";
 import type { UpdateInfo, logOptions } from "./settings";
 import type { Session } from "../types";
@@ -59,14 +60,26 @@ export const setLogging = (id: string, enabled: boolean, opts: ReturnType<typeof
 
 // ---------- Sesiones guardadas y credenciales ----------
 
-export const listSessions = () => invoke<Session[]>("list_sessions");
-export const saveSession = (session: Session) => invoke<Session>("save_session", { session });
-export const updateSessions = (sessions: Session[]) => invoke<Session[]>("update_sessions", { sessions });
+// Guardar sesiones corre fuera del hilo principal (async en el backend): la cola "sessions" mantiene
+// el orden de guardados sucesivos y que una lectura vea lo guardado antes (ver inOrder.ts).
+const sessionsCall = <T>(cmd: string, args?: InvokeArgs) => inOrder("sessions", () => invoke<T>(cmd, args));
+export const listSessions = () => sessionsCall<Session[]>("list_sessions");
+export const saveSession = (session: Session) => sessionsCall<Session>("save_session", { session });
+export const updateSessions = (sessions: Session[]) => sessionsCall<Session[]>("update_sessions", { sessions });
 /** Agrega las sesiones nuevas; sin ninguna, solo devuelve la lista (misma llamada que antes). */
-export const addSessions = (sessions: Session[]) => invoke<Session[]>(sessions.length ? "add_sessions" : "list_sessions", { sessions });
-export const deleteSession = (id: string) => invoke("delete_session", { id });
+export const addSessions = (sessions: Session[]) => sessionsCall<Session[]>(sessions.length ? "add_sessions" : "list_sessions", { sessions });
+export const deleteSession = (id: string) => sessionsCall("delete_session", { id });
 export const credSet = (sessionId: string, password: string) => invoke("cred_set", { sessionId, password });
 export const credDelete = (sessionId: string) => invoke("cred_delete", { sessionId });
+
+// ---------- Notas ----------
+
+/**
+ * Comandos de notas (listar, leer, guardar, renombrar, borrar y los de notas protegidas) en orden:
+ * guardar corre fuera del hilo principal (async en el backend) y un autoguardado no debe adelantarse
+ * a otro ni a la lectura que lo sigue (ver inOrder.ts).
+ */
+export const notesCall = <T>(cmd: string, args?: InvokeArgs) => inOrder("notes", () => invoke<T>(cmd, args));
 
 // ---------- Actualizaciones ----------
 
@@ -94,8 +107,10 @@ export const importScript = () => invoke<string | null>("import_script");
 // ---------- Catálogo de comandos e historial ----------
 
 export const cmdpacksList = () => invoke<unknown[]>("cmdpacks_list");
-export const cmdpackSave = (pack: Pack) => invoke("cmdpack_save", { pack });
-export const cmdpackDelete = (id: string) => invoke("cmdpack_delete", { id });
+/** Guardar, borrar y exportar packs, en orden (async en el backend, ver inOrder.ts). */
+export const packsCall = <T>(cmd: string, args?: InvokeArgs) => inOrder("packs", () => invoke<T>(cmd, args));
+export const cmdpackSave = (pack: Pack) => packsCall("cmdpack_save", { pack });
+export const cmdpackDelete = (id: string) => packsCall("cmdpack_delete", { id });
 /** Historial de comandos enviados por equipo (solo envíos explícitos). */
 export const cmdHistoryAdd = (key: string, command: string) => invoke("cmd_history_add", { key, command });
 

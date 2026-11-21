@@ -289,7 +289,13 @@ pub struct Broker<B: Bridge> {
     /// El usuario permitió, para esta ejecución, escribir contraseñas guardadas en los destinos.
     allow_vault: bool,
     vault_typed: Mutex<usize>,
+    /// Patrones de `wait` ya compilados en esta ejecución: un script que espera el prompt en un ciclo
+    /// no recompila el mismo regex en cada vuelta. Tope de `MAX_PATTERNS` (al llenarse se vacía).
+    patterns: Mutex<HashMap<String, Regex>>,
 }
+
+/// Patrones distintos que guarda la caché de `wait` en una ejecución.
+const MAX_PATTERNS: usize = 64;
 
 fn ok() -> Value {
     json!({"ok": true})
@@ -313,6 +319,7 @@ impl<B: Bridge> Broker<B> {
             stop,
             allow_vault: false,
             vault_typed: Mutex::new(0),
+            patterns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -386,7 +393,7 @@ impl<B: Bridge> Broker<B> {
         match op {
             "send" => self.send(t, &mut io, req["data"].as_str().unwrap_or("")),
             "wait" => {
-                let Ok(re) = Regex::new(req["pattern"].as_str().unwrap_or("")) else {
+                let Some(re) = self.pattern(req["pattern"].as_str().unwrap_or("")) else {
                     return fail("pattern", "patrón inválido");
                 };
                 let only_match = req["return_match_only"].as_bool().unwrap_or(false);
@@ -399,6 +406,21 @@ impl<B: Bridge> Broker<B> {
                 ok()
             }
         }
+    }
+
+    /// Regex de `wait`, compilado una vez por ejecución. Un patrón inválido no se guarda: falla igual
+    /// cada vez que se pide.
+    fn pattern(&self, text: &str) -> Option<Regex> {
+        let mut cache = lock(&self.patterns);
+        if let Some(re) = cache.get(text) {
+            return Some(re.clone());
+        }
+        let re = Regex::new(text).ok()?;
+        if cache.len() >= MAX_PATTERNS {
+            cache.clear();
+        }
+        cache.insert(text.to_string(), re.clone());
+        Some(re)
     }
 
     /// Contraseña guardada escrita por la app en el pedido de login del destino. El script solo
@@ -811,6 +833,28 @@ fn valid_name(name: &str) -> bool {
         && name != "netterminal.py"
 }
 
+/// Módulos de la biblioteca estándar que un script no debe tapar: la carpeta de scripts es la
+/// primera ruta de `sys.path` de todos los scripts (y está en PYTHONPATH), así que un `csv.py`
+/// importado reemplazaría al módulo `csv` en los demás scripts, y un `json.py` o `re.py`
+/// rompería `netterminal.py` en todas las ejecuciones.
+const STDLIB_SHADOW: [&str; 40] = [
+    "abc", "argparse", "ast", "base64", "collections", "concurrent", "contextlib", "copy", "csv", "datetime",
+    "enum", "functools", "getpass", "hashlib", "io", "ipaddress", "itertools", "json", "logging", "math",
+    "os", "pathlib", "platform", "queue", "random", "re", "shutil", "signal", "socket", "ssl",
+    "string", "struct", "subprocess", "sys", "tempfile", "threading", "time", "types", "typing", "uuid",
+];
+
+/// Nombre con que se guarda un script: si tapa un módulo estándar se agrega «-script» (con el
+/// guion ya no es importable). Se compara sin mayúsculas por los discos de macOS y Windows.
+fn unshadowed_name(name: &str) -> String {
+    let stem = &name[..name.len() - 3];
+    if STDLIB_SHADOW.contains(&stem.to_ascii_lowercase().as_str()) {
+        format!("{stem}-script.py")
+    } else {
+        name.to_string()
+    }
+}
+
 /// Guarda `content` con el primer nombre libre (`x.py`, `x-2.py`…). Si ya hay un archivo
 /// idéntico con ese nombre lo reutiliza. Nunca sobrescribe ni sigue enlaces (create_new) y
 /// salta los nombres que están en eliminados, para que un botón que apuntaba a un script
@@ -855,7 +899,7 @@ pub fn import(data_dir: &Path, src: &Path) -> Result<String, String> {
         return Err("El script supera 1 MB".into());
     }
     let content = fs::read(src).map_err(|e| e.to_string())?;
-    store_unique(&scripts_dir(data_dir), &name, &content)
+    store_unique(&scripts_dir(data_dir), &unshadowed_name(&name), &content)
 }
 
 /// Quita un script de la lista moviéndolo a `scripts/eliminados`, sin borrarlo del disco.
@@ -900,7 +944,7 @@ pub fn restore(data_dir: &Path, name: &str) -> Result<String, String> {
     }
     let content = fs::read(&src).map_err(|e| e.to_string())?;
     fs::remove_file(&src).map_err(|e| e.to_string())?;
-    store_unique(&dir, name, &content)
+    store_unique(&dir, &unshadowed_name(name), &content)
 }
 
 pub fn list(data_dir: &Path) -> Vec<String> {
@@ -1320,6 +1364,12 @@ mod tests {
         assert_eq!(list_deleted(&root), vec!["ejemplo_respaldo.py".to_string(), "respaldo.py".to_string()]);
         assert_eq!(restore(&root, "respaldo.py").unwrap(), "respaldo.py");
         assert!(!root.join("scripts/eliminados/respaldo.py").exists());
+        // Un nombre de módulo estándar taparía `import csv` (o el json/re del helper) en todos los
+        // scripts: se guarda con sufijo, que no es importable.
+        for (file, saved) in [("csv.py", "csv-script.py"), ("JSON.py", "JSON-script.py"), ("csv_tools.py", "csv_tools.py")] {
+            fs::write(ext.join(file), "print(4)").unwrap();
+            assert_eq!(import(&root, &ext.join(file)).unwrap(), saved);
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1631,6 +1681,28 @@ mod tests {
         tx.send("parcial".into()).unwrap();
         let r = b.wait(&mut io, &Regex::new("nunca").unwrap(), Duration::from_millis(80), false);
         assert_eq!((r["code"].as_str(), r["output"].as_str()), (Some("timeout"), Some("parcial")));
+    }
+
+    /// La caché de `wait` devuelve el mismo regex que compilar cada vez, no guarda los inválidos y
+    /// respeta el tope.
+    #[test]
+    fn wait_patterns_are_compiled_once_per_run() {
+        let b = broker(Fake::new(true, None), &["core"], false);
+        let first = b.pattern(r"[>#]\s*$").unwrap();
+        assert_eq!(first.as_str(), Regex::new(r"[>#]\s*$").unwrap().as_str());
+        assert!(first.is_match("core# ") && !first.is_match("core#x"));
+        assert_eq!(lock(&b.patterns).len(), 1);
+        b.pattern(r"[>#]\s*$").unwrap();
+        assert_eq!(lock(&b.patterns).len(), 1, "el mismo patrón no se compila de nuevo");
+        assert!(b.pattern("(sin cerrar").is_none());
+        assert!(b.pattern("(sin cerrar").is_none(), "un patrón inválido falla siempre");
+        assert_eq!(lock(&b.patterns).len(), 1);
+        for i in 0..MAX_PATTERNS * 2 {
+            assert!(b.pattern(&format!("p{i}$")).unwrap().is_match(&format!("xp{i}")));
+        }
+        assert!(lock(&b.patterns).len() <= MAX_PATTERNS);
+        // Por handle: mismo resultado y mismo error que antes.
+        assert_eq!(b.handle(&json!({"op": "wait", "pattern": "(", "timeout": 0.05}))["code"], "pattern");
     }
 
     #[test]

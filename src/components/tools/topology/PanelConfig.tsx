@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { Dispatch, SetStateAction } from "react";
+import { Dispatch, SetStateAction, useMemo } from "react";
 import { plural } from "../../../lib/plural";
 import {
   NO_FILTER,
@@ -122,6 +122,16 @@ export function FiltersSection({
   open: boolean;
   onToggle: (v: boolean) => void;
 }) {
+  // Un <option> por equipo: con cientos de nodos se rearmaba en cada zoom o paneo del mapa.
+  const focusOptions = useMemo(
+    () =>
+      nodesByName.map((n) => (
+        <option key={n.id} value={n.id}>
+          {n.name}
+        </option>
+      )),
+    [nodesByName],
+  );
   /** Chips de un criterio de filtro: solo los valores presentes en el diagrama, con su cantidad. */
   const chipGroup = <K extends string>(label: string, field: "roles" | "vendors" | "protos" | "states", counts: Map<K, number>, names: (k: K) => string) =>
     counts.size > 0 && (
@@ -191,11 +201,7 @@ export function FiltersSection({
             value={filter.focus ?? ""}
             onChange={(e) => setFilter((f) => ({ ...f, focus: e.target.value || undefined }))}
           >
-            {nodesByName.map((n) => (
-              <option key={n.id} value={n.id}>
-                {n.name}
-              </option>
-            ))}
+            {focusOptions}
           </select>
         </div>
         <div>

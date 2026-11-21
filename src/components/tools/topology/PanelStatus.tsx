@@ -1,9 +1,9 @@
 import { Check } from "lucide-react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { plural } from "../../../lib/plural";
-import { UTIL_HIGH, UTIL_SATURATED } from "../../../lib/topoTraffic";
+import { NO_TRAFFIC_SHORT, NoTrafficKind, UTIL_HIGH, UTIL_SATURATED } from "../../../lib/topoTraffic";
 import { AttentionRow, checkCoverage } from "../../../lib/topoInsights";
-import { LinkSuggestion, TOPO_SOURCES } from "../../../lib/topology";
+import { LinkSuggestion, TOPO_SOURCES, shortName } from "../../../lib/topology";
 import { Btn, Collapsible, Toggle } from "../ui";
 import { TRAFFIC_INTERVALS, TrafficInterval, useTopoTraffic } from "../useTopoTraffic";
 import { AttentionList } from "./AttentionList";
@@ -19,6 +19,8 @@ export function AttentionSection({
   trafficOn,
   focusLink,
   onPick,
+  staleCount,
+  onPurge,
   open,
   onToggle,
 }: {
@@ -28,6 +30,10 @@ export function AttentionSection({
   trafficOn: boolean;
   focusLink: string | null;
   onPick: (key: string) => void;
+  /** Enlaces CDP/LLDP que ya nadie informa (fantasma en el mapa). */
+  staleCount: number;
+  /** Quita esos enlaces del diagrama (pide confirmación). */
+  onPurge: () => void;
   open: boolean;
   onToggle: (v: boolean) => void;
 }) {
@@ -36,6 +42,8 @@ export function AttentionSection({
     <Collapsible
       title="Requieren atención"
       badge={attention.length || undefined}
+      // Rojo si hay equipos caídos; ámbar si solo hay carga alta o problemas.
+      badgeTone={attentionCount.down ? "danger" : "warn"}
       summary={
         attention.length
           ? [attentionCount.down && `${attentionCount.down} caído${attentionCount.down === 1 ? "" : "s"}`, attentionCount.load && `${attentionCount.load} por carga`, attentionCount.issues && plural(attentionCount.issues, "problema", "problemas")]
@@ -52,9 +60,20 @@ export function AttentionSection({
         ) : (
           <p className="text-muted">Todo normal{trafficOn ? "" : ": activa el tráfico para ver también la carga de los enlaces"}.</p>
         )}
+        {staleCount > 0 && (
+          <div className="rounded-md border border-line px-2 py-1.5 space-y-1">
+            <p className="leading-snug">
+              {plural(staleCount, "enlace ya no informado", "enlaces ya no informados")}: ningún equipo {staleCount === 1 ? "lo" : "los"} ve desde su última lectura completa (recableado, puerto apagado o vecino retirado).{" "}
+              {staleCount === 1 ? "Queda" : "Quedan"} en el mapa con trazo tenue y la fecha desde la que no se {staleCount === 1 ? "ve" : "ven"}, y {staleCount === 1 ? "vuelve" : "vuelven"} a lo normal si un equipo {staleCount === 1 ? "lo" : "los"} informa otra vez.
+            </p>
+            <Btn kind="ghost" className="!h-7 !px-2.5 !text-[12px] border border-line" onClick={onPurge} title="Quita del diagrama los enlaces que ya nadie informa (pide confirmación)">
+              Quitar los no vistos
+            </Btn>
+          </div>
+        )}
         <p className="text-[11px] text-muted leading-snug">
           Alto desde {Math.round(UTIL_HIGH * 100)} %, saturado desde {Math.round(UTIL_SATURATED * 100)} % (sentido más cargado); caído es un puerto down o err-disabled en algún extremo. Los problemas de interfaz son dúplex o
-          velocidad distintos, VLAN nativa, trunk contra access, miembros fuera del agregado, errores CRC y enlaces que solo ve un lado; los errores son acumulados desde el último clear counters.
+          velocidad distintos, VLAN nativa, trunk contra access, miembros fuera del agregado, errores CRC, enlaces que solo ve un lado y enlaces que ya nadie informa; los errores son acumulados desde el último clear counters.
         </p>
         <p className="text-[11px] text-muted leading-snug">
           {coverage.links
@@ -62,6 +81,65 @@ export function AttentionSection({
             : "Sin enlaces físicos que revisar."}
           {coverage.withData < coverage.links ? ' Activa "Estado de puertos" y explora también el otro extremo para completar la comparación.' : ""} Por SNMP solo se leen estado y velocidad; el dúplex, la VLAN nativa y los errores
           vienen de la consola y de lo que anuncia CDP.
+        </p>
+      </div>
+    </Collapsible>
+  );
+}
+
+/** Enlace sin datos de tráfico con la lectura activa y su motivo (ver noTrafficReason). */
+export interface NoTrafficRow {
+  key: string;
+  aName: string;
+  bName: string;
+  kind: NoTrafficKind;
+  text: string;
+}
+
+/**
+ * Enlaces sin datos de tráfico: por qué cada uno no muestra flujo. Va aparte de "Requieren atención"
+ * y no suma a su contador (no es una falla del enlace, sino de la lectura). Un clic ubica el enlace.
+ */
+export function NoTrafficSection({ rows, focusLink, onPick, open, onToggle }: { rows: NoTrafficRow[]; focusLink: string | null; onPick: (key: string) => void; open: boolean; onToggle: (v: boolean) => void }) {
+  const kinds = new Map<NoTrafficKind, number>();
+  for (const r of rows) kinds.set(r.kind, (kinds.get(r.kind) ?? 0) + 1);
+  const summary = rows.length
+    ? [...kinds]
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `${n} ${NO_TRAFFIC_SHORT[k]}`)
+        .join(" · ")
+    : "Todos los enlaces físicos tienen lectura";
+  return (
+    <Collapsible title="Sin datos de tráfico" badge={rows.length || undefined} badgeTone="neutral" summary={summary} open={open} onToggle={onToggle}>
+      <div className="space-y-2 text-[12px]">
+        {rows.length > 0 ? (
+          <ul className="space-y-0.5 max-h-72 overflow-y-auto">
+            {rows.map((r) => (
+              <li key={r.key}>
+                <button
+                  type="button"
+                  onClick={() => onPick(r.key)}
+                  aria-pressed={focusLink === r.key}
+                  className={`w-full text-left rounded-md px-1.5 py-1 hover:bg-hover ${focusLink === r.key ? "bg-selected" : ""}`}
+                  title="Ubicar y resaltar en el diagrama"
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="flex-1 min-w-0 truncate font-medium">
+                      {shortName(r.aName, 18)} <span className="text-muted">↔</span> {shortName(r.bName, 18)}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted">{NO_TRAFFIC_SHORT[r.kind]}</span>
+                  </span>
+                  <span className="block text-[11.5px] text-muted [overflow-wrap:anywhere]">{r.text}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-muted">Todos los enlaces físicos tienen lectura de tráfico.</p>
+        )}
+        <p className="text-[11px] text-muted leading-snug">
+          En el mapa van en gris punteado fino; los que tienen tráfico normal, en verde tenue. La tasa sale de dos lecturas seguidas, así que recién activado el tráfico todos esperan la segunda lectura. Solo
+          enlaces CDP/LLDP; los caídos van en "Requieren atención".
         </p>
       </div>
     </Collapsible>
@@ -141,7 +219,7 @@ export function TrafficSection({
         <div>
           <Toggle checked={ui.detail} onChange={(d) => setUi((u) => ({ ...u, detail: d }))} label="Vista detallada" />
           <p className="mt-0.5 pl-10 text-[11px] text-muted leading-snug">
-            Para expertos. Por defecto el mapa es por excepción: lo normal (menos de {Math.round(UTIL_HIGH * 100)} %) queda en gris fino y solo se resaltan los enlaces altos, saturados o caídos. La vista detallada
+            Para expertos. Por defecto el mapa es por excepción: lo normal (menos de {Math.round(UTIL_HIGH * 100)} %) queda en verde tenue, lo que no tiene datos en gris punteado y solo se resaltan los enlaces altos, saturados o caídos. La vista detallada
             colorea todos los enlaces por utilización y agrega rótulos, flechas y animación.
           </p>
         </div>
@@ -196,6 +274,11 @@ export function TrafficSection({
                 Pestaña ocupada ({traffic.status.busy.join(", ")}): sin prompt a la vista (paginador, contraseña o un comando en curso); no se le envía nada y se reintenta en la próxima lectura.
               </p>
             )}
+            {traffic.status.partial.map((e) => (
+              <p key={e} className="text-warn">
+                Lectura parcial por consola. {e}
+              </p>
+            ))}
             {traffic.status.errors.map((e) => (
               <p key={e} className="text-danger">
                 {e}
@@ -238,6 +321,8 @@ export function SuggestionsSection({
       <Collapsible
         title="Sugerencias"
         badge={suggestions.length}
+        // Neutro: son propuestas por confirmar, no fallas.
+        badgeTone="neutral"
         summary={suggestions.length ? "Confirma cada una antes de dibujarla" : "Sin sugerencias por ahora"}
         open={open}
         onToggle={onToggle}

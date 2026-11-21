@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useModal } from "../lib/useModal";
 import { Radio, Square, X } from "lucide-react";
 import { Risk, computeRisk, riskLabel } from "../lib/packs";
 import { Resolved, clearBroadcast, stopBroadcast, useBroadcastRun } from "../lib/broadcast";
 import { tabTitle } from "../types";
+import { type EnterOn, enterAction } from "../lib/confirmKeys";
 
 const RANK: Record<Risk, number> = { read: 0, change: 1, disruptive: 2 };
 const riskColor: Record<Risk, string> = { read: "text-muted", change: "text-warn", disruptive: "text-danger" };
@@ -45,17 +46,34 @@ export function BroadcastDialog({ text, resolved, declared, delayMs, verb, onCan
 
   // Esc y Enter los atiende el manejador de abajo; el hook pone la trampa de foco y devuelve el foco al cerrar.
   const modal = useModal();
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    // En captura: Esc/Enter no llegan a la terminal. Enter solo confirma lo que no exige escribir.
+    // En captura: Esc/Enter no llegan a la terminal. Enter activa el botón con foco (sobre
+    // "Cancelar" cancela) y, fuera de los controles, solo confirma lo que no exige escribir.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
         onCancel();
-      } else if (e.key === "Enter" && !needsCount && ok && !(e.target instanceof HTMLInputElement)) {
+      } else if (e.key === "Enter") {
+        const t = e.target;
+        const on: EnterOn =
+          t === confirmRef.current
+            ? "confirm"
+            : t === cancelRef.current
+              ? "cancel"
+              : t instanceof HTMLButtonElement
+                ? "button"
+                : t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement
+                  ? "field"
+                  : "other";
+        const action = enterAction(on, needsCount, ok);
+        if (action === "native") return;
         e.preventDefault();
         e.stopPropagation();
-        onConfirm(delay);
+        if (action === "confirm") onConfirm(delay);
+        else if (action === "cancel") onCancel();
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -141,10 +159,11 @@ export function BroadcastDialog({ text, resolved, declared, delayMs, verb, onCan
           </div>
         </div>
         <footer className="flex justify-end gap-2 px-5 py-4">
-          <button onClick={onCancel} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover">
+          <button ref={cancelRef} onClick={onCancel} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover">
             Cancelar
           </button>
           <button
+            ref={confirmRef}
             autoFocus={!needsCount}
             disabled={!ok}
             onClick={() => onConfirm(delay)}

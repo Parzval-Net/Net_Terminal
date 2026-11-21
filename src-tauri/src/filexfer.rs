@@ -25,13 +25,19 @@ struct Patterns {
     prompt: Regex,
     confirm: Regex,
     yes_no: Regex,
+    /// Pregunta que borra, formatea, sobrescribe o reinicia: no se confirma nunca sola.
+    destructive: Regex,
     error: Regex,
 }
 
 fn patterns() -> &'static Patterns {
     static P: OnceLock<Patterns> = OnceLock::new();
     P.get_or_init(|| Patterns {
-        more: Regex::new(r"(?i)(--\s*more\s*--|-{2,}\s*more\s*-{2,}|\(more\)|press any key)\s*$").unwrap(),
+        // " --More-- " (IOS, NX-OS), "  ---- More ----" (VRP) y "---(more)---" o "---(more 45%)---" (Junos):
+        // el mismo marcador que PAGER en src/lib/cliText.ts. Antes "\(more\)\s*$" exigía el fin de línea
+        // tras el paréntesis: el paginador de Junos no se reconocía, el trabajo esperaba el plazo completo,
+        // devolvía solo la primera página y el comando siguiente se tecleaba dentro del paginador.
+        more: Regex::new(r"(?i)(-{2,}\s*\(?more(?:\s+\d+%)?\)?\s*-{2,}|\(more\)|press any key)\s*$").unwrap(),
         // Los mismos prompts que src/lib/cliText.ts (lista común en scripts/tests/fixtures/prompts.json):
         // Huawei/H3C <SW>, [~SW], [*SW-GE1/0/1]; MikroTik [admin@MikroTik] >; shell RHEL
         // [user@host ~]$; Junos, PAN-OS y shells user@host>, user@host:~$; Cisco/Arista/Aruba
@@ -50,17 +56,105 @@ fn patterns() -> &'static Patterns {
         confirm: Regex::new(r"(?i)(\[confirm\]|\[[^\]\n]*\]\s*\?)\s*$").unwrap(),
         // Huawei / H3C: "(y/n)[n]:", "[Y/N]:"
         yes_no: Regex::new(r"(?i)(\(y/n\)(\[\w\])?|\[y/n\])\s*:?\s*$").unwrap(),
+        // "Erase flash: before copying? [confirm]" (IOS clase B/C), "Do you want to over write? [confirm]",
+        // "Delete filename [x]?", "Proceed with reload? [confirm]", VRP "Overwrite it? (y/n)[n]:" y
+        // "Format flash:? (y/n)", FortiOS "...and reboot the system! Do you want to continue? (y/n)".
+        destructive: Regex::new(r"(?i)\b(eras(e|ing)|format(ting)?|delet(e|ing)|over[\s-]?writ(e|ten|ing)|reload(ing)?|reboot(ing)?|squeez(e|ing)|restart(ing)?)\b").unwrap(),
         error: Regex::new(r"(?im)^\s*(%\s*error|%\s*invalid|error:|.*timed out|.*no such file|.*permission denied|.*not enough space|.*failed)").unwrap(),
     })
 }
 
 /// Ejecuta un comando en la sesión y transmite su salida. Responde Enter a
 /// confirmaciones con valor por defecto, "y" a preguntas sí/no y espacio a "--More--".
-/// Termina cuando vuelve a aparecer el prompt o vence el plazo.
+/// Las preguntas destructivas (borrar, formatear, sobrescribir, reiniciar) se responden que no
+/// siempre (ver `destructive_question`). Termina cuando vuelve a aparecer el prompt o vence el plazo.
 /// Tope de la salida de un comando: evita agotar memoria si el equipo no deja de enviar datos.
 const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 /// Texto final que se conserva para reconocer preguntas de confirmación.
 const TAIL_KEEP: usize = 4096;
+/// Tope de confirmaciones respondidas por comando (Enter, "y", "n", Ctrl+C): más es un bucle.
+const MAX_CONFIRMS: u32 = 200;
+/// Tope de páginas del paginador por comando. Va aparte de las confirmaciones: una salida larga
+/// ("show interfaces" de un chasis, unas 4.600 líneas) pasa de 200 páginas y antes se cortaba ahí
+/// con "Demasiadas confirmaciones", y lo leído se procesaba como si fuera la salida completa.
+const MAX_PAGES: u32 = 5000;
+pub const TOO_MANY_CONFIRMS: &str = "Demasiadas confirmaciones; se detuvo por seguridad";
+pub const TOO_MANY_PAGES: &str = "Demasiadas páginas del paginador; se detuvo la lectura";
+
+/// Qué hacer con lo último que envió el equipo.
+#[derive(Debug, PartialEq)]
+enum Auto {
+    /// Nada que responder.
+    Wait,
+    /// Respuesta que se escribe en la sesión.
+    Reply(&'static str),
+    /// Se superó un tope: el trabajo se corta con este motivo.
+    Stop(&'static str),
+}
+
+/// Respuestas automáticas de un comando, con un tope para el paginador y otro para las confirmaciones.
+#[derive(Default)]
+struct AutoReplies {
+    pages: u32,
+    confirms: u32,
+    /// Pregunta del equipo respondida con "no" (con `answer = false`, o destructiva con cualquier `answer`).
+    declined: Option<String>,
+}
+
+impl AutoReplies {
+    /// `tail`: texto desde la última respuesta automática, sin espacios al final.
+    fn next(&mut self, p: &Patterns, tail: &str, answer: bool) -> Auto {
+        if p.more.is_match(tail) {
+            self.pages += 1;
+            return if self.pages > MAX_PAGES { Auto::Stop(TOO_MANY_PAGES) } else { Auto::Reply(" ") };
+        }
+        let yes_no = p.yes_no.is_match(tail);
+        if !yes_no && !p.confirm.is_match(tail) {
+            return Auto::Wait;
+        }
+        self.confirms += 1;
+        if self.confirms > MAX_CONFIRMS {
+            return Auto::Stop(TOO_MANY_CONFIRMS);
+        }
+        // "Erase flash: before copying? [confirm]" dentro de un copy borraría la imagen en uso: lo que
+        // borra, formatea, sobrescribe o reinicia lo decide el usuario en la terminal, aunque `answer`.
+        let answer = answer && !destructive_question(p, tail);
+        if !answer {
+            self.declined.get_or_insert_with(|| tail.lines().last().unwrap_or("").trim().chars().take(200).collect());
+        }
+        Auto::Reply(match (yes_no, answer) {
+            (true, true) => "y\r",
+            (true, false) => "n\r",
+            (false, true) => "\r",
+            (false, false) => "\x03",
+        })
+    }
+}
+
+/// La pregunta del equipo borra, formatea, sobrescribe o reinicia. Se miran las últimas 3 líneas
+/// (FortiOS avisa el reinicio en la línea anterior a "Do you want to continue? (y/n)"), sin lo que va
+/// entre corchetes (el valor por defecto) ni palabras con "/", ":" o "." en medio (rutas y nombres de
+/// archivo): "Destination filename [erase-me.bin]?" o "tftp://10.0.0.5/format.cfg" no cuentan.
+fn destructive_question(p: &Patterns, tail: &str) -> bool {
+    tail.lines().rev().map(str::trim).filter(|l| !l.is_empty()).take(3).any(|line| {
+        let mut plain = String::with_capacity(line.len());
+        let mut depth = 0u32;
+        for c in line.chars() {
+            match c {
+                '[' => depth += 1,
+                ']' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => plain.push(c),
+                _ => {}
+            }
+        }
+        let words: Vec<&str> = plain
+            .split_whitespace()
+            .map(|w| w.trim_end_matches(['?', '!', ',', ';', ':', '.']))
+            .filter(|w| !w.contains(['/', ':', '.', '\\']))
+            .collect();
+        p.destructive.is_match(&words.join(" "))
+    })
+}
 
 /// Un solo comando a la vez por sesión: dos trabajos en paralelo escribirían su comando mientras el
 /// otro responde "--More--" o espera el prompt, y el equipo se comería el primer carácter
@@ -105,8 +199,10 @@ fn take_turn<'a>(lock: &'a Mutex<()>, max: Duration, mut waiting: impl FnMut()) 
 }
 
 /// `answer = false`: no confirma nada; ante una pregunta responde que no (Ctrl+C en "[confirm]"),
-/// espera el prompt y lo informa en el resultado (`declined`).
-pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, answer: bool) -> Result<String, String> {
+/// espera el prompt y lo informa en el resultado (`declined`). Con `answer = true` pasa lo mismo con
+/// las preguntas destructivas (`destructive_question`): quien llama muestra `declined`.
+/// `lines = false`: sin eventos "line" (quien llama solo usa "result"); el resto de los eventos no cambia.
+pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, answer: bool, lines: bool) -> Result<String, String> {
     if command.contains(['\r', '\n']) {
         return Err("Un solo comando por operación".into());
     }
@@ -125,7 +221,7 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
             let _ = app.emit("tool-job", JobEvent { job: id.clone(), kind, text, data });
         };
         let conns = &app.state::<crate::AppState>().conns;
-        let r = run_core(conns, &conn, &command, deadline, answer, &emit);
+        let r = run_core(conns, &conn, &command, deadline, answer, lines, &emit);
         if r.ran {
             emit("result", String::new(), Some(json!({ "ok": r.ok, "output": r.output, "declined": r.declined })));
         }
@@ -140,7 +236,7 @@ pub struct RunOutcome {
     pub output: String,
     /// Sin errores reconocidos en la salida ni preguntas rechazadas.
     pub ok: bool,
-    /// Pregunta del equipo respondida con "no" (solo con `answer = false`).
+    /// Pregunta del equipo respondida con "no" (con `answer = false`, o destructiva con cualquier `answer`).
     pub declined: Option<String>,
     /// Por qué se cortó (plazo, sesión cerrada, tope de salida, solo lectura).
     pub error: Option<String>,
@@ -164,12 +260,33 @@ pub fn run_blocking(conns: &crate::connection::ConnectionManager, conn: &str, co
     if conns.is_read_only(conn) {
         return Err(crate::connection::READ_ONLY.into());
     }
-    Ok(run_core(conns, conn, command, timeout, answer, &|_, _, _| {}))
+    // Sin interfaz que muestre líneas: no se arman (el emisor las descartaba igual).
+    Ok(run_core(conns, conn, command, timeout, answer, false, &|_, _, _| {}))
 }
 
 type Emit<'a> = &'a dyn Fn(&'static str, String, Option<serde_json::Value>);
 
-fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &str, deadline: Duration, answer: bool, emit: Emit) -> RunOutcome {
+/// Envía a `emit` las líneas completas de `partial` (sin las vacías) y las quita de una vez; con `all`
+/// también el resto sin salto de línea (prompts, preguntas de confirmación).
+fn flush_lines(partial: &mut String, all: bool, emit: Emit) {
+    let mut done = 0;
+    while let Some(i) = partial[done..].find('\n') {
+        let line = partial[done..done + i].trim_end();
+        if !line.is_empty() {
+            emit("line", line.to_string(), None);
+        }
+        done += i + 1;
+    }
+    // Un solo drain por bloque: antes cada línea corría el resto del búfer.
+    partial.drain(..done);
+    if all && !partial.trim().is_empty() {
+        emit("line", partial.trim_end().to_string(), None);
+        partial.clear();
+    }
+}
+
+/// `lines = false`: no se arman ni se emiten los eventos "line" (`partial` solo los alimenta).
+fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &str, deadline: Duration, answer: bool, lines: bool, emit: Emit) -> RunOutcome {
     {
         let p = patterns();
         let lock = session_lock(conn);
@@ -196,23 +313,13 @@ fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &
         let start = Instant::now();
         let mut output = String::new();
         let mut tail = String::new(); // texto desde la última respuesta automática
-        let mut answered = 0;
-        let mut declined: Option<String> = None;
+        let mut auto = AutoReplies::default();
         let mut echo = EchoScan::default();
         // Líneas completas hacia la interfaz: un fragmento puede cortar una línea a la mitad.
         let mut partial = String::new();
         let flush = |partial: &mut String, all: bool| {
-            while let Some(i) = partial.find('\n') {
-                let line = partial[..i].trim_end().to_string();
-                partial.drain(..=i);
-                if !line.is_empty() {
-                    emit("line", line, None);
-                }
-            }
-            // Sin salto de línea tras una pausa (prompts, preguntas de confirmación).
-            if all && !partial.trim().is_empty() {
-                emit("line", partial.trim_end().to_string(), None);
-                partial.clear();
+            if lines {
+                flush_lines(partial, all, emit);
             }
         };
         loop {
@@ -252,50 +359,35 @@ fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &
                 }
                 tail.drain(..cut);
             }
-            partial.push_str(&chunk);
+            if lines {
+                partial.push_str(&chunk);
+            }
             flush(&mut partial, false);
-            let t = tail.trim_end_matches([' ', '\t']);
-            let question = || t.lines().last().unwrap_or("").trim().chars().take(200).collect::<String>();
-            let reply = if p.more.is_match(t) {
-                Some(" ")
-            } else if p.yes_no.is_match(t) {
-                if answer {
-                    Some("y\r")
-                } else {
-                    declined.get_or_insert_with(question);
-                    Some("n\r")
-                }
-            } else if p.confirm.is_match(t) {
-                if answer {
-                    Some("\r")
-                } else {
-                    declined.get_or_insert_with(question);
-                    Some("\x03")
-                }
-            } else {
-                None
-            };
-            if let Some(r) = reply {
-                answered += 1;
-                if answered > 200 {
-                    leave_pager(conns, conn, p, &tail);
-                    fail(&mut error, "Demasiadas confirmaciones; se detuvo por seguridad".into());
-                    break;
-                }
-                // Si la pestaña pasó a solo lectura con el trabajo en curso, se detiene en esta escritura.
-                if let Err(e) = conns.write(conn, r.as_bytes()) {
+            match auto.next(p, tail.trim_end_matches([' ', '\t']), answer) {
+                Auto::Wait => {}
+                Auto::Stop(why) => {
                     flush(&mut partial, true);
-                    fail(&mut error, format!("{e}. Se detuvo el trabajo"));
+                    leave_pager(conns, conn, p, &tail);
+                    fail(&mut error, why.into());
                     break;
                 }
-                tail.clear();
-                continue;
+                Auto::Reply(r) => {
+                    // Si la pestaña pasó a solo lectura con el trabajo en curso, se detiene en esta escritura.
+                    if let Err(e) = conns.write(conn, r.as_bytes()) {
+                        flush(&mut partial, true);
+                        fail(&mut error, format!("{e}. Se detuvo el trabajo"));
+                        break;
+                    }
+                    tail.clear();
+                    continue;
+                }
             }
             if echo.finished(p, &output, command.trim()) {
                 break;
             }
         }
         flush(&mut partial, true);
+        let declined = auto.declined;
         let failed = p.error.is_match(&output) || declined.is_some();
         RunOutcome { output, ok: !failed, declined, error, ran: true }
     }
@@ -441,6 +533,12 @@ mod tests {
         assert!(p.yes_no.is_match("Are you sure to download file? (y/n)[n]:"));
         assert!(p.more.is_match(" --More-- "));
         assert!(p.more.is_match("  ---- More ----"));
+        // Junos, sin y con porcentaje: antes ninguno calzaba y el trabajo esperaba el plazo completo.
+        assert!(p.more.is_match("---(more)---"));
+        assert!(p.more.is_match("---(more 45%)---"));
+        assert!(p.more.is_match("ge-0/0/1  up  up\n---(more 100%)---"));
+        assert!(!p.more.is_match("Learn more -- see the documentation"));
+        assert!(!p.more.is_match("---(more 45%)--- ge-0/0/2 up up"), "con texto después ya no es el paginador en espera");
         for prompt in ["Router#", "SW-CORE(config)#", "<HUAWEI>", "[HUAWEI]", "noc@mx01>", "fw01 #"] {
             assert!(p.prompt.is_match(prompt), "{prompt}");
         }
@@ -457,6 +555,68 @@ mod tests {
         }
         assert!(p.error.is_match("%Error opening tftp://10.0.0.5/x.bin (Timed out)"));
         assert!(!p.error.is_match("[OK - 33591768 bytes]"));
+    }
+
+    #[test]
+    fn pager_pages_do_not_count_as_confirmations() {
+        let p = patterns();
+        // 201 páginas (unas 4.600 líneas): todas se avanzan; antes la 201 cortaba con "Demasiadas confirmaciones".
+        let mut auto = AutoReplies::default();
+        for i in 0..201 {
+            let tail = if i % 2 == 0 { "Gi1/0/1 is up\n --More-- " } else { "ge-0/0/1 up up\n---(more 45%)---" };
+            assert_eq!(auto.next(p, tail.trim_end_matches([' ', '\t']), true), Auto::Reply(" "), "página {i}");
+        }
+        assert_eq!((auto.pages, auto.confirms), (201, 0));
+        // Las confirmaciones conservan su tope, aunque haya páginas entre medio.
+        for _ in 0..MAX_CONFIRMS {
+            assert_eq!(auto.next(p, "Destination filename [a.bin]?", true), Auto::Reply("\r"));
+        }
+        assert_eq!(auto.next(p, "  ---- More ----", true), Auto::Reply(" "));
+        assert_eq!(auto.next(p, "Destination filename [a.bin]?", true), Auto::Stop(TOO_MANY_CONFIRMS));
+        // El paginador también tiene tope: un equipo que repite "--More--" sin fin no ocupa la sesión.
+        let mut auto = AutoReplies::default();
+        for _ in 0..MAX_PAGES {
+            assert_eq!(auto.next(p, " --More--", true), Auto::Reply(" "));
+        }
+        assert_eq!(auto.next(p, " --More--", true), Auto::Stop(TOO_MANY_PAGES));
+        // Sin nada que responder, y sin confirmar cuando `answer` es false (queda la primera pregunta).
+        let mut auto = AutoReplies::default();
+        assert_eq!(auto.next(p, "Router#show clock\n10:00", false), Auto::Wait);
+        assert_eq!(auto.next(p, "Are you sure to download file? (y/n)[n]:", false), Auto::Reply("n\r"));
+        assert_eq!(auto.next(p, "Proceed with reload? [confirm]", false), Auto::Reply("\x03"));
+        assert_eq!(auto.declined.as_deref(), Some("Are you sure to download file? (y/n)[n]:"));
+        assert_eq!(AutoReplies::default().next(p, "Copy flash:/a.cfg to flash:/b.cfg? (y/n)[n]:", true), Auto::Reply("y\r"));
+    }
+
+    #[test]
+    fn destructive_questions_are_declined_even_when_answering() {
+        let p = patterns();
+        // Borrar, formatear, sobrescribir o reiniciar: "no" (Ctrl+C o "n") y queda en `declined`.
+        for (tail, reply) in [
+            ("Loading c2960.bin from 10.0.0.5 (via Vlan1): !!!\nErase flash: before copying? [confirm]", "\x03"),
+            ("%Warning:There is a file already existing with this name\nDo you want to over write? [confirm]", "\x03"),
+            ("Delete filename [old.bin]?", "\x03"),
+            ("Proceed with reload? [confirm]", "\x03"),
+            ("Info: The file flash:/b.cfg exists. Overwrite it? (y/n)[n]:", "n\r"),
+            ("All data will be lost. Format flash:? (y/n)[n]:", "n\r"),
+            ("This operation will replace the current firmware version and reboot the system!\nDo you want to continue? (y/n)", "n\r"),
+            ("Squeeze operation may take a while. Continue? [confirm]", "\x03"),
+        ] {
+            let mut auto = AutoReplies::default();
+            assert_eq!(auto.next(p, tail, true), Auto::Reply(reply), "{tail}");
+            assert_eq!(auto.declined.as_deref(), Some(tail.lines().last().unwrap()), "{tail}");
+        }
+        // Nombres de archivo, rutas y valores por defecto con esas palabras no cuentan.
+        for tail in [
+            "Destination filename [erase-me.bin]?",
+            "Accessing tftp://10.0.0.5/format.cfg...\nDestination filename [format.cfg]?",
+            "Address or name of remote host [10.0.0.5]?",
+            "Destination filename [startup-config]?",
+        ] {
+            let mut auto = AutoReplies::default();
+            assert_eq!(auto.next(p, tail, true), Auto::Reply("\r"), "{tail}");
+            assert_eq!(auto.declined, None, "{tail}");
+        }
     }
 
     #[test]
@@ -499,5 +659,50 @@ mod tests {
     fn source_ip_uses_routing_table() {
         assert_eq!(source_ip_for("127.0.0.1").unwrap(), "127.0.0.1");
         assert!(source_ip_for("-x").is_err());
+    }
+
+    /// `flush_lines` (un solo drain por bloque) emite exactamente lo mismo que la versión anterior
+    /// (un drain por línea), con bloques que cortan líneas, CRLF, líneas vacías y texto multibyte.
+    #[test]
+    fn flush_lines_matches_the_line_by_line_version() {
+        fn before(partial: &mut String, all: bool, out: &mut Vec<String>) {
+            while let Some(i) = partial.find('\n') {
+                let line = partial[..i].trim_end().to_string();
+                partial.drain(..=i);
+                if !line.is_empty() {
+                    out.push(line);
+                }
+            }
+            if all && !partial.trim().is_empty() {
+                out.push(partial.trim_end().to_string());
+                partial.clear();
+            }
+        }
+        let text = "show ver\r\nCisco IOS  \r\n\r\n\nuptime año ñandú\n  \n --More-- \rsw1#\nconfirm [y/n] ";
+        for size in [1, 2, 3, 5, 7, 16, 64, text.len()] {
+            let (mut a, mut b) = (String::new(), String::new());
+            let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
+            let chars: Vec<char> = text.chars().collect();
+            for (k, chunk) in chars.chunks(size).enumerate() {
+                let chunk: String = chunk.iter().collect();
+                a.push_str(&chunk);
+                b.push_str(&chunk);
+                let all = k % 3 == 2; // pausas intermedias (recv_timeout) también
+                before(&mut a, all, &mut out_a);
+                let got = std::cell::RefCell::new(Vec::new());
+                flush_lines(&mut b, all, &|kind, line, data| {
+                    assert_eq!((kind, data), ("line", None));
+                    got.borrow_mut().push(line);
+                });
+                out_b.extend(got.into_inner());
+                assert_eq!(a, b, "mismo resto pendiente (bloques de {size})");
+            }
+            before(&mut a, true, &mut out_a);
+            let got = std::cell::RefCell::new(Vec::new());
+            flush_lines(&mut b, true, &|_, line, _| got.borrow_mut().push(line));
+            out_b.extend(got.into_inner());
+            assert_eq!(out_a, out_b, "mismas líneas (bloques de {size})");
+            assert_eq!(a, b, "mismo resto (solo espacios) al final");
+        }
     }
 }

@@ -1,8 +1,9 @@
-import { ComponentProps, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { ComponentProps, memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
+  Camera,
   Copy,
   Download,
   FileCode2,
@@ -33,6 +34,7 @@ import {
   followedTerminal,
   isIpv4,
   isIpv6,
+  isStale,
   isUserProto,
   knownAddrs,
   layout,
@@ -41,6 +43,7 @@ import {
   linkGroup,
   linkKey,
   nodeId,
+  purgeStale,
   sourceOn,
   toCsv,
   toDrawio,
@@ -52,7 +55,7 @@ import {
   utilLevel,
 } from "../../lib/topology";
 import { ConnectPanel } from "./TopoConnect";
-import { LEVEL_RANK, LinkLevel, linkTraffic } from "../../lib/topoTraffic";
+import { LEVEL_RANK, LinkLevel, linkTraffic, noTrafficReason } from "../../lib/topoTraffic";
 import {
   LinkDetail,
   NO_FILTER,
@@ -87,10 +90,11 @@ import { plural } from "../../lib/plural";
 import { TopoLayers } from "./topology/TopoLayers";
 import { TopoCanvas } from "./topology/TopoCanvas";
 import { TopoToolbar } from "./topology/TopoToolbar";
+import { ToolHeader } from "./ui";
 import { HopDialogs } from "./topology/HopDialogs";
 import { TopoPanel } from "./topology/TopoPanel";
 import { FiltersSection, ScopeSection, SourcesSection } from "./topology/PanelConfig";
-import { AttentionSection, SuggestionsSection, TrafficSection } from "./topology/PanelStatus";
+import { AttentionSection, NoTrafficRow, NoTrafficSection, SuggestionsSection, TrafficSection } from "./topology/PanelStatus";
 import { DetailSection, ManualSection, RouteSection, SnapshotsSection } from "./topology/PanelItem";
 import { useTopoSnapshots } from "./topology/useTopoSnapshots";
 import { useTopoHops } from "./topology/useTopoHops";
@@ -108,7 +112,18 @@ import { FLOW_MAX, H, MAX_L2_NODES, PARALLEL_GAP, VENDORS, W } from "./topology/
 import { UTIL_VAR } from "./topology/topoStyle";
 import type { ConfirmReq, Geo, L2Geo, ManualForm, Menu, Pill, TrafficRow } from "./topology/topoTypes";
 
-export function TopologyTool({
+/** Hora de un snapshot para el chip de origen: hh:mm si es de hoy; si no, con la fecha. */
+function snapTime(ts: number): string {
+  const d = new Date(ts);
+  const hm = d.toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? hm : `${d.toLocaleDateString("es-CL", { day: "2-digit", month: "2-digit" })} ${hm}`;
+}
+
+/**
+ * Memorizada: Herramientas se vuelve a dibujar con cada muestra de Monitoreo (aunque esté oculta) y
+ * Topología no depende de ellas; ToolsView le pasa callbacks estables.
+ */
+export const TopologyTool = memo(function TopologyTool({
   terminals,
   sessions,
   topo,
@@ -411,7 +426,9 @@ export function TopologyTool({
       placed.push(g);
       return g;
     });
-    return { nodes: [...topo.nodes, ...ghosts], links: [...topo.links, ...diff.removedLinks] };
+    // Un enlace que sigue en el diagrama como "no visto" cuenta como retirado: ya está en topo.links.
+    const have = new Set(topo.links.map(linkKey));
+    return { nodes: [...topo.nodes, ...ghosts], links: [...topo.links, ...diff.removedLinks.filter((l) => !have.has(linkKey(l)))] };
   }, [diff, snapshot, liveTopo]);
   // Filtros: solo cambian lo que se dibuja; el diagrama guardado, las rutas y las exportaciones siguen completos.
   const shown = useMemo(() => filterView(view, filter), [view, filter]);
@@ -528,6 +545,8 @@ export function TopologyTool({
     const m = new Map<string, LinkTraffic>();
     if (!trafficOn) return m;
     for (const l of topo.links) {
+      // Un enlace que ya nadie informa no lleva tráfico: los contadores de su puerto pueden ser de otro enlace.
+      if (isStale(l)) continue;
       const lt = linkTraffic(l, traffic.rates);
       if (lt) m.set(linkKey(l), lt);
     }
@@ -623,6 +642,38 @@ export function TopologyTool({
     return { down, load, issues };
   }, [attention]);
   const coverage = useMemo(() => checkCoverage(topoData, traffic.live), [topoData, traffic.live]);
+  /**
+   * Enlaces CDP/LLDP sin datos de tráfico con la lectura activa y el motivo de cada uno (se dibujan en
+   * gris punteado). Los caídos ya están en "Requieren atención"; no suman a su contador.
+   */
+  const noTraffic = useMemo(() => {
+    const m = new Map<string, NoTrafficRow>();
+    if (!trafficOn) return m;
+    for (const l of topo.links) {
+      if (isStale(l) || linkDash(l)) continue;
+      const k = linkKey(l);
+      if (linkRates.has(k) || m.has(k) || linkLevelOf(checks.get(k), undefined) === "down") continue;
+      const r = noTrafficReason(l, topoById, traffic.rates, traffic.status);
+      m.set(k, { key: k, aName: topoById.get(l.a)?.name ?? l.a, bName: topoById.get(l.b)?.name ?? l.b, kind: r.kind, text: r.text });
+    }
+    return m;
+  }, [trafficOn, topo.links, linkRates, checks, topoById, traffic.rates, traffic.status]);
+  const noTrafficRows = useMemo(() => [...noTraffic.values()], [noTraffic]);
+  /** Enlaces CDP/LLDP que ya nadie informa: se dibujan fantasma hasta que se vuelvan a ver o se quiten. */
+  const staleCount = useMemo(() => topo.links.filter(isStale).length, [topo.links]);
+  const purge = () =>
+    onConfirm({
+      title: `¿Quitar ${staleCount === 1 ? "el enlace no visto" : `los ${staleCount} enlaces no vistos`}?`,
+      message:
+        "Se quitan del diagrama los enlaces CDP/LLDP que ningún equipo informa ya, y los equipos sin explorar que solo existían por ellos. Los snapshots no cambian. Si el enlace sigue en uso, vuelve a descubrir sus extremos en vez de quitarlo.",
+      label: "Quitar",
+      danger: true,
+      defaultCancel: true,
+      action: () => {
+        onTopo((t) => purgeStale(t));
+        setMsg(`${staleCount === 1 ? "Se quitó 1 enlace no visto" : `Se quitaron ${staleCount} enlaces no vistos`}.`);
+      },
+    });
 
   // Agentes IA (MCP): tasas, estado de enlaces y "Requieren atención" mientras esta vista está
   // abierta con el tráfico activo. Solo se publica una referencia; get_topology la lee si la pide.
@@ -667,12 +718,14 @@ export function TopologyTool({
         const k = linkKey(l);
         if (!want.has(k)) continue;
         const st = removed.has(k) ? "removed" : added.has(k) ? "added" : null;
-        out.push(linkDetail(v, l, { byId, lt: st ? undefined : linkRates.get(k), issues: st === "removed" ? undefined : checks.get(k), live: traffic.live, state: st }));
+        const d = linkDetail(v, l, { byId, lt: st ? undefined : linkRates.get(k), issues: st === "removed" ? undefined : checks.get(k), live: traffic.live, state: st });
+        const why = st ? undefined : noTraffic.get(k)?.text;
+        out.push(why ? { ...d, noTraffic: why } : d);
       }
       // Los peores primero (caído y saturado), como en la lista de atención.
       return out.sort((x, y) => LEVEL_RANK[y.level] - LEVEL_RANK[x.level]);
     },
-    [checks, linkRates, removed, added, traffic.live],
+    [checks, linkRates, removed, added, traffic.live, noTraffic],
   );
   /** Clic en "Requieren atención": resalta el enlace y lo centra (otro clic en el mismo lo suelta). */
   const focusLinkRef = useRef(focusLink);
@@ -909,8 +962,8 @@ export function TopologyTool({
   const hasPhysical = shown.links.some((l) => !linkDash(l));
   const hasTentative = shown.nodes.some((n) => n.manual || n.addrOnly);
   const hasTraffic = linkRates.size > 0;
-  // Leyenda de estados: con lecturas de tráfico, o cuando hay algo que resaltar (caído, problemas de interfaz).
-  const showStatusLegend = hasTraffic || attention.length > 0;
+  // Leyenda de estados: con el tráfico activo, o cuando hay algo que resaltar (caído, problemas de interfaz).
+  const showStatusLegend = trafficOn || hasTraffic || attention.length > 0;
   const showLegend = legendKinds.length > 0 || hasTentative || showStatusLegend;
 
   const trafficSummary = !trafficOn
@@ -929,8 +982,29 @@ export function TopologyTool({
   /** Botones de la barra con texto (si no, solo ícono con tooltip). */
   const labels = wide || (!tiny && size.rw >= 900);
   // Por qué "Descubrir vecinos" no se puede pulsar, visible bajo el botón.
+  // Con un diagrama ya dibujado (guardado o abierto desde un snapshot) conectarse sirve para actualizarlo.
   const discoverWhy =
-    mode === "cli" ? (!terminals.length ? "Conéctate a un equipo para descubrir" : !term ? "Elige un equipo de la lista" : undefined) : !profile ? "Crea un perfil SNMP en Herramientas › SNMP" : undefined;
+    mode === "cli"
+      ? !terminals.length
+        ? topo.nodes.length
+          ? "Conéctate a un equipo para actualizar el mapa"
+          : "Conéctate a un equipo para descubrir"
+        : !term
+          ? "Elige un equipo de la lista"
+          : undefined
+      : !profile
+        ? "Crea un perfil SNMP en Herramientas › SNMP"
+        : undefined;
+  // Origen del mapa a la vista: el snapshot que se compara o el que se abrió (misma referencia hasta que
+  // el diagrama cambie). Sin sesión, un mapa guardado se marca como tal para no confundirlo con uno vigente.
+  const openedSnap = snapshot ? undefined : snapshots.find((s) => s.topo === topo);
+  const shownSnap = snapshot ?? openedSnap;
+  const offline = mode === "cli" && !terminals.length && topo.nodes.length > 0;
+  const origin = shownSnap
+    ? `${snapshot ? "Comparando con snapshot" : "Snapshot"} ${snapTime(shownSnap.ts)}${offline ? " · sin sesión activa" : ""}`
+    : offline
+      ? "Diagrama guardado · sin sesión activa"
+      : "";
   const openSection = (sec: PanelSection) => setUi((u) => ({ ...u, panel: true, sec: { ...u.sec, [sec]: true } }));
   const askClear = () => {
     const manual = topo.nodes.filter((n) => n.manual).length + topo.links.filter((l) => isUserProto(l.proto)).length;
@@ -996,6 +1070,7 @@ export function TopologyTool({
     selected,
     focusLink,
     linkRates,
+    trafficOn,
     detail,
     color: ui.color,
     arrows: arrowsOn,
@@ -1032,6 +1107,7 @@ export function TopologyTool({
     hasTentative,
     showStatusLegend,
     detail,
+    trafficOn,
     hasTraffic,
     color: ui.color,
     arrows: ui.arrows,
@@ -1071,6 +1147,8 @@ export function TopologyTool({
 
   return (
     <div ref={rootRef} className="@container h-full min-h-[280px] flex flex-col gap-3">
+      {/* Encabezado común de las herramientas; en anchos chicos se omite (el menú lateral ya dice Topología) para dejarle alto al mapa. */}
+      {!tiny && <ToolHeader title="Topología" description={hint} />}
       <TopoToolbar
         wide={wide}
         tiny={tiny}
@@ -1155,6 +1233,16 @@ export function TopologyTool({
       </TopoToolbar>
 
       <div className="relative flex-1 min-h-[200px] flex gap-3">
+        {origin && (
+          // Debajo de la ficha del equipo elegido cuando esta ocupa la esquina (panel cerrado).
+          <p
+            className={`absolute left-2 z-10 max-w-[calc(100%-1rem)] inline-flex items-center gap-1.5 rounded-full border border-line bg-panel shadow-pop px-2.5 h-6 text-[11.5px] text-muted pointer-events-none ${!ui.panel && sel ? "top-11" : "top-2"}`}
+            title={shownSnap ? shownSnap.name : undefined}
+          >
+            <Camera size={12} aria-hidden className="shrink-0" />
+            <span className="truncate">{origin}</span>
+          </p>
+        )}
         <TopoCanvas
           mapBox={mapBox}
           scroller={scroller}
@@ -1209,9 +1297,14 @@ export function TopologyTool({
               trafficOn={trafficOn}
               focusLink={focusLink}
               onPick={pickLink}
+              staleCount={staleCount}
+              onPurge={purge}
               open={isOpen("atencion")}
               onToggle={(v) => setOpen("atencion", v)}
             />
+            {trafficOn && (
+              <NoTrafficSection rows={noTrafficRows} focusLink={focusLink} onPick={pickLink} open={isOpen("sindatos")} onToggle={(v) => setOpen("sindatos", v)} />
+            )}
             <TrafficSection
               summary={trafficSummary}
               trafficOn={trafficOn}
@@ -1299,4 +1392,4 @@ export function TopologyTool({
       </div>
     </div>
   );
-}
+});

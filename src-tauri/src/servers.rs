@@ -5,7 +5,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -80,6 +80,87 @@ pub fn safe_path(root: &Path, requested: &str) -> Option<PathBuf> {
         }
     }
     (out != root).then_some(out)
+}
+
+/// Nombre para la carpeta compartida que el equipo pueda usar en un comando: letras, números, punto,
+/// guion y guion bajo (como `backupName`). "cat9k image 17.9.bin" pasa a "cat9k_image_17.9.bin": con
+/// espacios, "copy tftp://ip/cat9k image 17.9.bin flash:" toma argumentos de más. Tampoco empieza con
+/// punto (oculto, como los temporales .part) ni es un nombre de dispositivo de Windows.
+pub fn shared_name(original: &str) -> String {
+    let mut out = String::with_capacity(original.len());
+    for c in original.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+            out.push(c);
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_start_matches(['.', '_']).trim_end_matches(['.', '_']);
+    let name = if trimmed.is_empty() { "archivo".to_string() } else { trimmed.to_string() };
+    if reserved_device_name(&name) {
+        format!("_{name}")
+    } else {
+        name
+    }
+}
+
+/// Archivo agregado a la carpeta compartida: el nombre con que quedó y el original.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Added {
+    pub name: String,
+    pub original: String,
+    /// Ya estaba en la carpeta (el mismo archivo o uno idéntico): no se copió.
+    pub existing: bool,
+}
+
+/// Contenido idéntico (mismo largo y mismos bytes).
+fn same_content(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) else { return false };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (File::open(a), File::open(b)) else { return false };
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        let n = read_full(&mut fa, &mut ba);
+        if n != read_full(&mut fb, &mut bb) || ba[..n] != bb[..n] {
+            return false;
+        }
+        if n == 0 {
+            return true;
+        }
+    }
+}
+
+/// Copia `src` a la carpeta compartida `dir` sin pisar nada. Si `src` ya es ese archivo (el diálogo
+/// abierto en la misma carpeta, o un enlace a él) no se copia: `fs::copy` sobre sí mismo lo dejaba
+/// en 0 bytes. Si existe otro archivo con ese nombre y distinto contenido, se guarda como
+/// nombre_2.ext, nombre_3.ext...
+pub fn add_shared(src: &Path, dir: &Path) -> Result<Added, String> {
+    let original = src.file_name().ok_or("Ruta inválida")?.to_string_lossy().into_owned();
+    if !src.is_file() {
+        return Err(format!("{original} no es un archivo"));
+    }
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let real = src.canonicalize().map_err(|e| e.to_string())?;
+    let name = shared_name(&original);
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name.as_str(), ""),
+    };
+    for n in 1..1000 {
+        let candidate = if n == 1 { name.clone() } else { format!("{stem}_{n}{ext}") };
+        let dest = dir.join(&candidate);
+        if dest.exists() || dest.is_symlink() {
+            if dest.canonicalize().is_ok_and(|d| d == real) || same_content(src, &dest) {
+                return Ok(Added { name: candidate, original, existing: true });
+            }
+            continue;
+        }
+        fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        return Ok(Added { name: candidate, original, existing: false });
+    }
+    Err(format!("Hay demasiados archivos llamados {name} en la carpeta compartida"))
 }
 
 /// Verifica que la ruta real (tras resolver enlaces) siga dentro de `root`.
@@ -338,36 +419,110 @@ fn http_loop(server: Arc<tiny_http::Server>, flag: Arc<AtomicBool>, guard: Arc<G
     }
 }
 
+/// Tope de cada archivo diario de syslog. UDP/514 acepta a cualquier cliente por defecto y el origen
+/// se puede falsificar: sin tope, una ráfaga de mensajes de 4000 caracteres llenaría el disco del PC.
+const SYSLOG_FILE_MAX: u64 = 200 * 1024 * 1024;
+
+/// Archivo diario de syslog (syslog_AAAA-MM-DD.log) con tope de tamaño: al alcanzarlo deja de
+/// escribir hasta el día siguiente y avisa una sola vez. Escribe con búfer: `syslog_loop` llama a
+/// `flush` con cada lote enviado a la vista y al salir; cerrar el archivo (cambio de día o tope) también
+/// lo vacía.
+struct DailyLog {
+    dir: PathBuf,
+    max: u64,
+    /// Día, archivo abierto y bytes escritos (incluye lo que ya tenía al abrirlo).
+    file: Option<(String, BufWriter<File>, u64)>,
+    /// Día en que se alcanzó el tope (no se escribe más ese día).
+    full: Option<String>,
+}
+
+impl DailyLog {
+    fn new(dir: PathBuf, max: u64) -> Self {
+        DailyLog { dir, max, file: None, full: None }
+    }
+
+    /// Escribe una línea en el archivo de `day`. Devuelve el aviso para la vista la primera vez que
+    /// se alcanza el tope de ese día.
+    fn write(&mut self, day: &str, line: &str) -> Option<String> {
+        if self.full.as_deref() == Some(day) {
+            return None;
+        }
+        if self.file.as_ref().is_none_or(|(d, _, _)| d != day) {
+            let _ = fs::create_dir_all(&self.dir);
+            self.file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.dir.join(format!("syslog_{day}.log")))
+                .ok()
+                .map(|f| {
+                    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                    (day.to_string(), BufWriter::with_capacity(SYSLOG_BUF, f), len)
+                });
+        }
+        let (_, f, len) = self.file.as_mut()?;
+        let bytes = line.len() as u64 + 1;
+        if *len + bytes > self.max {
+            self.file = None;
+            self.full = Some(day.to_string());
+            return Some(format!(
+                "NetTerminal: el archivo syslog_{day}.log llegó al tope de {} MB y no se guardan más mensajes hoy. La vista sigue recibiendo. Revisa qué equipo envía tanto o limita los clientes permitidos.",
+                self.max / (1024 * 1024)
+            ));
+        }
+        if writeln!(f, "{line}").is_ok() {
+            *len += bytes;
+        }
+        None
+    }
+
+    /// Lleva al disco lo que quedó en el búfer (lote enviado a la vista o fin del servidor).
+    fn flush(&mut self) {
+        if let Some((_, f, _)) = self.file.as_mut() {
+            let _ = f.flush();
+        }
+    }
+}
+
+/// Búfer del archivo de syslog: una ráfaga de mensajes es una escritura por lote, no una por línea.
+const SYSLOG_BUF: usize = 64 * 1024;
+
 /// Recepción de Syslog (UDP): los mensajes de orígenes no permitidos no se procesan ni se guardan.
 fn syslog_loop(sock: UdpSocket, flag: Arc<AtomicBool>, guard: Arc<Guard>, save_dir: Option<PathBuf>, emit: impl Fn(Vec<SyslogMsg>)) {
     let mut buf = [0u8; 8192];
     let mut batch: Vec<SyslogMsg> = Vec::new();
     let mut last_flush = Instant::now();
-    let mut file: Option<(String, File)> = None;
+    let mut log = save_dir.map(|d| DailyLog::new(d, SYSLOG_FILE_MAX));
     while flag.load(Ordering::SeqCst) && guard.pulse(&flag) {
         if let Ok((n, peer)) = sock.recv_from(&mut buf) {
             if guard.admit(peer.ip()) && buf[..n].iter().any(|b| !b.is_ascii_whitespace() && *b != 0) {
                 // Mensaje aceptado: único tráfico de syslog que cuenta como actividad.
                 guard.touch();
                 let msg = parse_syslog(&String::from_utf8_lossy(&buf[..n]), peer);
-                if let Some(dir) = &save_dir {
-                    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
-                    if file.as_ref().map(|(d, _)| d != &day).unwrap_or(true) {
-                        let _ = fs::create_dir_all(dir);
-                        file = fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("syslog_{day}.log"))).ok().map(|f| (day, f));
-                    }
-                    if let Some((_, f)) = file.as_mut() {
-                        let _ = writeln!(f, "{} {} <{}.{}> {}", chrono::Local::now().format("%H:%M:%S"), msg.src, msg.facility, msg.severity, one_line(&msg.msg));
-                    }
+                let mut notice = None;
+                if let Some(log) = log.as_mut() {
+                    let now = chrono::Local::now();
+                    let line = format!("{} {} <{}.{}> {}", now.format("%H:%M:%S"), msg.src, msg.facility, msg.severity, one_line(&msg.msg));
+                    notice = log.write(&now.format("%Y-%m-%d").to_string(), &line);
                 }
                 batch.push(msg);
+                // Aviso en la vista como mensaje propio (facility 5, syslog interno; severidad 4, warning).
+                if let Some(text) = notice {
+                    batch.push(SyslogMsg { ts: chrono::Utc::now().timestamp_millis(), src: "este PC".into(), severity: 4, facility: 5, msg: text });
+                }
             }
         }
-        // Envío por lotes para no saturar la interfaz con ráfagas de logs.
+        // Envío por lotes para no saturar la interfaz con ráfagas de logs. El archivo se vacía con el
+        // mismo lote: lo que la vista muestra ya está en disco.
         if !batch.is_empty() && (last_flush.elapsed() > Duration::from_millis(250) || batch.len() >= 500) {
+            if let Some(log) = log.as_mut() {
+                log.flush();
+            }
             emit(std::mem::take(&mut batch));
             last_flush = Instant::now();
         }
+    }
+    if let Some(log) = log.as_mut() {
+        log.flush();
     }
     if !batch.is_empty() {
         emit(batch);
@@ -487,6 +642,8 @@ const TFTP_MAX_SESSIONS: usize = 16;
 const TFTP_MAX_TIMEOUT: u64 = 30;
 /// Tamaño máximo de un archivo recibido por TFTP (imágenes de firmware grandes incluidas).
 pub(crate) const TFTP_MAX_UPLOAD: u64 = 8 * 1024 * 1024 * 1024;
+/// Búfer de escritura de una subida TFTP.
+const TFTP_WRITE_BUF: usize = 256 * 1024;
 
 /// Contexto fijo de las sesiones TFTP de un servidor en marcha.
 struct TftpEnv {
@@ -614,9 +771,13 @@ fn tftp_session(app: AppHandle, root: PathBuf, allow_write: bool, env: &TftpEnv,
             // Temporal único: dos subidas a la vez (ios.bin e ios.txt) no deben pisarse.
             let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("archivo");
             let tmp = path.with_file_name(format!(".{fname}.{}.part", uuid::Uuid::new_v4().simple()));
-            let Ok(mut file) = File::create(&tmp) else {
+            let Ok(file) = File::create(&tmp) else {
+                report(0, total, true, Some("No se pudo crear el archivo en la carpeta compartida".into()), "put");
                 return tftp_error(&sock, peer, 2, "No se pudo crear el archivo");
             };
+            // Con búfer: un bloque de 512 B ya no es una escritura al disco por ACK. `tftp_receive` lo
+            // vacía antes del ACK final y avisa al equipo si falla; recién entonces se renombra.
+            let mut file = BufWriter::with_capacity(TFTP_WRITE_BUF, file);
             let _act = guard.busy();
             let mut oack = Vec::new();
             if let Some(b) = blksize {
@@ -639,66 +800,89 @@ fn tftp_session(app: AppHandle, root: PathBuf, allow_write: bool, env: &TftpEnv,
                 sock.send_to(&p, peer).is_ok()
             };
             if !first_ack {
+                drop(file);
+                let _ = fs::remove_file(&tmp);
                 return;
             }
-            let mut expected: u16 = 1;
-            let mut got: u64 = 0;
-            let mut buf = vec![0u8; block + 4];
-            let mut last_report = Instant::now();
-            let mut retries = 0;
             // Datagramas basura o bloques repetidos no cuentan como avance: sin este tope, un
             // tercero que conozca el puerto mantendría la sesión abierta para siempre.
             let stall = Duration::from_secs(timeout.unwrap_or(3) * (RETRIES as u64 + 1));
-            let mut last_progress = Instant::now();
-            loop {
-                if last_progress.elapsed() > stall {
+            let res = tftp_receive(&sock, peer, &mut file, block, stall, flag, |got| report(got, total, false, None, "put"));
+            drop(file);
+            // Un error de escritura o de renombre se informa como fin con error: antes la fila quedaba
+            // "En curso" para siempre y el .part oculto se quedaba en la carpeta compartida.
+            let saved = res.map_err(|(got, why)| (got, why.to_string())).and_then(|got| {
+                fs::rename(&tmp, &path).map(|_| got).map_err(|e| (got, format!("No se pudo guardar el archivo: {e}")))
+            });
+            match saved {
+                Ok(got) => report(got, total, true, None, "put"),
+                Err((got, why)) => {
                     let _ = fs::remove_file(&tmp);
-                    report(got, total, true, Some("Transferencia interrumpida".into()), "put");
-                    return tftp_error(&sock, peer, 0, "Tiempo agotado");
-                }
-                match sock.recv_from(&mut buf) {
-                    Ok((n, from)) if from == peer && n >= 4 && u16::from_be_bytes([buf[0], buf[1]]) == OP_DATA => {
-                        let bno = u16::from_be_bytes([buf[2], buf[3]]);
-                        if bno == expected {
-                            if file.write_all(&buf[4..n]).is_err() {
-                                return tftp_error(&sock, peer, 3, "Disco lleno o error de escritura");
-                            }
-                            got += (n - 4) as u64;
-                            if got > TFTP_MAX_UPLOAD {
-                                drop(file);
-                                let _ = fs::remove_file(&tmp);
-                                report(got, total, true, Some("Archivo demasiado grande".into()), "put");
-                                return tftp_error(&sock, peer, 3, "Archivo demasiado grande");
-                            }
-                            expected = expected.wrapping_add(1);
-                            retries = 0;
-                            last_progress = Instant::now();
-                        }
-                        let mut ack = vec![0, OP_ACK as u8];
-                        ack.extend(bno.to_be_bytes());
-                        let _ = sock.send_to(&ack, peer);
-                        if last_report.elapsed() > Duration::from_millis(300) {
-                            report(got, total, false, None, "put");
-                            last_report = Instant::now();
-                        }
-                        if n - 4 < block && bno.wrapping_add(1) == expected {
-                            drop(file);
-                            let _ = fs::rename(&tmp, &path);
-                            return report(got, total, true, None, "put");
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(_) => {
-                        retries += 1;
-                        if retries > RETRIES || !flag.load(Ordering::SeqCst) {
-                            let _ = fs::remove_file(&tmp);
-                            return report(got, total, true, Some("Transferencia interrumpida".into()), "put");
-                        }
-                    }
+                    report(got, total, true, Some(why), "put");
                 }
             }
         }
         _ => tftp_error(&sock, peer, 4, "Operación TFTP no válida"),
+    }
+}
+
+/// Recibe los bloques DATA de una subida TFTP y los escribe en `out`, con ACK por bloque. Devuelve
+/// los bytes recibidos o, si se corta, los recibidos hasta ahí y el motivo para la interfaz (al
+/// equipo ya se le avisó con un ERROR cuando corresponde). `progress` recibe el avance cada 300 ms.
+/// `out` se vacía (`flush`) antes del ACK del último bloque: con un búfer, un error de disco llega al
+/// equipo como ERROR y no como una subida confirmada.
+fn tftp_receive(sock: &UdpSocket, peer: SocketAddr, out: &mut impl Write, block: usize, stall: Duration, flag: &AtomicBool, mut progress: impl FnMut(u64)) -> Result<u64, (u64, &'static str)> {
+    let mut expected: u16 = 1;
+    let mut got: u64 = 0;
+    let mut buf = vec![0u8; block + 4];
+    let mut last_report = Instant::now();
+    let mut retries = 0;
+    let mut last_progress = Instant::now();
+    loop {
+        if last_progress.elapsed() > stall {
+            tftp_error(sock, peer, 0, "Tiempo agotado");
+            return Err((got, "Transferencia interrumpida"));
+        }
+        match sock.recv_from(&mut buf) {
+            Ok((n, from)) if from == peer && n >= 4 && u16::from_be_bytes([buf[0], buf[1]]) == OP_DATA => {
+                let bno = u16::from_be_bytes([buf[2], buf[3]]);
+                if bno == expected {
+                    if out.write_all(&buf[4..n]).is_err() {
+                        tftp_error(sock, peer, 3, "Disco lleno o error de escritura");
+                        return Err((got, "Disco lleno o error de escritura en este PC"));
+                    }
+                    got += (n - 4) as u64;
+                    if got > TFTP_MAX_UPLOAD {
+                        tftp_error(sock, peer, 3, "Archivo demasiado grande");
+                        return Err((got, "Archivo demasiado grande"));
+                    }
+                    expected = expected.wrapping_add(1);
+                    retries = 0;
+                    last_progress = Instant::now();
+                    if n - 4 < block && out.flush().is_err() {
+                        tftp_error(sock, peer, 3, "Disco lleno o error de escritura");
+                        return Err((got, "Disco lleno o error de escritura en este PC"));
+                    }
+                }
+                let mut ack = vec![0, OP_ACK as u8];
+                ack.extend(bno.to_be_bytes());
+                let _ = sock.send_to(&ack, peer);
+                if last_report.elapsed() > Duration::from_millis(300) {
+                    progress(got);
+                    last_report = Instant::now();
+                }
+                if n - 4 < block && bno.wrapping_add(1) == expected {
+                    return Ok(got);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {
+                retries += 1;
+                if retries > RETRIES || !flag.load(Ordering::SeqCst) {
+                    return Err((got, "Transferencia interrumpida"));
+                }
+            }
+        }
     }
 }
 
@@ -1106,6 +1290,245 @@ mod tests {
         assert!(got.lock().unwrap().is_empty(), "no se procesa nada de orígenes no permitidos");
         assert!(!dir.exists(), "tampoco se guarda en archivo");
         assert_eq!(guard.stats().rejected, 3);
+    }
+
+    #[test]
+    fn shared_names_are_safe_for_device_commands() {
+        assert_eq!(shared_name("cat9k image 17.9.bin"), "cat9k_image_17.9.bin");
+        assert_eq!(shared_name("FGT 100F.out"), "FGT_100F.out");
+        assert_eq!(shared_name("c2960-lanbasek9-mz.152-7.E9.bin"), "c2960-lanbasek9-mz.152-7.E9.bin");
+        assert_eq!(shared_name("respaldo (1)  final.cfg"), "respaldo_1_final.cfg");
+        assert_eq!(shared_name("configuración.txt"), "configuraci_n.txt");
+        assert_eq!(shared_name(".oculto"), "oculto");
+        assert_eq!(shared_name("ios.bin."), "ios.bin");
+        assert_eq!(shared_name("nul.txt"), "_nul.txt");
+        assert_eq!(shared_name("   "), "archivo");
+    }
+
+    #[test]
+    fn adding_a_file_never_truncates_or_overwrites() {
+        let base = std::env::temp_dir().join(format!("nt-add-{}", uuid::Uuid::new_v4()));
+        let (shared, outside) = (base.join("tftp"), base.join("descargas"));
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        // El archivo ya está en la carpeta compartida (el diálogo se abrió ahí): antes quedaba en 0 bytes.
+        fs::write(shared.join("respaldo.cfg"), b"hostname sw1\n").unwrap();
+        let r = add_shared(&shared.join("respaldo.cfg"), &shared).unwrap();
+        assert_eq!(r, Added { name: "respaldo.cfg".into(), original: "respaldo.cfg".into(), existing: true });
+        assert_eq!(fs::read(shared.join("respaldo.cfg")).unwrap(), b"hostname sw1\n");
+        // Nombre con espacios: se guarda con un nombre seguro.
+        fs::write(outside.join("cat9k image.bin"), b"imagen").unwrap();
+        let r = add_shared(&outside.join("cat9k image.bin"), &shared).unwrap();
+        assert_eq!((r.name.as_str(), r.original.as_str(), r.existing), ("cat9k_image.bin", "cat9k image.bin", false));
+        assert_eq!(fs::read(shared.join("cat9k_image.bin")).unwrap(), b"imagen");
+        // Otro archivo con el mismo nombre: no pisa el que había.
+        fs::write(outside.join("respaldo.cfg"), b"hostname sw2\n").unwrap();
+        let r = add_shared(&outside.join("respaldo.cfg"), &shared).unwrap();
+        assert_eq!((r.name.as_str(), r.existing), ("respaldo_2.cfg", false));
+        assert_eq!(fs::read(shared.join("respaldo.cfg")).unwrap(), b"hostname sw1\n");
+        assert_eq!(fs::read(shared.join("respaldo_2.cfg")).unwrap(), b"hostname sw2\n");
+        // El mismo contenido otra vez: no se duplica.
+        let r = add_shared(&outside.join("respaldo.cfg"), &shared).unwrap();
+        assert_eq!((r.name.as_str(), r.existing), ("respaldo_2.cfg", true));
+        #[cfg(unix)]
+        {
+            // Un enlace en la carpeta que apunta al archivo elegido: copiar sobre él lo truncaría.
+            fs::write(outside.join("fw.bin"), b"firmware").unwrap();
+            std::os::unix::fs::symlink(outside.join("fw.bin"), shared.join("fw.bin")).unwrap();
+            let r = add_shared(&outside.join("fw.bin"), &shared).unwrap();
+            assert!(r.existing);
+            assert_eq!(fs::read(outside.join("fw.bin")).unwrap(), b"firmware");
+        }
+        assert!(add_shared(&outside, &shared).is_err(), "una carpeta no se agrega");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Cliente TFTP mínimo que envía `data` en bloques de 512 y devuelve el último paquete recibido.
+    fn tftp_put_blocks(client: UdpSocket, to: SocketAddr, data: &[u8]) -> Vec<u8> {
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut last = Vec::new();
+        let tail: Option<&[u8]> = if data.len().is_multiple_of(512) { Some(&[]) } else { None };
+        for (i, chunk) in data.chunks(512).chain(tail).enumerate() {
+            let mut pkt = vec![0, OP_DATA as u8];
+            pkt.extend(((i + 1) as u16).to_be_bytes());
+            pkt.extend(chunk);
+            client.send_to(&pkt, to).unwrap();
+            let mut buf = [0u8; 600];
+            let (n, _) = client.recv_from(&mut buf).unwrap();
+            last = buf[..n].to_vec();
+            if u16::from_be_bytes([last[0], last[1]]) == OP_ERROR {
+                break;
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn tftp_receive_reports_write_errors_instead_of_hanging() {
+        struct Full;
+        impl Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disco lleno"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let flag = AtomicBool::new(true);
+        let pair = || {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let peer = client.local_addr().unwrap();
+            (server, client, peer)
+        };
+        // Escritura que falla: se avisa al equipo (ERROR 3) y vuelve con el motivo para la interfaz.
+        let (sock, client, peer) = pair();
+        let addr = sock.local_addr().unwrap();
+        let t = std::thread::spawn(move || tftp_put_blocks(client, addr, &[7u8; 700]));
+        let r = tftp_receive(&sock, peer, &mut Full, 512, Duration::from_secs(5), &flag, |_| {});
+        assert_eq!(r, Err((0, "Disco lleno o error de escritura en este PC")));
+        let last = t.join().unwrap();
+        assert_eq!((u16::from_be_bytes([last[0], last[1]]), last[3]), (OP_ERROR, 3), "el equipo recibe el error");
+        // Escritura correcta: devuelve los bytes y el contenido completo.
+        let (sock, client, peer) = pair();
+        let addr = sock.local_addr().unwrap();
+        let data: Vec<u8> = (0..1300u32).map(|i| (i % 251) as u8).collect();
+        let sent = data.clone();
+        let t = std::thread::spawn(move || tftp_put_blocks(client, addr, &sent));
+        let mut out = Vec::new();
+        assert_eq!(tftp_receive(&sock, peer, &mut out, 512, Duration::from_secs(5), &flag, |_| {}), Ok(1300));
+        assert_eq!(out, data);
+        let last = t.join().unwrap();
+        assert_eq!((u16::from_be_bytes([last[0], last[1]]), last[3]), (OP_ACK, 3), "ACK del último bloque");
+    }
+
+    /// Subida TFTP con el búfer de `tftp_session`: el archivo queda idéntico y completo en disco antes
+    /// de volver (antes del rename), y un error de disco que aparece al vaciar el búfer llega al equipo
+    /// como ERROR 3 en vez del ACK final.
+    #[test]
+    fn tftp_receive_with_buffer_writes_the_same_file_and_reports_flush_errors() {
+        struct FailsOnFlush;
+        impl Write for FailsOnFlush {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disco lleno"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("disco lleno"))
+            }
+        }
+        let flag = AtomicBool::new(true);
+        let pair = || {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let peer = client.local_addr().unwrap();
+            (server, client, peer)
+        };
+        let dir = std::env::temp_dir().join(format!("nt-tftp-buf-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        // Tamaños: menor que un bloque, múltiplo exacto de 512 (bloque final vacío) y mayor que el búfer.
+        for len in [100usize, 512 * 4, TFTP_WRITE_BUF + 1000] {
+            let (sock, client, peer) = pair();
+            let addr = sock.local_addr().unwrap();
+            let data: Vec<u8> = (0..len as u32).map(|i| (i.wrapping_mul(31) % 251) as u8).collect();
+            let sent = data.clone();
+            let t = std::thread::spawn(move || tftp_put_blocks(client, addr, &sent));
+            let path = dir.join(format!("subida-{len}.bin"));
+            let mut out = BufWriter::with_capacity(TFTP_WRITE_BUF, File::create(&path).unwrap());
+            assert_eq!(tftp_receive(&sock, peer, &mut out, 512, Duration::from_secs(5), &flag, |_| {}), Ok(len as u64));
+            // Antes de soltar el BufWriter (como antes del rename): todo ya está en disco.
+            assert_eq!(fs::read(&path).unwrap(), data, "{len} bytes");
+            drop(out);
+            let last = t.join().unwrap();
+            assert_eq!(u16::from_be_bytes([last[0], last[1]]), OP_ACK, "ACK final ({len} bytes)");
+        }
+        // El disco falla al vaciar el búfer en el último bloque: ERROR al equipo, sin ACK final.
+        let (sock, client, peer) = pair();
+        let addr = sock.local_addr().unwrap();
+        let t = std::thread::spawn(move || tftp_put_blocks(client, addr, &[7u8; 700]));
+        let mut out = BufWriter::with_capacity(TFTP_WRITE_BUF, FailsOnFlush);
+        let r = tftp_receive(&sock, peer, &mut out, 512, Duration::from_secs(5), &flag, |_| {});
+        assert_eq!(r, Err((700, "Disco lleno o error de escritura en este PC")));
+        let last = t.join().unwrap();
+        assert_eq!((u16::from_be_bytes([last[0], last[1]]), last[3]), (OP_ERROR, 3), "el equipo recibe el error");
+        drop(out); // su Drop reintenta vaciar el búfer e ignora el error, como en tftp_session
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn syslog_daily_file_stops_at_its_cap_and_warns_once() {
+        let dir = std::env::temp_dir().join(format!("nt-syslog-cap-{}", uuid::Uuid::new_v4()));
+        let mut log = DailyLog::new(dir.clone(), 100);
+        let line = "x".repeat(39); // 40 bytes con el salto de línea
+        assert_eq!(log.write("2026-11-21", &line), None);
+        assert_eq!(log.write("2026-11-21", &line), None);
+        let warn = log.write("2026-11-21", &line).expect("aviso al pasar el tope");
+        assert!(warn.contains("syslog_2026-11-21.log") && warn.contains("tope"), "{warn}");
+        assert_eq!(log.write("2026-11-21", &line), None, "se avisa una sola vez");
+        assert_eq!(fs::metadata(dir.join("syslog_2026-11-21.log")).unwrap().len(), 80, "no se escribe más ese día");
+        // Al día siguiente vuelve a guardar (con búfer: en disco tras el flush del lote).
+        assert_eq!(log.write("2026-11-22", &line), None);
+        log.flush();
+        assert_eq!(fs::metadata(dir.join("syslog_2026-11-22.log")).unwrap().len(), 40);
+        // El tope cuenta lo que el archivo ya tenía (servidor reiniciado el mismo día).
+        let mut again = DailyLog::new(dir.clone(), 100);
+        assert_eq!(again.write("2026-11-22", &line), None);
+        assert!(again.write("2026-11-22", &line).is_some());
+        assert_eq!(fs::metadata(dir.join("syslog_2026-11-22.log")).unwrap().len(), 80);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Con búfer el archivo queda idéntico al de antes (una línea por mensaje, sin pérdidas): se vacía
+    /// con cada lote mientras el servidor sigue en marcha y al detenerse.
+    #[test]
+    fn syslog_file_is_flushed_per_batch_and_on_exit() {
+        // DailyLog: mismo contenido que escribir línea por línea sin búfer.
+        let dir = std::env::temp_dir().join(format!("nt-syslog-buf-{}", uuid::Uuid::new_v4()));
+        let lines: Vec<String> = (0..3000).map(|i| format!("12:00:{:02} 10.0.0.{} <1.6> mensaje número {i} ñ", i % 60, i % 250)).collect();
+        let mut log = DailyLog::new(dir.clone(), SYSLOG_FILE_MAX);
+        for l in &lines {
+            assert_eq!(log.write("2026-11-21", l), None);
+        }
+        log.flush();
+        let expected: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        assert_eq!(fs::read_to_string(dir.join("syslog_2026-11-21.log")).unwrap(), expected);
+        drop(log);
+        let _ = fs::remove_dir_all(&dir);
+
+        // syslog_loop: cada lote enviado a la vista ya está en disco; lo último, al salir.
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let guard = loop_guard(&["127.0.0.0/8"], None);
+        let flag = Arc::new(AtomicBool::new(true));
+        let got: Arc<Mutex<Vec<SyslogMsg>>> = Arc::default();
+        let (g, f, sink, d) = (guard.clone(), flag.clone(), got.clone(), dir.clone());
+        let t = std::thread::spawn(move || syslog_loop(sock, f, g, Some(d), move |b| sink.lock().unwrap().extend(b)));
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let day_file = || {
+            let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+            fs::read_to_string(dir.join(format!("syslog_{day}.log"))).unwrap_or_default()
+        };
+        for i in 0..5 {
+            client.send_to(format!("<14>primero {i}").as_bytes(), addr).unwrap();
+        }
+        let start = Instant::now();
+        while got.lock().unwrap().len() < 5 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(got.lock().unwrap().len(), 5, "lote entregado");
+        assert_eq!(day_file().lines().count(), 5, "el lote ya está en disco con el servidor en marcha");
+        for i in 0..3 {
+            client.send_to(format!("<14>último {i}").as_bytes(), addr).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        flag.store(false, Ordering::SeqCst);
+        t.join().unwrap();
+        let text = day_file();
+        assert_eq!(text.lines().count(), 8, "{text}");
+        assert!(text.lines().last().unwrap().ends_with("último 2"), "{text}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

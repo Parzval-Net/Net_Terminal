@@ -557,11 +557,12 @@ mod tests {
         }
         assert!(body("get_settings").contains("datacrypt::unavailable"));
         for (file, names) in [
-            (include_str!("bundle.rs"), &["bundle_export", "bundle_inspect", "bundle_import_apply"][..]),
+            // Los comandos del .ntx corren en el pool de bloqueo: el chequeo está en su cuerpo bloqueante.
+            (include_str!("bundle.rs"), &["export_blocking", "inspect_blocking", "import_apply_blocking"][..]),
             (include_str!("logsearch.rs"), &["logsearch_start", "logsearch_open", "logsearch_view", "logsearch_export"][..]),
         ] {
             for n in names {
-                let start = file.find(&format!("pub fn {n}(")).unwrap();
+                let start = file.find(&format!("fn {n}(")).unwrap();
                 let head = &file[start..(start + 900).min(file.len())];
                 assert!(head.contains("datacrypt::unavailable(&state.data_dir)"), "{n} no revisa el bloqueo");
             }

@@ -162,6 +162,19 @@ assert.match(r.acts.find((a) => a.kind === "fail").reason, /no respondió/);
 // Volvió al pivote sin error ni entrar al vecino.
 r = run(sentJob(fresh()), [[1500, `${echo}core-sw01#`], [3200, `${echo}core-sw01#`]]);
 assert.match(r.acts.find((a) => a.kind === "fail").reason, /volvió a core-sw01/);
+// Fallo con un mensaje no reconocido antes, que vuelve al prompt del pivote: no es una llegada al vecino.
+{
+  const banner = `${echo}Trying 192.0.2.11 ...\r\nPress CTRL+K to abort\r\nsome unexpected text\r\ncore-sw01#`;
+  const rr = run(sentJob(fresh()), [[1500, banner], [3200, banner], [6000, banner]]);
+  assert.ok(!rr.acts.some((a) => a.kind === "done"), "no se registra como llegada a dist-sw01");
+  assert.match(rr.acts.find((a) => a.kind === "fail").reason, /volvió a core-sw01/);
+  const vrp = `${echo}Trying 192.0.2.11 ...\r\nPress CTRL+K to abort\r\nError: Can't connect to the remote host\r\ncore-sw01#`;
+  const rv = run(sentJob(fresh()), [[1500, vrp], [4000, vrp]]);
+  assert.match(rv.acts.find((a) => a.kind === "fail").reason, /no se pudo conectar/);
+  const ios = `${echo}[Connection to 192.0.2.11 aborted: error status 0]\r\ncore-sw01#`;
+  const ri = run(sentJob(fresh()), [[1500, ios], [4000, ios]]);
+  assert.match(ri.acts.find((a) => a.kind === "fail").reason, /no se pudo conectar/);
+}
 // Un trabajo terminado no vuelve a actuar.
 assert.deepEqual(H.stepHop(r.job, "core-sw01#", 9e9).actions, []);
 

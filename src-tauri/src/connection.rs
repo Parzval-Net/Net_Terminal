@@ -932,7 +932,19 @@ pub(crate) fn check_extra_args(args: &[String]) -> Result<(), String> {
                 } else {
                     rest
                 };
-                let name = if c == 'o' { value.trim().split(['=', ' ', '\t']).next().unwrap_or("").to_ascii_lowercase() } else { String::new() };
+                // -o: nombre de la opción como lo lee OpenSSH (strdelim de misc.c): acepta la palabra
+                // clave entre comillas y descarta un '=' inicial, así que "=ProxyCommand=x" o
+                // "\"ProxyCommand\" x" también son ProxyCommand. Se exige que empiece con una letra y no
+                // se aceptan caracteres de control (\r o \n también separan la palabra clave en ssh).
+                let name = if c == 'o' {
+                    let v = value.trim_start_matches([' ', '\t']);
+                    if value.chars().any(|ch| ch.is_control()) || !v.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
+                        return Err(format!("Opción -o no válida en argumentos extra: {value}"));
+                    }
+                    v.split(|ch: char| ch.is_whitespace() || ch == '=' || ch == '"').next().unwrap_or("").to_ascii_lowercase()
+                } else {
+                    String::new()
+                };
                 if BLOCKED_SSH_OPTIONS.contains(&name.as_str()) {
                     return Err(format!(
                         "Opción no permitida en argumentos extra: {name}. Configúrala en ~/.ssh/config si la necesitas."
@@ -1687,6 +1699,14 @@ mod tests {
         assert!(bad("-o User=a|b"));
         assert!(bad("-l a;b"));
         assert!(!bad("-l DOMINIO\\\\usuario -o ProxyJump=noc@bastion:22 -o IdentityFile=~/.ssh/id_lab"));
+        // Formas que OpenSSH también lee como ProxyCommand (strdelim): '=' inicial y nombre entre comillas.
+        assert!(bad("-o \"=ProxyCommand=touch /tmp/pwn\""));
+        assert!(bad("-o '\"ProxyCommand\" touch /tmp/pwn'"));
+        assert!(bad("-o '\"LocalCommand\"=id'"));
+        assert!(bad("-o ' =KnownHostsCommand=x'"));
+        let ctrl = vec!["-o".to_string(), "ServerAliveInterval=5\nProxyCommand=x".to_string()];
+        assert!(super::check_extra_args(&ctrl).is_err(), "control en el valor de -o");
+        assert!(!bad("-o ServerAliveInterval=15 -o 'Ciphers aes256-ctr'"));
     }
 
     #[test]

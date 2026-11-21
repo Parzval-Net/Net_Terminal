@@ -1,11 +1,11 @@
 import { memo, useMemo, useState } from "react";
-import { LinkTraffic, Pt, TopoNode, TopoSnapshot, isRoutingProto, linkDash, portOf, protoLabel, quad, utilLevel } from "../../../lib/topology";
+import { LinkTraffic, Pt, TopoNode, TopoSnapshot, isRoutingProto, isStale, linkDash, portOf, protoLabel, quad, utilLevel } from "../../../lib/topology";
 import { LinkLevel } from "../../../lib/topoTraffic";
 import { LinkIssue, linkLevelOf, markEnds } from "../../../lib/topoInsights";
 import { plural } from "../../../lib/plural";
 import { TipStore } from "./LinkTip";
 import { arrowHead, flowStyle, lanePath } from "./linkPaths";
-import { UTIL_VAR, pillStyle, pillTextStyle, scaledText, smallText } from "./topoStyle";
+import { FLOW_OK, FLOW_OK_OPACITY, NO_DATA_DASH, UTIL_VAR, pillStyle, pillTextStyle, scaledText, smallText } from "./topoStyle";
 import { nodeSub } from "./topoText";
 import { H, L2H, L2W, W } from "./topoConst";
 import type { Geo, L2Geo, Mark, Pill } from "./topoTypes";
@@ -48,6 +48,7 @@ const LinkView = memo(function LinkView({
   arrows,
   animate,
   noGroup,
+  trafficOn,
   tips,
 }: {
   g: Geo;
@@ -71,6 +72,8 @@ const LinkView = memo(function LinkView({
   animate: boolean;
   /** El par lleva píldora de tráfico: su rótulo de agregado ("Po1 ×2") ya va dentro de ella. */
   noGroup: boolean;
+  /** Lectura de tráfico activa: distingue el enlace con tráfico normal del que no tiene datos. */
+  trafficOn: boolean;
   tips: TipStore;
 }) {
   // Textos por enlace aquí y no en el padre: con cientos de enlaces, cada redibujo del mapa solo
@@ -78,16 +81,22 @@ const LinkView = memo(function LinkView({
   const grp = noGroup ? undefined : (portOf(ga, g.l.aPort)?.group ?? portOf(gb, g.l.bPort)?.group);
   const [lit, setLit] = useState(false);
   const detailLevel = detail && lt && byUtil ? utilLevel(lt.util) : undefined;
+  // Enlace que ya nadie informa: fantasma (tenue y punteado fino) hasta que se vuelva a ver o se quite.
+  const stale = !state && isStale(g.l);
   const down = level === "down" && !state;
-  const color = state === "removed" ? "var(--danger)" : state === "added" ? "var(--ok)" : down ? "var(--text)" : detail ? (detailLevel ? UTIL_VAR[detailLevel] : hot ? "var(--accent)" : "var(--muted)") : level === "saturated" ? "var(--danger)" : level === "high" ? "var(--warn)" : hot ? "var(--accent)" : "var(--muted)";
+  // Con el tráfico activo, un enlace normal con lectura se ve distinto de uno sin datos (antes ambos
+  // quedaban en gris fino y parecía que el enlace con tráfico no lo tenía). Solo enlaces físicos: los
+  // lógicos ya llevan su propio punteado.
+  const flow = trafficOn && !state && !stale && !down && level === "normal" ? (lt ? "ok" : linkDash(g.l) ? undefined : "none") : undefined;
+  const color = stale ? "var(--muted)" : state === "removed" ? "var(--danger)" : state === "added" ? "var(--ok)" : down ? "var(--text)" : detail ? (detailLevel ? UTIL_VAR[detailLevel] : hot ? "var(--accent)" : "var(--muted)") : level === "saturated" ? "var(--danger)" : level === "high" ? "var(--warn)" : hot ? "var(--accent)" : flow === "ok" ? FLOW_OK : "var(--muted)";
   const base = g.l.logical ? 1.25 : 1.5;
-  const width = down ? 2 : detail ? (lt && byUtil ? 1.75 + 3 * Math.min(1, lt.util ?? 0) : hot || state ? 2.5 : base) : level === "saturated" ? 5 : level === "high" ? 4 : hot || state ? 2.5 : base;
+  const width = down ? 2 : detail ? (lt && byUtil ? 1.75 + 3 * Math.min(1, lt.util ?? 0) : hot || state ? 2.5 : base) : level === "saturated" ? 5 : level === "high" ? 4 : hot || state ? 2.5 : flow === "ok" ? base + 0.75 : base;
   const strokeWidth = isRoute ? Math.max(3.5, width) : width;
   const showGroup = grp && g.pair.length > 1 && g.pair.indexOf(g.l) === 0;
-  const dash = state === "removed" ? "6 5" : down ? "5 5" : linkDash(g.l);
+  const dash = state === "removed" ? "6 5" : stale ? "1.5 6" : down ? "5 5" : flow === "none" ? NO_DATA_DASH : linkDash(g.l);
   // Sin color de utilización, las flechas van en el tono neutro del texto.
   const dirColor = (bps: number | null) => (byUtil ? UTIL_VAR[lt?.speed && bps !== null ? utilLevel(bps / lt.speed) : "none"] : "var(--muted)");
-  const label = `${aName} ${g.l.aPort || "?"} a ${bName} ${g.l.bPort || "?"}, ${protoLabel(g.l)}${down ? ", caído" : level === "high" ? ", uso alto" : level === "saturated" ? ", saturado" : ""}${nIssues ? `, ${nIssues} ${nIssues === 1 ? "hallazgo" : "hallazgos"}` : ""}`;
+  const label = `${aName} ${g.l.aPort || "?"} a ${bName} ${g.l.bPort || "?"}, ${protoLabel(g.l)}${stale ? ", ya no informado" : down ? ", caído" : level === "high" ? ", uso alto" : level === "saturated" ? ", saturado" : flow === "ok" ? ", con tráfico normal" : flow === "none" ? ", sin datos de tráfico" : ""}${nIssues ? `, ${nIssues} ${nIssues === 1 ? "hallazgo" : "hallazgos"}` : ""}`;
   const key = g.k;
   return (
     <g
@@ -126,7 +135,7 @@ const LinkView = memo(function LinkView({
         d={g.d}
         fill="none"
         stroke={color}
-        strokeOpacity={down ? 0.65 : undefined}
+        strokeOpacity={stale ? 0.5 : down ? 0.65 : flow === "ok" && !hot && !detail ? FLOW_OK_OPACITY : undefined}
         strokeWidth={strokeWidth}
         strokeDasharray={dash}
         strokeLinecap={dash ? "round" : undefined}
@@ -282,6 +291,7 @@ export const TopoLayers = memo(function TopoLayers({
   selected,
   focusLink,
   linkRates,
+  trafficOn,
   detail,
   color,
   arrows,
@@ -314,6 +324,8 @@ export const TopoLayers = memo(function TopoLayers({
   selected: string | null;
   focusLink: string | null;
   linkRates: Map<string, LinkTraffic>;
+  /** Lectura de tráfico activa (los enlaces sin datos se dibujan punteados). */
+  trafficOn: boolean;
   detail: boolean;
   color: boolean;
   arrows: boolean;
@@ -375,6 +387,7 @@ export const TopoLayers = memo(function TopoLayers({
             arrows={arrows}
             animate={animate && animKeys.has(k)}
             noGroup={pillPairs.has(k)}
+            trafficOn={trafficOn}
             tips={tips}
           />
         );

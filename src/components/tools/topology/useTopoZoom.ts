@@ -36,6 +36,16 @@ export function useTopoSize(rootRef: RefObject<HTMLDivElement | null>, scroller:
 }
 
 /**
+ * Franja inferior del mapa que se reserva para la Leyenda y los controles de zoom (px): el encuadre
+ * deja el diagrama sobre ella para que no tapen equipos ni rótulos. Botón de 28 px a 8 px del borde,
+ * más un margen.
+ */
+export const MAP_BOTTOM_PAD = 48;
+
+/** Vista útil del mapa medida en el momento (el tamaño guardado puede ir un cuadro atrás). */
+const viewOf = (el: HTMLDivElement) => ({ w: el.clientWidth, h: Math.max(0, el.clientHeight - MAP_BOTTOM_PAD) });
+
+/**
  * Zoom y desplazamiento del mapa: botones, ajuste automático, centrar un equipo o un punto, pellizco
  * (touchpad, WebKit y pantallas táctiles), Ctrl/⌘ + rueda y arrastre del fondo. El zoom de un
  * ajuste automático sale del tamaño de la vista y del diagrama; el manual lo guarda `zoom`.
@@ -61,12 +71,16 @@ export function useTopoZoom({
   reducedMotion: boolean;
 }) {
   // Zoom manual; mientras `fit` no sea "manual" el zoom sale del tamaño de la vista y del diagrama
-  // ("floor": ajustado con piso de legibilidad; "all": el diagrama completo).
+  // ("floor": ajustado con piso de legibilidad; "all": el diagrama completo). Al abrir se encuadra el
+  // diagrama completo ("all") y se vuelve a encuadrar en cada cambio de tamaño de la vista mientras
+  // el usuario no haga zoom ni mueva el mapa: con "floor" de partida el diagrama quedaba cortado en
+  // los bordes con "Ajustar" marcado.
   const [zoom, setZoom] = useState(1);
-  const [fit, setFit] = useState<"floor" | "all" | "manual">("floor");
+  const [fit, setFit] = useState<"floor" | "all" | "manual">("all");
   const [fitNonce, setFitNonce] = useState(0);
   const [focusReq, setFocusReq] = useState<string | Pt | null>(null);
-  const vsize = { w: size.mw, h: size.mh };
+  // Vista útil para el encuadre: sin la franja inferior de la Leyenda y el zoom (ver TopoCanvas).
+  const vsize = { w: size.mw, h: Math.max(0, size.mh - MAP_BOTTOM_PAD) };
   const zoomUsed = fit === "all" ? 1 : fit === "floor" ? floorZoom(vsize, box) : zoom;
   const mapK = scaleAt(vsize, box, zoomUsed);
 
@@ -87,6 +101,18 @@ export function useTopoZoom({
     setFit("manual");
     setZoom(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, f(zoomUsedRef.current))));
   }, []);
+  const fitNow = useRef(fit);
+  fitNow.current = fit;
+  /**
+   * El usuario movió el mapa (arrastre del fondo, Shift + rueda o desplazamiento horizontal): el
+   * encuadre deja de ser automático con el mismo zoom que se ve, y "Ajustar" o "Ver todo" dejan de
+   * verse activos. Así un cambio de tamaño tampoco le recentra el mapa que acaba de mover.
+   */
+  const leaveAuto = useCallback(() => {
+    if (fitNow.current === "manual") return;
+    setZoom(zoomUsedRef.current);
+    setFit("manual");
+  }, []);
 
   // Se centra después del render con el zoom nuevo (el SVG ya tiene su tamaño final).
   useEffect(() => {
@@ -95,7 +121,7 @@ export function useTopoZoom({
     const el = scroller.current;
     const n = typeof focusReq === "string" ? shown.nodes.find((x) => x.id === focusReq) : focusReq;
     if (!el || !n) return;
-    const to = centerScroll({ w: el.clientWidth, h: el.clientHeight }, box, zoomUsed, n, insetRight);
+    const to = centerScroll(viewOf(el), box, zoomUsed, n, insetRight);
     el.scrollTo({ ...to, behavior: reducedMotion ? "auto" : "smooth" });
   }, [focusReq, shown, zoomUsed, box, reducedMotion, insetRight]);
 
@@ -110,10 +136,18 @@ export function useTopoZoom({
     const f = fitRef.current;
     const n = (f.selected && f.shown.nodes.find((x) => x.id === f.selected)) || f.shown.nodes[0];
     if (!n) return;
-    const to = centerScroll({ w: el.clientWidth, h: el.clientHeight }, f.box, f.zoomUsed, n, f.insetRight);
+    const to = centerScroll(viewOf(el), f.box, f.zoomUsed, n, f.insetRight);
     el.scrollLeft = to.left;
     el.scrollTop = to.top;
   }, [fit, size.mw, size.mh, shown.nodes.length, fitNonce, insetRight]);
+  // "Ver todo" (también al abrir): el diagrama cabe en la vista; tras un cambio de tamaño se vuelve
+  // al origen por si quedó un desplazamiento de antes.
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (fit !== "all" || !el) return;
+    el.scrollLeft = 0;
+    el.scrollTop = 0;
+  }, [fit, size.mw, size.mh]);
 
   // Al elegir un equipo el mapa se desplaza lo justo para que no quede fuera de la vista ni debajo
   // del panel superpuesto (si ya se ve, no se mueve).
@@ -123,7 +157,7 @@ export function useTopoZoom({
     if (!selected || !el) return;
     const n = f.shown.nodes.find((x) => x.id === selected);
     if (!n) return;
-    const to = revealScroll({ w: el.clientWidth, h: el.clientHeight }, f.box, f.zoomUsed, n, { left: el.scrollLeft, top: el.scrollTop }, { w: W / 2, h: H / 2 }, f.insetRight);
+    const to = revealScroll(viewOf(el), f.box, f.zoomUsed, n, { left: el.scrollLeft, top: el.scrollTop }, { w: W / 2, h: H / 2 }, f.insetRight);
     if (to) el.scrollTo({ ...to, behavior: reducedMotion ? "auto" : "smooth" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
@@ -181,7 +215,7 @@ export function useTopoZoom({
     const onMove = (e: PointerEvent) => (pointer = [e.clientX, e.clientY]);
     const onWheel = (e: WheelEvent) => {
       const intent = wheelIntent(e);
-      if (intent === "pan") return;
+      if (intent === "pan") return leaveAuto();
       e.preventDefault();
       if (gesturing) return;
       const [cx, cy] = local(e.clientX, e.clientY);
@@ -260,7 +294,7 @@ export function useTopoZoom({
       el.removeEventListener("gesturechange", onGestureChange);
       el.removeEventListener("gestureend", onGestureEnd);
     };
-  }, [zoomAt]);
+  }, [zoomAt, leaveAuto]);
 
   // Arrastrar el fondo (o con el botón del medio, en cualquier parte) mueve el mapa: con la rueda
   // dedicada al zoom, es la forma de desplazarse con mouse.
@@ -276,7 +310,13 @@ export function useTopoZoom({
     endPan.current?.();
     const start = { x: e.clientX, y: e.clientY, sl: el.scrollLeft, st: el.scrollTop };
     setPanning(true);
+    let moved = false;
     const move = (ev: PointerEvent) => {
+      // Un clic en el fondo (sin mover más de 3 px) no cuenta como mover el mapa.
+      if (!moved && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 3) {
+        moved = true;
+        leaveAuto();
+      }
       el.scrollLeft = start.sl - (ev.clientX - start.x);
       el.scrollTop = start.st - (ev.clientY - start.y);
     };

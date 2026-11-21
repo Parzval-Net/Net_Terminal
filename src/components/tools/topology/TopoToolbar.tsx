@@ -287,6 +287,8 @@ export function TopoToolbar({
       )}
     </div>
   );
+  // Encendido: fondo de selección, borde de acento (≥5:1 sobre el panel) y texto semibold; el texto queda
+  // en --text porque el acento sobre --selected baja de 4,5:1 en oscuro. Apagado: botón fantasma.
   const trafficBtn = (label: boolean) => (
     <Btn
       kind={trafficOn ? "default" : "ghost"}
@@ -294,27 +296,28 @@ export function TopoToolbar({
       aria-label="Tráfico en enlaces"
       title={trafficOn ? "Dejar de leer el tráfico de los enlaces" : "Mostrar el tráfico de los enlaces (opciones en el panel)"}
       onClick={() => setTrafficOn(!trafficOn)}
-      className={`${trafficOn ? "!text-accent" : ""} ${label ? "" : "!px-2.5"}`}
+      className={`${trafficOn ? "!bg-selected !border-accent font-semibold" : ""} ${label ? "" : "!px-2.5"}`}
     >
-      <Activity size={14} aria-hidden /> {label && "Tráfico"}
+      <Activity size={14} className={trafficOn ? "text-accent" : ""} aria-hidden /> {label && "Tráfico"}
     </Btn>
   );
   const filterBtn = (label: boolean) =>
     filtering && (
       <Btn title="Hay filtros activos: el diagrama muestra una parte" aria-label={`Filtros activos: ${shownCount} de ${viewCount} equipos`} className={label ? "" : "!px-2.5"} onClick={() => openSection("filtros")}>
-        <ListFilter size={14} className="text-accent" aria-hidden /> {label ? `${shownCount} de ${viewCount}` : <CountBadge n={shownCount} />}
+        <ListFilter size={14} className="text-accent" aria-hidden /> {label ? `${shownCount} de ${viewCount}` : <CountBadge n={shownCount} tone="neutral" />}
       </Btn>
     );
   const attentionBtn = (label: boolean) =>
     attentionTotal > 0 && (
       <Btn title="Ver los enlaces que requieren atención en el panel" aria-label={`Ver ${attentionTotal} enlaces que requieren atención`} className={label ? "" : "!px-2.5"} onClick={showAttention}>
-        <TriangleAlert size={14} className={attentionCount.down + attentionCount.load ? "text-danger" : "text-warn"} aria-hidden /> {label && "Atención"} <CountBadge n={attentionTotal} />
+        <TriangleAlert size={14} className={attentionCount.down + attentionCount.load ? "text-danger" : "text-warn"} aria-hidden /> {label && "Atención"}{" "}
+        <CountBadge n={attentionTotal} tone={attentionCount.down + attentionCount.load ? "danger" : "warn"} />
       </Btn>
     );
   const suggestBtn = (label: boolean) =>
     suggestionsCount > 0 && (
       <Btn title="Ver sugerencias en el panel" aria-label={`Ver ${suggestionsCount} sugerencias`} className={label ? "" : "!px-2.5"} onClick={showSuggestions}>
-        <Lightbulb size={14} className="text-warn" aria-hidden /> {label && "Sugerencias"} <CountBadge n={suggestionsCount} />
+        <Lightbulb size={14} className="text-warn" aria-hidden /> {label && "Sugerencias"} <CountBadge n={suggestionsCount} tone="warn" />
       </Btn>
     );
   const panelBtn = (label: boolean) => (
@@ -348,13 +351,6 @@ export function TopoToolbar({
 
   return (
     <section className={`rounded-xl border border-line bg-panel ${wide ? "px-4 py-3" : "px-3 py-2"}`}>
-      {/* En anchos chicos se oculta: el menú lateral ya dice Topología y el texto queda en el botón. */}
-      <header className="flex items-baseline gap-2 min-w-0 mb-2 @max-[860px]:hidden">
-        <h2 className="text-[13px] font-semibold shrink-0">Topología</h2>
-        <p className="text-[11.5px] text-muted truncate" title={hint}>
-          {hint}
-        </p>
-      </header>
       {wide ? (
         <div className={`flex flex-wrap items-end gap-2 ${discoverWhy ? "mb-5" : ""}`}>
           <Label text="Descubrir con" className="w-36">
@@ -461,7 +457,12 @@ export function TopoToolbar({
       {exportMenu && <ContextMenu menu={exportMenu} onClose={() => setExportMenu(null)} />}
       {nodeMenu && <ContextMenu menu={nodeMenu} onClose={() => setNodeMenu(null)} />}
       {moreMenu && <ContextMenu menu={moreMenu} onClose={() => setMoreMenu(null)} />}
-      {msg && <p className="mt-2 text-[12px] text-accent">{msg}</p>}
+      {/* Una lectura cortada va en el tono de aviso: lo leído es parcial. */}
+      {msg && (
+        <p className={`mt-2 text-[12px] ${msg.startsWith("Resultado parcial") ? "font-medium text-warn" : "text-accent"}`} role="status">
+          {msg}
+        </p>
+      )}
       {children}
     </section>
   );

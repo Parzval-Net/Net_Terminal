@@ -316,7 +316,7 @@ export function ImportDialog({ folders, sessions, onImport, onClose, settings, o
                         </span>
                         <span className="w-[24%] truncate text-muted text-[11.5px]">{s.folder ?? ""}</span>
                         <StatusBadge status={plan[i]?.status} changes={plan[i]?.changes ?? []} overwrite={overwrite} />
-                        <span className="w-12 text-right text-[11px] text-muted uppercase">{typeLabel[s.type]}</span>
+                        <span className="w-14 text-right text-[11px] text-muted uppercase">{typeLabel[s.type]}</span>
                       </label>
                     </li>
                   ))}

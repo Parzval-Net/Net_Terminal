@@ -40,6 +40,16 @@ export interface Profile {
   note?: string;
 }
 
+/**
+ * Selección del gestor de archivos sin los nombres que ya no están en el panel (archivo borrado,
+ * otra carpeta). Devuelve el mismo Set si no cambia, para no volver a pintar.
+ */
+export function keepPresent(sel: Set<string>, names: Iterable<string>): Set<string> {
+  const present = new Set(names);
+  const kept = [...sel].filter((n) => present.has(n));
+  return kept.length === sel.size ? sel : new Set(kept);
+}
+
 /** Extrae el último hash MD5 (32 hex) de la salida del equipo. */
 export function parseMd5(output: string): string | null {
   const all = output.toLowerCase().match(/\b[0-9a-f]{32}\b/g);

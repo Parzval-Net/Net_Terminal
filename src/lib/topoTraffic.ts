@@ -5,8 +5,8 @@
  * los comandos de TRAFFIC_COMMANDS (computeRisk === "read", con test).
  */
 import type { LinkTraffic, TopoLink, TopoVendor } from "./topology";
-import { plainCli } from "./cliText";
-import { canonPort, isCliError, knownAddrs } from "./topology";
+import { plainCli, stripPager } from "./cliText";
+import { canonPort, isCliError, knownAddrs, withNoPager } from "./topology";
 import type { TopoNode } from "./topology";
 import { OID } from "./topoSnmp";
 import { tabAtDevice } from "./hopTab";
@@ -59,11 +59,28 @@ export interface PortRate {
   outBps: number | null;
   speed?: number;
   approx?: boolean;
+  /** Contadores de 32 bits en una interfaz de 1 G o más: la tasa es un piso (ver LOW_RES_SPEED). */
+  lowRes?: boolean;
   ts: number;
   src?: "snmp" | "cli";
 }
 
 const TWO32 = 1n << 32n;
+
+/**
+ * Desde esta velocidad un contador de 32 bits no alcanza: a 1 Gb/s da la vuelta en 34 s y a
+ * 10 Gb/s en 3,4 s, menos que el intervalo de lectura. Con más de una vuelta entre lecturas la
+ * tasa calculada queda por debajo de la real (8 Gb/s se leían como 1,13 Gb/s) y se marca aproximada.
+ */
+export const LOW_RES_SPEED = 1e9;
+
+/**
+ * Separación máxima entre dos lecturas para calcular una tasa: tres intervalos, con un piso de
+ * 3 min (una lectura por consola de un equipo grande puede tardar más de un minuto). Sobre eso
+ * la lectura anterior es de otra sesión de trabajo (la herramienta estuvo oculta) y la tasa sería
+ * el promedio de todo ese tiempo.
+ */
+export const maxSampleGapMs = (intervalSecs: number) => Math.max(3 * intervalSecs * 1000, 180_000);
 
 /**
  * Diferencia entre dos lecturas. Con 32 bits un valor menor se toma como una vuelta (2^32);
@@ -92,12 +109,17 @@ export function rateBps(prev: bigint, cur: bigint, bits: 32 | 64, seconds: numbe
   return bps;
 }
 
-/** Tasas de una interfaz entre dos lecturas (de la misma fuente). */
-export function portRate(prev: CounterSample | undefined, cur: CounterSample): PortRate {
+/**
+ * Tasas de una interfaz entre dos lecturas (de la misma fuente). Con `maxGapMs`, una lectura
+ * anterior más antigua que eso no se usa: al volver a Topología tras 2 h, la primera tasa era el
+ * promedio de esas 2 h. Queda sin tasa hasta la lectura siguiente.
+ */
+export function portRate(prev: CounterSample | undefined, cur: CounterSample, maxGapMs?: number): PortRate {
   const speed = cur.speed && cur.speed > 0 ? cur.speed : undefined;
+  const lowRes = cur.bits === 32 && !!speed && speed >= LOW_RES_SPEED ? { lowRes: true as const } : {};
   const approx = speed && cur.approx ? { approx: true as const } : {};
   const src = cur.src ? { src: cur.src } : {};
-  if (!prev || prev.bits !== cur.bits) return { inBps: null, outBps: null, speed, ...approx, ...src, ts: cur.ts };
+  if (!prev || prev.bits !== cur.bits || (maxGapMs !== undefined && cur.ts - prev.ts > maxGapMs)) return { inBps: null, outBps: null, speed, ...approx, ...lowRes, ...src, ts: cur.ts };
   const secs = (cur.ts - prev.ts) / 1000;
   // Con el BW configurado la velocidad puede ser menor que la real: no se descarta por 1,5x.
   const limit = cur.approx ? undefined : speed;
@@ -106,9 +128,38 @@ export function portRate(prev: CounterSample | undefined, cur: CounterSample): P
     outBps: rateBps(prev.outOctets, cur.outOctets, cur.bits, secs, limit),
     speed,
     ...approx,
+    ...lowRes,
     ...src,
     ts: cur.ts,
   };
+}
+
+/**
+ * Clave flexible de un puerto ya normalizado (canonPort): sin la subinterfaz (".100") ni signos. Sirve
+ * de segunda opción cuando el enlace informa el puerto distinto de como lo nombran los contadores.
+ */
+const loosePort = (k: string) => k.toLowerCase().replace(/\.\d+$/, "").replace(/[^a-z0-9/:]/g, "");
+
+/**
+ * Lectura de un puerto en el mapa de un equipo (clave canonPort). Primero la clave exacta; si falta,
+ * la única clave que coincide sin distinguir mayúsculas, signos ni subinterfaz (un enlace sobre
+ * "Gi1/0/1.100" usa los contadores de Gi1/0/1). Con dos o más candidatas no elige ninguna.
+ */
+export function portEntry<T>(m: Map<string, T> | undefined, port: string | undefined): T | undefined {
+  if (!m || !port) return undefined;
+  const k = canonPort(port);
+  const hit = m.get(k);
+  if (hit !== undefined) return hit;
+  const want = loosePort(k);
+  if (!want) return undefined;
+  let found: T | undefined;
+  let n = 0;
+  for (const [key, v] of m) {
+    if (loosePort(key) !== want) continue;
+    if (++n > 1) return undefined;
+    found = v;
+  }
+  return found;
 }
 
 /**
@@ -117,8 +168,8 @@ export function portRate(prev: CounterSample | undefined, cur: CounterSample): P
  * una tasa calculada devuelve null (falta una segunda lectura).
  */
 export function linkTraffic(l: TopoLink, rates: Map<string, Map<string, PortRate>>): LinkTraffic | null {
-  const ra = l.aPort ? rates.get(l.a)?.get(canonPort(l.aPort)) : undefined;
-  const rb = l.bPort ? rates.get(l.b)?.get(canonPort(l.bPort)) : undefined;
+  const ra = portEntry(rates.get(l.a), l.aPort);
+  const rb = portEntry(rates.get(l.b), l.bPort);
   const ab = ra?.outBps ?? rb?.inBps ?? null;
   const ba = ra?.inBps ?? rb?.outBps ?? null;
   if (ab === null && ba === null) return null;
@@ -127,7 +178,9 @@ export function linkTraffic(l: TopoLink, rates: Map<string, Map<string, PortRate
   const exact = known.filter((r) => !r.approx);
   const pool = exact.length ? exact : known;
   const speed = pool.length ? Math.min(...pool.map((r) => r.speed!)) : undefined;
-  const approx = !exact.length && known.length > 0;
+  // Alguna de las tasas usadas viene de contadores de 32 bits en 1 G o más: es un piso, no el valor.
+  const lowRes = (ab !== null && !!(ra?.outBps != null ? ra : rb)?.lowRes) || (ba !== null && !!(ra?.inBps != null ? ra : rb)?.lowRes);
+  const approx = (!exact.length && known.length > 0) || lowRes;
   const util = speed ? Math.max(ab ?? 0, ba ?? 0) / speed : undefined;
   // El origen es el de la lectura más reciente de los extremos.
   const src = (ra && rb ? (rb.ts > ra.ts ? rb : ra) : (ra ?? rb))?.src;
@@ -137,9 +190,113 @@ export function linkTraffic(l: TopoLink, rates: Map<string, Map<string, PortRate
     ...(speed ? { speed } : {}),
     ...(util !== undefined ? { util } : {}),
     ...(approx ? { approx: true } : {}),
+    ...(lowRes ? { lowRes: true } : {}),
     ts: Math.max(ra?.ts ?? 0, rb?.ts ?? 0),
     ...(src ? { src } : {}),
   };
+}
+
+// ---------- Enlaces sin datos de tráfico ----------
+
+/** Estado de la última ronda de lecturas (el que registra useTopoTraffic), por nombre de equipo. */
+export interface TrafficReadState {
+  snmp: string[];
+  cli: string[];
+  /** Equipos explorados sin perfil SNMP ni sesión de consola habilitada. */
+  none: string[];
+  /** "equipo: motivo". */
+  errors: string[];
+  /** Pestañas sin prompt a la vista: no se les envió nada. */
+  busy: string[];
+  /** "equipo: detalle" de las lecturas por consola cortadas. */
+  partial: string[];
+  last?: number;
+}
+
+/**
+ * Por qué un enlace no tiene tráfico con la lectura activa. De mayor a menor utilidad para actuar:
+ * error de lectura, puerto que no aparece en los contadores, lectura parcial, extremo sin perfil SNMP
+ * ni consola, pestaña ocupada, enlace sin puerto, esperando lectura y extremo sin explorar.
+ */
+export type NoTrafficKind = "error" | "portMissing" | "partial" | "noSource" | "busy" | "noPort" | "waiting" | "unexplored";
+const NO_TRAFFIC_ORDER: NoTrafficKind[] = ["error", "portMissing", "partial", "noSource", "busy", "noPort", "waiting", "unexplored"];
+
+/** Rótulo corto de cada motivo (resumen del panel). */
+export const NO_TRAFFIC_SHORT: Record<NoTrafficKind, string> = {
+  error: "error de lectura",
+  portMissing: "puerto no encontrado",
+  partial: "lectura parcial",
+  noSource: "sin SNMP ni consola",
+  busy: "pestaña ocupada",
+  noPort: "sin puerto",
+  waiting: "esperando lectura",
+  unexplored: "sin explorar",
+};
+
+export interface NoTrafficEnd {
+  /** Nombre del equipo del extremo. */
+  name: string;
+  kind: NoTrafficKind;
+  text: string;
+}
+
+export interface NoTrafficReason {
+  /** El motivo más útil para actuar entre los extremos. */
+  kind: NoTrafficKind;
+  /** Motivo legible del enlace, con el equipo de cada extremo. */
+  text: string;
+  ends: NoTrafficEnd[];
+}
+
+/** Texto después de "equipo: " en las listas de estado (errores y lecturas parciales). */
+const afterName = (list: string[], name: string) => {
+  const hit = list.find((e) => e.startsWith(`${name}: `));
+  return hit === undefined ? undefined : hit.slice(name.length + 2);
+};
+
+function endReason(
+  n: Pick<TopoNode, "id" | "name" | "explored"> | undefined,
+  id: string,
+  port: string,
+  rates: Map<string, Map<string, PortRate>>,
+  st: TrafficReadState,
+): NoTrafficEnd {
+  const name = n?.name ?? id;
+  const end = (kind: NoTrafficKind, text: string): NoTrafficEnd => ({ name, kind, text });
+  if (!n?.explored) return end("unexplored", "sin explorar: no se leen sus contadores");
+  if (!port) return end("noPort", "el enlace no informa su puerto");
+  if (st.none.includes(name)) return end("noSource", "sin perfil SNMP ni lectura por consola");
+  const err = afterName(st.errors, name);
+  if (err !== undefined) return end("error", `error de lectura (${err})`);
+  if (st.busy.includes(name)) return end("busy", "su pestaña no estaba en el prompt; se reintenta en la próxima lectura");
+  const own = rates.get(id);
+  if (portEntry(own, port)) return end("waiting", "esperando la segunda lectura (la tasa sale de dos lecturas seguidas)");
+  if (own) {
+    if (afterName(st.partial, name) !== undefined) return end("partial", `lectura parcial: ${port} no alcanzó a leerse`);
+    return end("portMissing", st.snmp.includes(name) ? `${port} no aparece en ifName ni ifDescr del equipo` : `${port} no aparece en los contadores leídos del equipo`);
+  }
+  return end("waiting", st.last ? "esperando la próxima lectura" : "esperando la primera lectura");
+}
+
+/**
+ * Motivo por el que un enlace queda sin datos de tráfico con la lectura activa (sin LinkTraffic). Se
+ * revisa cada extremo con lo que registró la última ronda: ningún extremo explorado; extremo sin
+ * perfil SNMP ni consola; error de lectura; pestaña ocupada; puerto leído sin tasa todavía (falta la
+ * segunda lectura o el contador se reinició); equipo leído cuyos contadores no traen el puerto; o
+ * lectura por consola cortada. Función pura: el estado viene de useTopoTraffic.
+ */
+export function noTrafficReason(
+  l: Pick<TopoLink, "a" | "aPort" | "b" | "bPort">,
+  nodes: Map<string, Pick<TopoNode, "id" | "name" | "explored">>,
+  rates: Map<string, Map<string, PortRate>>,
+  st: TrafficReadState,
+): NoTrafficReason {
+  const ends = [endReason(nodes.get(l.a), l.a, l.aPort, rates, st), endReason(nodes.get(l.b), l.b, l.bPort, rates, st)];
+  const read = ends.filter((e) => e.kind !== "unexplored");
+  if (!read.length) return { kind: "unexplored", text: "Ningún extremo explorado: descubre uno de los dos equipos para leer sus contadores", ends };
+  read.sort((x, y) => NO_TRAFFIC_ORDER.indexOf(x.kind) - NO_TRAFFIC_ORDER.indexOf(y.kind));
+  const text = read.length === 2 && read[0].text === read[1].text ? `Ambos extremos: ${read[0].text}` : read.map((e) => `${e.name}: ${e.text}`).join("; ");
+  return { kind: read[0].kind, text, ends };
 }
 
 /**
@@ -153,7 +310,7 @@ export function terminalFor<T extends { connId: string; name: string; host?: str
   terminals: T[],
   routes?: Record<string, TabRoute>,
 ): T | undefined {
-  return tabAtDevice(n.id, knownAddrs(n), terminals, routes)?.tab;
+  return tabAtDevice(n.id, knownAddrs(n), terminals, routes, undefined, n.aliases)?.tab;
 }
 
 // ---------- SNMP ----------
@@ -176,8 +333,10 @@ export interface GetRow {
 const big = (v: string | undefined) => (v !== undefined && /^\d{1,20}$/.test(v) ? BigInt(v) : undefined);
 
 /**
- * Contadores por ifIndex desde el GET. `hc` = false si ningún contador de 64 bits respondió
- * (noSuchObject/noSuchInstance): hay que pedir los de 32 bits.
+ * Contadores por ifIndex desde el GET. `hcMissing`: el agente respondió que no tiene los contadores
+ * de 64 bits (noSuchObject/noSuchInstance en todos) y hay que pedir los de 32 bits. Un GET sin filas
+ * (tooBig, genErr, authorizationError: `getError` en la lectura) no dice nada de ifXTable: antes se
+ * tomaba como "sin 64 bits" y el equipo quedaba en Counter32 hasta reiniciar la app.
  */
 export function parseCounterGets(rows: GetRow[], ifIndexes: number[], hc: boolean, ts: number): { samples: Map<number, CounterSample>; hcMissing: boolean } {
   const val = new Map(rows.filter((r) => /^(Counter32|Counter64|Gauge32|INTEGER)$/.test(r.type)).map((r) => [r.oid, r.value]));
@@ -192,7 +351,8 @@ export function parseCounterGets(rows: GetRow[], ifIndexes: number[], hc: boolea
     const speed = Number.isFinite(sp) && sp > 0 ? (hc ? sp * 1e6 : sp) : undefined;
     samples.set(i, { inOctets: inO, outOctets: outO, bits: hc ? 64 : 32, speed, ts, src: "snmp" });
   }
-  return { samples, hcMissing: hc && samples.size === 0 && ifIndexes.length > 0 };
+  const noSuch = rows.some((r) => /^noSuch(?:Object|Instance)$/.test(r.type) && (r.oid.startsWith(`${ci}.`) || r.oid.startsWith(`${co}.`)));
+  return { samples, hcMissing: hc && samples.size === 0 && ifIndexes.length > 0 && noSuch };
 }
 
 // ---------- Consola ----------
@@ -224,6 +384,8 @@ export const TRAFFIC_FALLBACK: Record<string, string> = { "show interfaces": "sh
  * fijada en el catálogo) va el comando de su fabricante; si no, el del resaltado elegido; y si
  * tampoco hay resaltado ("Según ajustes"), Cisco y luego Huawei: antes un Huawei sin resaltado
  * recibía "show interfaces", fallaba y el enlace quedaba sin tráfico. Solo comandos de consulta.
+ * En Junos y Huawei va primero con "| no-more" (sin paginador: la salida de un chasis son cientos
+ * de páginas) y después solo, por si esa versión no reconoce el filtro.
  */
 export function trafficCommands(platform: string | undefined, highlightVendor: TopoVendor | undefined): string[] {
   const p = platform ?? "";
@@ -236,11 +398,12 @@ export function trafficCommands(platform: string | undefined, highlightVendor: T
         : /^(ios|iosxe|iosxr|nxos)$/.test(p)
           ? "cisco"
           : highlightVendor;
-  const base = vendor ? [TRAFFIC_COMMANDS[vendor]] : [TRAFFIC_COMMANDS.cisco, TRAFFIC_COMMANDS.huawei];
+  const vendors: TopoVendor[] = vendor ? [vendor] : ["cisco", "huawei"];
   const out: string[] = [];
-  for (const c of base) {
+  for (const v of vendors) {
+    const c = TRAFFIC_COMMANDS[v];
     if (!c) continue;
-    out.push(c);
+    out.push(withNoPager(v, c), c);
     if (TRAFFIC_FALLBACK[c]) out.push(TRAFFIC_FALLBACK[c]);
   }
   return [...new Set(out)];
@@ -272,9 +435,10 @@ const MAX_CLI_LEN = 4_000_000;
  * "--More--" (IOS, NX-OS), "---- More ----" (VRP) y "---(more)---" (Junos) con el borrado que envía el
  * equipo al avanzar de página: "\r" + espacios + "\r", retrocesos o ESC[K.
  */
-const PAGER = /[ \t]*-{2,}[ \t]*\(?more\)?(?: \d+%)?[ \t]*-{2,}[ \t]*(?:\r[ \t]*\r|\x08+[ \t]*\x08+|\x1b\[K)?/gi;
 
 const UNIT = { k: 1e3, m: 1e6, g: 1e9, t: 1e12 } as const;
+/** Agregados (Port-channel, Eth-Trunk, ae, Bundle-Ether): su velocidad es la suma de los miembros activos. */
+const AGGREGATE = /^(?:port-channel|po|eth-trunk|ae|bundle-ether|be)\d/i;
 
 /**
  * Velocidad de la interfaz. Cisco informa la física junto al dúplex ("Full-duplex, 1000Mb/s",
@@ -282,10 +446,16 @@ const UNIT = { k: 1e3, m: 1e6, g: 1e9, t: 1e12 } as const;
  * configurable con "bandwidth" y puede ser menor que la real: la física gana y, si solo hay BW,
  * la velocidad queda marcada como aproximada.
  */
-function speedOf(block: string): { speed: number; approx?: true } | undefined {
+function speedOf(block: string, name = ""): { speed: number; approx?: true } | undefined {
+  const bw = block.match(/\bBW (\d{1,12}) Kbit/);
+  // En un agregado, "Full-duplex, 1000Mb/s" es la velocidad de un miembro y el BW, la suma de los
+  // activos: con 4 x 1 G se tomaba 1 G y una tasa real de 2,4 Gb/s se descartaba por imposible.
+  if (bw && AGGREGATE.test(name)) return { speed: Number(bw[1]) * 1e3, approx: true };
+  // Huawei Eth-Trunk: "Maximal BW: 4G, Current BW: 2G" (lectura tolerante).
+  const trunk = AGGREGATE.test(name) ? block.match(/\bCurrent BW\s*:\s*(\d{1,6}(?:\.\d{1,3})?)\s*([kmgt])/i) : null;
+  if (trunk) return { speed: Number(trunk[1]) * UNIT[trunk[2].toLowerCase() as keyof typeof UNIT] };
   const phys = block.match(/\b(?:full|half)[- ]duplex,\s*(\d{1,6}(?:\.\d{1,3})?)\s*([kmgt])(?:b\/s|bps)/i);
   if (phys) return { speed: Number(phys[1]) * UNIT[phys[2].toLowerCase() as keyof typeof UNIT] };
-  const bw = block.match(/\bBW (\d{1,12}) Kbit/);
   if (bw) return { speed: Number(bw[1]) * 1e3, approx: true };
   const hw = block.match(/^\s*Speed\s*:\s*(\d{1,7}),/m);
   if (hw) return { speed: Number(hw[1]) * 1e6 };
@@ -336,14 +506,14 @@ export function parseCliCounters(out: string): Map<string, CliCounters> {
   // Lo que dejó el paginador ("--More--" y su borrado con retrocesos o ESC[K) queda pegado a la
   // primera línea de cada página; si es el encabezado de una interfaz, esta se perdía y sus
   // contadores se atribuían a la anterior. Se lee como lo muestra la terminal.
-  const lines = plainCli(out.slice(0, MAX_CLI_LEN).replace(PAGER, "")).split("\n");
+  const lines = plainCli(stripPager(out.slice(0, MAX_CLI_LEN))).split("\n");
   let name: string | undefined;
   let buf: string[] = [];
   const flush = () => {
     if (name && res.size < MAX_CLI_IFACES) {
       const block = buf.join("\n");
       const c = countersOf(block);
-      const sp = speedOf(block);
+      const sp = speedOf(block, name);
       if (c) res.set(canonPort(name), { name, inOctets: c[0], outOctets: c[1], speed: sp?.speed, ...(sp?.approx ? { speedApprox: true as const } : {}), ...stateOf(block) });
     }
     buf = [];

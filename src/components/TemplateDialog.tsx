@@ -2,16 +2,9 @@ import { useState } from "react";
 import { useModal } from "../lib/useModal";
 import { useDragResize } from "../lib/useDragResize";
 import { isSecretVar } from "../lib/templateSecrets";
+import { type FilledTemplate, fillTemplateMasked, templateVars } from "../lib/templateFill";
 
-export const TEMPLATE_VAR = /\{\{\s*([\w.-]+)\s*\}\}/g;
-
-export function templateVars(text: string): string[] {
-  return [...new Set([...text.matchAll(TEMPLATE_VAR)].map((m) => m[1]))];
-}
-
-export function fillTemplate(text: string, values: Record<string, string>): string {
-  return text.replace(TEMPLATE_VAR, (_, name: string) => values[name] ?? "");
-}
+export { TEMPLATE_VAR, fillTemplate, templateVars } from "../lib/templateFill";
 
 const STORE = "templateValues";
 
@@ -26,7 +19,8 @@ function remembered(): Record<string, string> {
 
 interface Props {
   text: string;
-  onSubmit: (filled: string) => void;
+  /** Texto a enviar, versión enmascarada para mostrar y si lleva secretos (no va al historial). */
+  onSubmit: (filled: FilledTemplate) => void;
   onCancel: () => void;
 }
 
@@ -42,8 +36,7 @@ export function TemplateDialog({ text, onSubmit, onCancel }: Props) {
 
   const win = useDragResize<HTMLFormElement>("templateWindow");
   const missing = names.filter((n) => !values[n]?.trim());
-  const masked = Object.fromEntries(names.map((n) => [n, isSecretVar(n) && values[n] ? "••••••" : (values[n] ?? "")]));
-  const preview = fillTemplate(text, masked).split("\n").slice(0, 6).join("\n");
+  const preview = fillTemplateMasked(text, values).shown.split("\n").slice(0, 6).join("\n");
 
   const submit = () => {
     if (missing.length) return;
@@ -54,7 +47,7 @@ export function TemplateDialog({ text, onSubmit, onCancel }: Props) {
     } catch {
       /* sin almacenamiento: no se recuerdan valores */
     }
-    onSubmit(fillTemplate(text, values));
+    onSubmit(fillTemplateMasked(text, values));
   };
 
   return (

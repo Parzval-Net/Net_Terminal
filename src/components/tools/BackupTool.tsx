@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { notesCall } from "../../lib/api";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ClipboardCopy, Download, Eye, FileText, FolderOpen, GitCompare, Play, RefreshCw, Square } from "lucide-react";
 import { FileViewer } from "../FileViewer";
 import type { TerminalRef } from "./FileManager";
-import { Btn, Section, StatusPill, Toggle, fmtBytes } from "./ui";
+import { Btn, Section, StatusPill, Toggle, fmtBytes, ToolHeader } from "./ui";
 import { DiffView } from "./DiffView";
-import { runOnDevice } from "../../lib/deviceRun";
-import { BACKUP_PROFILES, backupLabel, cleanConfig, configProblem, guessBackupProfile, pool, profileById } from "../../lib/backup";
+import { runOnDeviceResult } from "../../lib/deviceRun";
+import { BACKUP_PROFILES, backupLabel, guessBackupProfile, pool, prepareBackup, profileById, skipPending, type JobState } from "../../lib/backup";
 import { diffLines, diffStats, markSecretChanges, splitLines, unifiedDiff, DiffRow, SecretMarks } from "../../lib/diff";
 import { isWithin, normPath } from "../../lib/folders";
 
@@ -23,16 +24,25 @@ interface DeviceBackups {
   files: BackupFile[];
 }
 
-type JobState = { state: "pending" | "running" | "ok" | "error"; text?: string };
-
 /** Máximo de equipos respaldándose a la vez: no satura AAA ni la CPU de los equipos. */
 const CONCURRENCY = 3;
 
-export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) {
-  // Una sesión puede estar abierta en varias pestañas: se respalda una vez.
+export default function BackupTool({
+  terminals,
+  totalSessions,
+}: {
+  terminals: TerminalRef[];
+  /** Sesiones guardadas en el árbol, para decir cuántas de ellas están conectadas (opcional). */
+  totalSessions?: number;
+}) {
+  // Una sesión puede estar abierta en varias pestañas: se respalda una vez. Las conexiones rápidas
+  // no tienen id de sesión (""): cada una es un equipo distinto y se distingue por su conexión.
   const devices = useMemo(() => {
     const seen = new Set<string>();
-    return terminals.filter((t) => (seen.has(t.session.id) ? false : (seen.add(t.session.id), true)));
+    return terminals.filter((t) => {
+      const key = t.session.id || t.connId;
+      return seen.has(key) ? false : (seen.add(key), true);
+    });
   }, [terminals]);
   const folders = useMemo(
     () => [...new Set(devices.map((d) => normPath(d.session.folder)).filter(Boolean))].sort(),
@@ -44,14 +54,22 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
   const [mask, setMask] = useState(true);
   const [jobs, setJobs] = useState<Record<string, JobState>>({});
   const [running, setRunning] = useState(false);
+  /** Se pidió detener: no se inician más equipos y se espera a los que están en curso. */
+  const [stopping, setStopping] = useState(false);
   const stopRef = useRef(false);
   const [list, setList] = useState<DeviceBackups[]>([]);
-  const [msg, setMsg] = useState("");
+  /** Mensaje de la herramienta: siempre visible bajo el encabezado, haya o no sesiones conectadas. */
+  const [msg, setMsgState] = useState<{ text: string; error: boolean }>({ text: "", error: false });
+  const setMsg = (text: string, error = false) => setMsgState({ text, error });
+  const fail = (e: unknown) => setMsg(String(e instanceof Error ? e.message : e), true);
   /** Respaldo abierto en el visor (descifrado en memoria si la carpeta está cifrada), con "Exportar…". */
   const [viewing, setViewing] = useState<string | null>(null);
+  const whyId = useId();
 
   const refresh = useCallback(() => {
-    invoke<DeviceBackups[]>("backup_list").then((l) => setList(l ?? [])).catch((e) => setMsg(String(e)));
+    invoke<DeviceBackups[]>("backup_list")
+      .then((l) => setList(l ?? []))
+      .catch((e) => setMsgState({ text: String(e), error: true }));
   }, []);
   useEffect(refresh, [refresh]);
 
@@ -66,10 +84,14 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
   const pickFolder = (folder: string) =>
     setSelected(new Set(devices.filter((d) => isWithin(normPath(d.session.folder), folder)).map((d) => d.connId)));
 
+  // Solo cuentan las marcadas que siguen conectadas: una pestaña cerrada no se ofrece ni se respalda.
+  const live = devices.filter((d) => selected.has(d.connId));
+
   const run = async () => {
-    const targets = devices.filter((d) => selected.has(d.connId));
+    const targets = live;
     if (!targets.length) return;
     stopRef.current = false;
+    setStopping(false);
     setRunning(true);
     setMsg("");
     setJobs(Object.fromEntries(targets.map((t) => [t.connId, { state: "pending" } as JobState])));
@@ -81,9 +103,8 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
         const cmd = profileById(profileOf(t)).cmd;
         set(t.connId, { state: "running" });
         try {
-          const raw = await runOnDevice(t.connId, cmd, 300);
-          const clean = cleanConfig(raw, cmd);
-          const problem = configProblem(clean);
+          // Con el resultado completo: si la lectura se cortó, lo leído no se guarda como respaldo.
+          const { clean, problem } = prepareBackup(await runOnDeviceResult(t.connId, cmd, 300), cmd);
           if (problem) return set(t.connId, { state: "error", text: problem });
           const file = await invoke<string>("backup_save", { device: t.session.name, content: clean, mask });
           set(t.connId, { state: "ok", text: `${plural(splitLines(clean).length, "línea", "líneas")} · ${file}` });
@@ -94,7 +115,11 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
       () => stopRef.current,
     );
     setRunning(false);
-    if (stopRef.current) setMsg("Detenido: los equipos pendientes no se respaldaron.");
+    setStopping(false);
+    if (stopRef.current) {
+      setJobs(skipPending);
+      setMsg("Detenido: los equipos pendientes no se respaldaron.");
+    }
     refresh();
   };
 
@@ -133,7 +158,7 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
         nameB: `${selB.device}/${selB.file}`,
       });
     } catch (e) {
-      setMsg(String(e));
+      fail(e);
     } finally {
       setBusy(false);
     }
@@ -146,39 +171,54 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
     if (!dest) return;
     await invoke("save_text", { dest, content: unified() })
       .then(() => setMsg(`Guardado: ${dest}`))
-      .catch((e) => setMsg(String(e)));
+      .catch(fail);
   };
   const toNotes = async (device: string, file: string) => {
     try {
       const content = await invoke<string>("backup_read", { device, file });
       const name = `Respaldo ${device} ${file.replace(/\.txt$/, "")}`;
-      await invoke("save_note", { name, content });
+      await notesCall("save_note", { name, content });
       setMsg(`Copiado a Notas como "${name}"`);
     } catch (e) {
-      setMsg(String(e));
+      fail(e);
     }
   };
+  const copyDiff = () =>
+    writeText(unified())
+      .then(() => setMsg("Diff copiado al portapapeles"))
+      .catch(fail);
 
   const stats = diff ? diffStats(diff.rows) : null;
   const okCount = Object.values(jobs).filter((j) => j.state === "ok").length;
   const doneCount = Object.values(jobs).filter((j) => j.state === "ok" || j.state === "error").length;
+  const inFlight = Object.values(jobs).filter((j) => j.state === "running").length;
 
   return (
     <div className="space-y-4">
+      <ToolHeader
+        title="Respaldos"
+        description="Guarda la configuración de los equipos conectados y compara versiones en el tiempo o entre equipos."
+        actions={
+          <Btn kind="ghost" onClick={() => invoke("open_dir", { which: "backups" })} title="Abrir carpeta de respaldos">
+            <FolderOpen size={14} aria-hidden /> Abrir carpeta
+          </Btn>
+        }
+      />
+      {/* Región viva siempre presente: errores y confirmaciones de cualquier sección se ven y se anuncian. */}
+      <div role="status" className={msg.text ? "" : "!mt-0"}>
+        {msg.text && <p className={`text-[12.5px] ${msg.error ? "text-danger" : "text-muted"}`}>{msg.text}</p>}
+      </div>
       <Section
         title="Respaldar configuración"
         hint={`Ejecuta solo comandos de consulta, hasta ${CONCURRENCY} equipos a la vez`}
-        right={
-          <Btn kind="ghost" onClick={() => invoke("open_dir", { which: "backups" })} title="Abrir carpeta de respaldos">
-            <FolderOpen size={14} /> Carpeta
-          </Btn>
-        }
       >
         {devices.length === 0 ? (
-          <p className="text-[12.5px] text-muted">Conecta una o más sesiones remotas para respaldarlas.</p>
+          <p className="text-[12.5px] text-muted">
+            {totalSessions ? `Sesiones conectadas (0 de ${totalSessions}). ` : ""}Conecta una o más sesiones remotas desde el árbol para respaldarlas.
+          </p>
         ) : (
           <>
-            <div className="flex flex-wrap items-center gap-2 mb-3">
+            <div className="flex flex-wrap items-start gap-2 mb-3">
               <Btn onClick={() => setSelected(new Set(devices.map((d) => d.connId)))} disabled={running}>
                 Todas
               </Btn>
@@ -202,7 +242,22 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
                 </select>
               )}
               <span className="flex-1" />
-              <Toggle checked={mask} onChange={setMask} label="Enmascarar secretos" />
+              {/* La nota de enmascarado va como hint bajo el toggle (alineada con su rótulo), no en la fila de acción. */}
+              <div className="max-w-[26rem]">
+                <Toggle checked={mask} onChange={setMask} label="Enmascarar secretos" />
+                <p className="pl-11 text-[11.5px] text-muted">
+                  {mask
+                    ? "Contraseñas, llaves y comunidades SNMP se guardan como ****; la comparación entre fechas del mismo equipo marca \"secreto cambiado\" por una huella, sin guardar el secreto. Revisa antes de compartir."
+                    : "Se guardará la configuración con sus secretos."}
+                </p>
+              </div>
+            </div>
+            {/* Solo se respaldan sesiones conectadas: se dice cuántas son del total del árbol. */}
+            <div className="flex flex-wrap items-baseline gap-x-2 mb-1.5 text-[12px]">
+              <span className="font-medium">
+                Sesiones conectadas ({totalSessions != null && totalSessions >= devices.length ? `${devices.length} de ${totalSessions}` : devices.length})
+              </span>
+              {(totalSessions == null || totalSessions > devices.length) && <span className="text-muted">Conecta otras desde el árbol para incluirlas.</span>}
             </div>
             <div className="rounded-lg border border-line divide-y divide-[var(--border)]">
               {devices.map((t) => {
@@ -229,6 +284,7 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
                       disabled={running}
                       onChange={(e) => setProfiles((p) => ({ ...p, [t.connId]: e.target.value }))}
                       title={profileById(profileOf(t)).cmd}
+                      aria-label={`Perfil de respaldo de ${t.session.name}`}
                     >
                       {BACKUP_PROFILES.map((p) => (
                         <option key={p.id} value={p.id}>
@@ -244,8 +300,8 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
                             {j.text}
                           </span>
                           <StatusPill
-                            state={j.state === "ok" ? "up" : j.state === "error" ? "down" : j.state === "running" ? "running" : "unknown"}
-                            label={{ pending: "En cola", running: "Respaldando", ok: "Guardado", error: "Error" }[j.state]}
+                            state={j.state === "ok" ? "up" : j.state === "error" ? "down" : j.state === "running" ? "running" : j.state === "skipped" ? "stopped" : "unknown"}
+                            label={{ pending: "En cola", running: "Respaldando", ok: "Guardado", error: "Error", skipped: "Omitido" }[j.state]}
                           />
                         </>
                       )}
@@ -254,21 +310,37 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
                 );
               })}
             </div>
-            <div className="flex items-center gap-2 mt-3">
+            {/* Resultado a la izquierda; el botón y su motivo, alineados a la derecha. */}
+            <div className="flex flex-wrap items-center justify-end gap-2 mt-3">
+              <span className="mr-auto text-[12px] text-muted">{doneCount && !running ? `${okCount} de ${Object.keys(jobs).length} guardados.` : ""}</span>
               {running ? (
-                <Btn kind="danger" onClick={() => (stopRef.current = true)}>
-                  <Square size={12} fill="currentColor" /> Detener ({doneCount}/{Object.keys(jobs).length})
+                <Btn
+                  kind="danger"
+                  aria-disabled={stopping}
+                  onClick={() => {
+                    if (stopping) return;
+                    stopRef.current = true;
+                    setStopping(true);
+                  }}
+                >
+                  <Square size={12} fill="currentColor" />{" "}
+                  {stopping
+                    ? `Deteniendo… (esperando ${plural(inFlight, "equipo en curso", "equipos en curso")})`
+                    : `Detener (${doneCount}/${Object.keys(jobs).length})`}
                 </Btn>
               ) : (
-                <Btn kind="primary" onClick={run} disabled={!selected.size}>
-                  <Play size={13} /> Respaldar {selected.size || ""}
-                </Btn>
+                <>
+                  {/* Motivo del botón deshabilitado, junto a él. */}
+                  {!live.length && (
+                    <span id={whyId} className="shrink-0 text-[12px] font-medium">
+                      Marca al menos un equipo
+                    </span>
+                  )}
+                  <Btn kind="primary" onClick={run} disabled={!live.length} aria-describedby={live.length ? undefined : whyId}>
+                    <Play size={13} /> Respaldar {live.length || ""}
+                  </Btn>
+                </>
               )}
-              <span className="text-[12px] text-muted">
-                {msg ||
-                  (doneCount && !running ? `${okCount} de ${Object.keys(jobs).length} guardados.` : "") ||
-                  (mask ? "Contraseñas, llaves y comunidades SNMP se guardan como ****; la comparación entre fechas del mismo equipo marca \"secreto cambiado\" por una huella, sin guardar el secreto. Revisa antes de compartir." : "Se guardará la configuración con sus secretos.")}
-              </span>
             </div>
           </>
         )}
@@ -297,12 +369,12 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
                     <span className="w-40 tabular-nums">{backupLabel(f.name)}</span>
                     <span className="w-20 text-muted tabular-nums">{fmtBytes(f.size)}</span>
                     <span className="flex-1" />
-                    <PickBtn on={isA} onClick={() => setSelA({ device: d.device, file: f.name })} label="A" />
-                    <PickBtn on={isB} onClick={() => setSelB({ device: d.device, file: f.name })} label="B" />
+                    <PickBtn on={isA} onClick={() => setSelA({ device: d.device, file: f.name })} label="A" what={`${backupLabel(f.name)} de ${d.device}`} />
+                    <PickBtn on={isB} onClick={() => setSelB({ device: d.device, file: f.name })} label="B" what={`${backupLabel(f.name)} de ${d.device}`} />
                     <Btn kind="ghost" className="!h-7 !px-2" onClick={() => setViewing(`${d.device}/${f.name}`)} title="Ver o exportar" aria-label={`Ver o exportar el respaldo ${backupLabel(f.name)} de ${d.device}`}>
                       <Eye size={13} />
                     </Btn>
-                    <Btn kind="ghost" className="!h-7 !px-2" onClick={() => toNotes(d.device, f.name)} title="Copiar a Notas">
+                    <Btn kind="ghost" className="!h-7 !px-2" onClick={() => toNotes(d.device, f.name)} title="Copiar a Notas" aria-label={`Copiar a Notas el respaldo ${backupLabel(f.name)} de ${d.device}`}>
                       <FileText size={13} />
                     </Btn>
                   </div>
@@ -320,7 +392,7 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
           <div className="flex items-center gap-1">
             {diff && (
               <>
-                <Btn kind="ghost" onClick={() => writeText(unified()).then(() => setMsg("Diff copiado al portapapeles"))} title="Copiar diff">
+                <Btn kind="ghost" onClick={copyDiff} title="Copiar diff" aria-label="Copiar diff">
                   <ClipboardCopy size={14} />
                 </Btn>
                 <Btn kind="ghost" onClick={exportDiff} title="Exportar diff como texto">
@@ -355,11 +427,14 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
   );
 }
 
-function PickBtn({ on, onClick, label }: { on: boolean; onClick: () => void; label: string }) {
+/** Elige el respaldo como A o B; el nombre accesible dice cuál (fecha y equipo), no solo la letra. */
+function PickBtn({ on, onClick, label, what }: { on: boolean; onClick: () => void; label: string; what: string }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       aria-pressed={on}
+      aria-label={`Usar ${what} como ${label}`}
       title={`Usar como ${label}`}
       className={`w-7 h-7 rounded-md text-[12px] font-semibold border ${
         on ? "bg-accent text-accent-fg border-transparent" : "border-line text-muted hover:text-fg hover:bg-hover"

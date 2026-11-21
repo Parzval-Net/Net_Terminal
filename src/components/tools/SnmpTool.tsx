@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -32,8 +32,11 @@ import {
   targetParams,
   trapSummary,
 } from "../../lib/snmp";
-import { Btn, Label, Section, StatusPill, Toggle } from "./ui";
+import { JobTracker, prependTraps, type JobEvent, type TrapRow } from "../../lib/snmpUi";
+import { Btn, Collapsible, Label, Section, StatusPill, ToolHeader, Toggle } from "./ui";
 import { useLocalIp } from "./useLocalIp";
+import { Segmented } from "../controls";
+import { stepIndex } from "../../lib/kbNav";
 import SnmpConfigGen from "./SnmpConfigGen";
 
 import { plural } from "../../lib/plural";
@@ -72,26 +75,50 @@ const TABS = [
 
 export default function SnmpTool(props: Props) {
   const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("client");
+  const id = useId();
+  // Pestañas con activación automática (WAI-ARIA Tabs): las flechas cambian de vista y mueven el foco.
+  const onTabsKey = (e: React.KeyboardEvent) => {
+    const to = stepIndex(e.key, TABS.findIndex((t) => t.id === tab), TABS.length, { orientation: "horizontal" });
+    if (to < 0) return;
+    e.preventDefault();
+    setTab(TABS[to].id);
+    document.getElementById(`${id}-tab-${TABS[to].id}`)?.focus();
+  };
   return (
     <div className="space-y-4">
-      <div className="inline-flex rounded-md border border-line p-0.5" role="tablist">
+      {/* Sin acción primaria global: cada bloque (consulta, conjuntos, traps) tiene la suya. */}
+      <ToolHeader
+        title="SNMP"
+        description="Cliente de prueba de solo lectura, conjuntos de OIDs por MIB estándar, receptor de traps y generador de configuración del agente."
+      />
+      {/* Mismo estilo de pestañas que Transferencias: subrayado de acento bajo la activa. */}
+      <div className="flex flex-wrap gap-1 border-b border-line" role="tablist" aria-label="Vista de SNMP" onKeyDown={onTabsKey}>
         {TABS.map((t) => (
           <button
             key={t.id}
+            id={`${id}-tab-${t.id}`}
             role="tab"
             aria-selected={tab === t.id}
+            tabIndex={tab === t.id ? 0 : -1}
+            type="button"
+            aria-controls={`${id}-panel-${t.id}`}
             onClick={() => setTab(t.id)}
-            className={`px-2.5 h-7 rounded text-[12px] ${tab === t.id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg"}`}
+            className={`h-8 px-3 -mb-px border-b-2 text-[12.5px] ${tab === t.id ? "border-[var(--accent)] text-fg font-medium" : "border-transparent text-muted hover:text-fg"}`}
           >
             {t.label}
           </button>
         ))}
       </div>
-      {/* El cliente queda montado al cambiar de pestaña para no cortar consultas ni el receptor de traps. */}
-      <div hidden={tab !== "client"}>
+      {/*
+        Ambas vistas quedan montadas al cambiar de pestaña: el cliente para no cortar consultas ni el
+        receptor de traps, y el generador para no perder lo ingresado.
+      */}
+      <div id={`${id}-panel-client`} role="tabpanel" aria-labelledby={`${id}-tab-client`} hidden={tab !== "client"}>
         <SnmpClient {...props} />
       </div>
-      {tab === "config" && <SnmpConfigGen />}
+      <div id={`${id}-panel-config`} role="tabpanel" aria-labelledby={`${id}-tab-config`} hidden={tab !== "config"}>
+        <SnmpConfigGen />
+      </div>
     </div>
   );
 }
@@ -101,6 +128,7 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
   const [secrets, setSecrets] = useState<Secrets>(EMPTY);
   const [legacy, setLegacy] = useState(false);
   const [saveVault, setSaveVault] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
   const [msg, setMsg] = useState("");
   const set = (p: Partial<SnmpProfile>) => setCur((c) => ({ ...c, ...p }));
   const target = () => targetParams(cur, secrets);
@@ -156,6 +184,14 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
   const authOptions = AUTH_PROTOS.filter((a) => !a.legacy || legacy || a.id === cur.authProto);
   const privOptions = PRIV_PROTOS.filter((a) => !a.legacy || legacy || a.id === cur.privProto);
   const known = s.snmpProfiles.some((p) => p.id === cur.id);
+  const advancedSummary = [
+    `Timeout ${cur.timeoutMs} ms`,
+    plural(cur.retries, "reintento", "reintentos"),
+    cur.version === "3" ? `contexto ${cur.context.trim() || "vacío"}` : "",
+    cur.version === "3" && legacy ? "algoritmos heredados visibles" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="space-y-4">
@@ -164,7 +200,7 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
         hint="Cliente de prueba de solo lectura (GET, GETNEXT, WALK, GETBULK). Los secretos no se guardan salvo que lo pidas, y entonces van a la bóveda cifrada."
         right={
           <div className="flex items-center gap-2">
-            <select className="field !h-7 !w-52" value={known ? cur.id : ""} onChange={(e) => pick(e.target.value)}>
+            <select className="field !h-7 !w-52" aria-label="Perfil SNMP" value={known ? cur.id : ""} onChange={(e) => pick(e.target.value)}>
               <option value="">Nuevo destino</option>
               {s.snmpProfiles.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -173,14 +209,14 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
               ))}
             </select>
             {known && (
-              <Btn kind="ghost" title="Eliminar perfil" onClick={deleteProfile}>
+              <Btn kind="ghost" title="Eliminar perfil" aria-label="Eliminar perfil" onClick={deleteProfile}>
                 <Trash2 size={13} />
               </Btn>
             )}
           </div>
         }
       >
-        <div className="grid gap-3 grid-cols-2 @[40rem]:grid-cols-3 @[56rem]:[grid-template-columns:2fr_0.7fr_0.9fr_0.8fr_0.7fr_1.4fr]">
+        <div className="grid gap-3 grid-cols-2 @[40rem]:grid-cols-4 @[56rem]:[grid-template-columns:2fr_0.7fr_0.9fr_1.4fr]">
           <Label text="Host o IP">
             <input className="field font-mono" value={cur.host} placeholder="192.0.2.1" onChange={(e) => set({ host: e.target.value })} />
           </Label>
@@ -193,12 +229,6 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
               <option value="2c">v2c</option>
               <option value="1">v1</option>
             </select>
-          </Label>
-          <Label text="Timeout (ms)">
-            <input className="field" type="number" value={cur.timeoutMs} onChange={(e) => set({ timeoutMs: Number(e.target.value) || 2000 })} />
-          </Label>
-          <Label text="Reintentos">
-            <input className="field" type="number" min={0} max={5} value={cur.retries} onChange={(e) => set({ retries: Math.min(5, Math.max(0, Number(e.target.value) || 0)) })} />
           </Label>
           <Label text="Nombre del perfil">
             <input className="field" value={cur.name} placeholder="Core Santiago" onChange={(e) => set({ name: e.target.value })} />
@@ -220,7 +250,7 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
             </Label>
           </div>
         ) : (
-          <div className="mt-3 grid gap-3 grid-cols-2 @[40rem]:grid-cols-3 @[64rem]:[grid-template-columns:1.2fr_1.1fr_1.3fr_1.3fr_1.4fr_1.3fr_1fr]">
+          <div className="mt-3 grid gap-3 grid-cols-2 @[40rem]:grid-cols-3 @[64rem]:[grid-template-columns:1.2fr_1.1fr_1.3fr_1.3fr_1.4fr_1.3fr]">
             <Label text="Usuario">
               <input className="field font-mono" value={cur.user} autoComplete="off" onChange={(e) => set({ user: e.target.value })} />
             </Label>
@@ -271,17 +301,37 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
                 onChange={(e) => setSecrets({ ...secrets, privPass: e.target.value })}
               />
             </Label>
-            <Label text="Contexto">
-              <input className="field font-mono" value={cur.context} placeholder="(vacío)" onChange={(e) => set({ context: e.target.value })} />
-            </Label>
           </div>
         )}
 
+        {/* Divulgación progresiva: lo que casi nunca se cambia queda plegado, con su valor en el resumen. */}
+        <div className="mt-3">
+          <Collapsible title="Opciones avanzadas" summary={advancedSummary} open={advanced} onToggle={setAdvanced}>
+            <div className="grid gap-3 grid-cols-2 @[40rem]:grid-cols-3 @[56rem]:grid-cols-4">
+              <Label text="Timeout (ms)">
+                <input className="field" type="number" value={cur.timeoutMs} onChange={(e) => set({ timeoutMs: Number(e.target.value) || 2000 })} />
+              </Label>
+              <Label text="Reintentos">
+                <input className="field" type="number" min={0} max={5} value={cur.retries} onChange={(e) => set({ retries: Math.min(5, Math.max(0, Number(e.target.value) || 0)) })} />
+              </Label>
+              {cur.version === "3" && (
+                <Label text="Contexto">
+                  <input className="field font-mono" value={cur.context} placeholder="(vacío)" onChange={(e) => set({ context: e.target.value })} />
+                </Label>
+              )}
+            </div>
+            {cur.version === "3" && (
+              <div className="mt-3">
+                <Toggle checked={legacy} onChange={setLegacy} label="Mostrar algoritmos heredados (MD5, DES)" />
+              </div>
+            )}
+          </Collapsible>
+        </div>
+
         <div className="mt-3 flex flex-wrap items-center gap-4">
-          {cur.version === "3" && <Toggle checked={legacy} onChange={setLegacy} label="Mostrar algoritmos heredados (MD5, DES)" />}
           <Toggle checked={saveVault} onChange={setSaveVault} label="Guardar secretos en la bóveda cifrada" />
           {cur.saved && (
-            <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
+            <span className="inline-flex items-center gap-1.5 text-body-sm text-muted">
               <KeyRound size={13} /> Secretos en la bóveda ·
               <button className="underline hover:text-fg" onClick={forgetSecrets}>
                 olvidar
@@ -295,13 +345,13 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
         {warnings.length > 0 && (
           <ul className="mt-3 space-y-1">
             {warnings.map((w) => (
-              <li key={w} className="flex items-start gap-1.5 text-[12px] text-warn">
+              <li key={w} className="flex items-start gap-1.5 text-body-sm text-warn">
                 <AlertTriangle size={13} className="mt-0.5 shrink-0" /> {w}
               </li>
             ))}
           </ul>
         )}
-        {msg && <p className="mt-2 text-[12px] text-muted">{msg}</p>}
+        {msg && <p className="mt-2 text-body-sm text-muted">{msg}</p>}
       </Section>
 
       <QuerySection target={target} profile={cur} />
@@ -316,7 +366,12 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
 type TargetFn = () => ReturnType<typeof targetParams>;
 
 function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProfile }) {
-  const [op, setOp] = useState<Op>("get");
+  const [opSel, setOp] = useState<Op>("get");
+  // SNMPv1 no tiene GETBULK: si quedó elegido y el perfil pasa a v1, la consulta usa GETNEXT
+  // (antes no quedaba ninguna opción marcada ni alcanzable con teclado y se enviaba GETBULK).
+  const op: Op = opSel === "getbulk" && profile.version === "1" ? "getnext" : opSel;
+  /** Operación de la consulta en curso: "Detener" depende de ella, no de la opción marcada ahora. */
+  const [runOp, setRunOp] = useState<Op | null>(null);
   const [oid, setOid] = useState("1.3.6.1.2.1.1.1.0");
   const [maxRep, setMaxRep] = useState(10);
   const [maxRows, setMaxRows] = useState(10000);
@@ -325,52 +380,59 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [filter, setFilter] = useState("");
-  const job = useRef<string | null>(null);
+  // Los eventos del WALK pueden llegar antes que su id (agente local o subárbol vacío): ver JobTracker.
+  const job = useRef(new JobTracker()).current;
+  const handle = (e: JobEvent) => {
+    const d = e.data as { rows?: Row[]; count?: number; truncated?: boolean; cancelled?: boolean; ms?: number } | undefined;
+    if (e.kind === "line" && d?.rows) {
+      const add = d.rows;
+      setRows((r) => [...r, ...add]);
+    } else if (e.kind === "result" && d) {
+      setStatus(`${plural(d.count ?? 0, "fila", "filas")} en ${d.ms} ms${d.cancelled ? " · detenido" : d.truncated ? " · se alcanzó el máximo de filas" : ""}`);
+    } else if (e.kind === "error") setError(e.text);
+    else if (e.kind === "done") {
+      job.reset();
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
-    const un = listen<{ job: string; kind: string; text: string; data?: { rows?: Row[]; count?: number; truncated?: boolean; cancelled?: boolean; ms?: number } }>("tool-job", ({ payload: e }) => {
-      if (e.job !== job.current) return;
-      if (e.kind === "line" && e.data?.rows) {
-        const add = e.data.rows;
-        setRows((r) => [...r, ...add]);
-      } else if (e.kind === "result" && e.data) {
-        const d = e.data;
-        setStatus(`${plural(d.count ?? 0, "fila", "filas")} en ${d.ms} ms${d.cancelled ? " · detenido" : d.truncated ? " · se alcanzó el máximo de filas" : ""}`);
-      } else if (e.kind === "error") setError(e.text);
-      else if (e.kind === "done") {
-        job.current = null;
-        setBusy(false);
-      }
-    });
+    // handle solo usa setters de estado (estables), así que la versión del primer render sirve.
+    const un = listen<JobEvent>("tool-job", ({ payload }) => job.push(payload).forEach(handle));
     return () => {
       un.then((f) => f());
-      if (job.current) invoke("tool_stop", { job: job.current }).catch(() => {});
+      if (job.id) invoke("tool_stop", { job: job.id }).catch(() => {});
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job]);
 
   const run = async (o = op, id = oid) => {
     setError("");
     setStatus("");
     setRows([]);
     setBusy(true);
+    setRunOp(o);
     const oids = id.split(/[\s,]+/).filter(Boolean);
     const start = performance.now();
     try {
       if (o === "walk") {
-        job.current = await invoke<string>("snmp_walk", { target: target(), oid: oids[0] ?? "", maxRows, bulk: profile.version === "1" ? null : maxRep });
+        job.begin();
+        const id = await invoke<string>("snmp_walk", { target: target(), oid: oids[0] ?? "", maxRows, bulk: profile.version === "1" ? null : maxRep });
+        job.resolve(id).forEach(handle);
         return;
       }
       const r = await invoke<Row[]>("snmp_request", { target: target(), op: o, oids, maxRep });
       setRows(r);
       setStatus(`${plural(r.length, "fila", "filas")} en ${Math.round(performance.now() - start)} ms`);
     } catch (e) {
+      job.reset();
       setError(String(e));
     }
     setBusy(false);
   };
 
   const stop = () => {
-    if (job.current) invoke("tool_stop", { job: job.current }).catch(() => {});
+    if (job.id) invoke("tool_stop", { job: job.id }).catch(() => {});
   };
 
   const shown = useMemo(() => {
@@ -384,18 +446,13 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
       hint={profile.version === "1" ? "SNMPv1 no tiene GETBULK: WALK usa GETNEXT." : "WALK usa GETBULK con las repeticiones indicadas."}
     >
       <div className="flex flex-wrap items-end gap-3">
-        <div className="inline-flex rounded-md border border-line p-0.5">
-          {OPS.map((o) => (
-            <button
-              key={o.id}
-              disabled={o.id === "getbulk" && profile.version === "1"}
-              onClick={() => setOp(o.id)}
-              className={`px-2.5 h-7 rounded text-[12px] disabled:opacity-40 ${op === o.id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg"}`}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
+        {/* SNMPv1 no tiene GETBULK: la opción no se ofrece (el hint de la sección lo explica). */}
+        <Segmented
+          label="Operación SNMP"
+          value={op}
+          onChange={setOp}
+          options={OPS.filter((o) => o.id !== "getbulk" || profile.version !== "1").map((o) => [o.id, o.label] as const)}
+        />
         <Label text={op === "walk" ? "OID raíz" : "OID (varios separados por espacio)"} className="flex-1 min-w-[260px]">
           <input
             className="field font-mono"
@@ -422,7 +479,7 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
             <input className="field" type="number" min={1} max={100000} value={maxRows} onChange={(e) => setMaxRows(Math.min(100000, Math.max(1, Number(e.target.value) || 10000)))} />
           </Label>
         )}
-        {busy && op === "walk" ? (
+        {busy && runOp === "walk" ? (
           <Btn onClick={stop}>
             <Square size={13} /> Detener
           </Btn>
@@ -436,7 +493,7 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
         {QUICK.map((q) => (
           <button
             key={q.label}
-            className="px-2 h-6 rounded-md bg-hover text-[11.5px] text-muted hover:text-fg"
+            className="px-2 h-6 rounded-md bg-hover text-body-sm text-muted hover:text-fg"
             title={`${q.op.toUpperCase()} ${q.oid}`}
             onClick={() => {
               setOid(q.oid);
@@ -447,12 +504,16 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
           </button>
         ))}
       </div>
-      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {error && (
+        <p role="alert" className="mt-2 text-body-sm text-danger">
+          {error}
+        </p>
+      )}
 
       {(rows.length > 0 || busy || status) && (
         <div className="mt-3">
           <div className="flex items-center gap-2 mb-2">
-            <span className="text-[12px] text-muted">{busy ? `${plural(rows.length, "fila", "filas")}…` : status}</span>
+            <span className="text-body-sm text-muted">{busy ? `${plural(rows.length, "fila", "filas")}…` : status}</span>
             <input className="field !h-7 !w-56 ml-auto" placeholder="Filtrar OID, nombre o valor" value={filter} onChange={(e) => setFilter(e.target.value)} />
             <Btn kind="ghost" title="Copiar como CSV" disabled={!rows.length} onClick={() => writeText(rowsToCsv(shown))}>
               <ClipboardCopy size={13} />
@@ -461,8 +522,8 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
               <Download size={13} /> CSV
             </Btn>
           </div>
-          <div className="max-h-[420px] overflow-auto rounded-lg border border-line">
-            <table className="w-full text-[12px]">
+          <div className="max-h-[420px] overflow-auto border-y border-line">
+            <table className="w-full text-body-sm tabular-nums">
               <thead className="sticky top-0 bg-panel text-left text-muted">
                 <tr>
                   <th className="px-2 py-1.5 font-medium">OID</th>
@@ -482,7 +543,7 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
                 ))}
               </tbody>
             </table>
-            {shown.length > 5000 && <p className="p-2 text-[11.5px] text-muted">Se muestran 5.000 de {shown.length}; exporta a CSV para verlas todas.</p>}
+            {shown.length > 5000 && <p className="p-2 text-body-sm text-muted">Se muestran 5.000 de {shown.length}; exporta a CSV para verlas todas.</p>}
           </div>
         </div>
       )}
@@ -539,26 +600,31 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
     setBusy(null);
   };
 
-  /** Segunda lectura de los contadores para calcular bits/s por interfaz. */
+  /**
+   * Bits/s por interfaz: dos lecturas propias de los contadores separadas por RATE_INTERVAL, y la
+   * tasa sobre el tiempo real entre ambas. Antes la primera era la de la carga de la tabla (quizá de
+   * hace minutos) y el delta se dividía por 10 s, inflando la tasa.
+   */
   const measure = async () => {
     if (!res?.table) return;
     const t0 = res.table;
     const counters = t0.columns.map((c, i) => (c.fmt === "counter" ? i : -1)).filter((i) => i >= 0);
+    const cols = counters.map((i) => t0.columns[i]);
     setBusy("rates");
     setMsg(`Midiendo durante ${RATE_INTERVAL} s…`);
-    const start = performance.now();
-    await new Promise((r) => setTimeout(r, RATE_INTERVAL * 1000));
     try {
-      const { table: t1 } = await walkColumns(counters.map((i) => t0.columns[i]));
-      const secs = (performance.now() - start) / 1000;
-      const now = new Map(t1.rows.map((r) => [r.index, r.cells]));
+      const { table: a } = await walkColumns(cols);
+      const startA = performance.now();
+      await new Promise((r) => setTimeout(r, RATE_INTERVAL * 1000));
+      const { table: b } = await walkColumns(cols);
+      const secs = (performance.now() - startA) / 1000;
+      const first = new Map(a.rows.map((r) => [r.index, r.cells]));
+      const now = new Map(b.rows.map((r) => [r.index, r.cells]));
       const rates: PresetResult["rates"] = {};
       for (const r of t0.rows) {
+        const c0 = first.get(r.index);
         const c1 = now.get(r.index);
-        rates[r.index] = [
-          rate(r.cells[counters[0]]?.value, c1?.[0]?.value, secs, !res.bits32),
-          rate(r.cells[counters[1]]?.value, c1?.[1]?.value, secs, !res.bits32),
-        ];
+        rates[r.index] = [rate(c0?.[0]?.value, c1?.[0]?.value, secs, !res.bits32), rate(c0?.[1]?.value, c1?.[1]?.value, secs, !res.bits32)];
       }
       setRes({ ...res, rates });
       setMsg(`Tasas promedio de ${secs.toFixed(1)} s`);
@@ -580,30 +646,67 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
     });
   };
 
+  // Tab entra por el conjunto elegido (o el primero) y las flechas recorren los demás.
+  const panelId = useId();
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const tabStop = Math.max(0, PRESETS.findIndex((p) => p.id === res?.preset.id));
+  const onTabsKey = (e: React.KeyboardEvent) => {
+    const tabs = [...(tabsRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [])];
+    const to = stepIndex(e.key, tabs.indexOf(document.activeElement as HTMLButtonElement), tabs.length, { orientation: "horizontal" });
+    if (to < 0) return;
+    e.preventDefault();
+    tabs[to].focus();
+  };
+
   const t = res?.table;
   const csv = () => (t ? tableToCsv(t) : (res?.scalars ?? []).map((x) => [x.col.label, formatCell(x.col, x.row)].map(csvCell).join(",")).join("\n"));
 
   return (
     <Section title="Conjuntos de OIDs" hint="Telemetría por MIB estándar, en tablas. Solo lectura.">
-      <div className="flex flex-wrap items-center gap-2">
-        {PRESETS.map((p) => (
-          <Btn key={p.id} kind={res?.preset.id === p.id ? "primary" : "default"} disabled={!!busy || !profile.host.trim()} title={p.hint} onClick={() => load(p)}>
-            {busy === p.id ? "Leyendo…" : p.label}
-          </Btn>
-        ))}
-        <span className="ml-auto">
+      {/*
+        Conjuntos como pestañas (mismo estilo que Transferencias): la tabla de abajo es el panel del
+        conjunto elegido. Activación manual (WAI-ARIA Tabs): las flechas solo mueven el foco y Enter o
+        Espacio leen el conjunto, para no lanzar una consulta SNMP por cada flecha.
+      */}
+      <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+        <div ref={tabsRef} role="tablist" aria-label="Conjuntos de OIDs" onKeyDown={onTabsKey} className="flex flex-wrap gap-1 flex-1 min-w-0 border-b border-line">
+          {PRESETS.map((p, i) => {
+            const on = res?.preset.id === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                role="tab"
+                aria-selected={on}
+                aria-controls={res ? panelId : undefined}
+                tabIndex={i === tabStop ? 0 : -1}
+                disabled={!!busy || !profile.host.trim()}
+                title={p.hint}
+                onClick={() => load(p)}
+                className={`h-8 px-3 -mb-px border-b-2 text-[12.5px] whitespace-nowrap disabled:opacity-40 ${on ? "border-[var(--accent)] text-fg font-medium" : "border-transparent text-muted hover:text-fg"}`}
+              >
+                {busy === p.id ? "Leyendo…" : p.label}
+              </button>
+            );
+          })}
+        </div>
+        <span className="shrink-0 pb-1">
           <Toggle checked={params} onChange={toggleParams} label="Parámetros de procesos (sensible)" />
         </span>
       </div>
-      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {error && (
+        <p role="alert" className="mt-2 text-body-sm text-danger">
+          {error}
+        </p>
+      )}
       {res && (
-        <div className="mt-3">
+        <div id={panelId} role="tabpanel" aria-label={res.preset.label} className="mt-3">
           <div className="flex items-center gap-2 mb-2">
-            <span className="text-[12px] text-muted truncate" title={res.preset.hint}>
+            <span className="min-w-0 text-body-sm text-muted line-clamp-2" title={res.preset.hint}>
               {res.preset.hint}
             </span>
             {res.bits32 && (
-              <span className="inline-flex items-center gap-1 text-[12px] text-warn whitespace-nowrap">
+              <span className="inline-flex items-center gap-1 text-body-sm text-warn whitespace-nowrap">
                 <AlertTriangle size={13} /> 32 bits: puede reiniciarse en enlaces de 1 Gbps o más
               </span>
             )}
@@ -617,9 +720,9 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
               <Download size={13} /> CSV
             </Btn>
           </div>
-          {msg && <p className="mb-2 text-[12px] text-muted">{msg}</p>}
+          {msg && <p className="mb-2 text-body-sm text-muted">{msg}</p>}
           {res.scalars && (
-            <table className="w-full text-[12.5px]">
+            <table className="w-full text-body-sm tabular-nums">
               <tbody>
                 {res.scalars.map(({ col, row }) => (
                   <tr key={col.oid} className="border-t border-line first:border-0 align-top">
@@ -631,8 +734,8 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
             </table>
           )}
           {t && (
-            <div className="max-h-[460px] overflow-auto rounded-lg border border-line">
-              <table className="w-full text-[12px]">
+            <div className="max-h-[460px] overflow-auto border-y border-line">
+              <table className="w-full text-body-sm tabular-nums">
                 <thead className="sticky top-0 bg-panel text-left text-muted">
                   <tr>
                     <th className="px-2 py-1.5 font-medium">Índice</th>
@@ -672,11 +775,11 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
                   ))}
                 </tbody>
               </table>
-              {t.rows.length === 0 && <p className="p-3 text-[12px] text-muted">El agente no devolvió filas para esta MIB.</p>}
+              {t.rows.length === 0 && <p className="p-3 text-body-sm text-muted">El agente no devolvió filas para esta MIB.</p>}
             </div>
           )}
           {res.errors.length > 0 && (
-            <ul className="mt-2 text-[11.5px] text-muted">
+            <ul className="mt-2 text-body-sm text-muted">
               {res.errors.map((e) => (
                 <li key={e}>{e}</li>
               ))}
@@ -705,16 +808,23 @@ function TrapSection({
   target: TargetFn;
   profile: SnmpProfile;
 }) {
-  const [traps, setTraps] = useState<Trap[]>([]);
+  const [traps, setTraps] = useState<TrapRow[]>([]);
+  // Id del próximo trap: la fila expandida se recuerda por id, no por posición en la lista.
+  const nextId = useRef(0);
   const { ips, ip: mgmtIp } = useLocalIp();
   const [useV3, setUseV3] = useState(false);
   const [error, setError] = useState("");
   const [open, setOpen] = useState<number | null>(null);
+  const detailId = useId();
   const on = running.includes("snmptrap");
   const bind = s.snmpTrapBind || "127.0.0.1";
 
   useEffect(() => {
-    const un = listen<Trap[]>("snmp-trap", ({ payload }) => setTraps((t) => [...payload.reverse(), ...t].slice(0, MAX_TRAPS)));
+    const un = listen<Trap[]>("snmp-trap", ({ payload }) => {
+      const start = nextId.current;
+      nextId.current += payload.length;
+      setTraps((t) => prependTraps(t, payload, start, MAX_TRAPS).list);
+    });
     return () => {
       un.then((f) => f());
     };
@@ -762,26 +872,30 @@ function TrapSection({
         </Btn>
       </div>
       {bind === "127.0.0.1" && !on && (
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-body-sm text-muted">
           <span>Con 127.0.0.1 solo llegan traps de este PC: los equipos de la red no pueden alcanzarlo.</span>
           {mgmtIp && (
-            <Btn kind="ghost" className="!h-6 !px-2 !text-[11.5px] !text-accent" onClick={() => onChange({ snmpTrapBind: mgmtIp })}>
+            <Btn kind="ghost" className="!h-6 !px-2 !text-accent" onClick={() => onChange({ snmpTrapBind: mgmtIp })}>
               Escuchar en {mgmtIp}
             </Btn>
           )}
         </div>
       )}
       {bind === "0.0.0.0" && !on && (
-        <p className="mt-2 flex items-center gap-1.5 text-[12px] text-warn">
+        <p className="mt-2 flex items-center gap-1.5 text-body-sm text-warn">
           <AlertTriangle size={13} /> Escuchará en todas las interfaces, incluidas Wi-Fi o VPN. Prefiere la IP de la red de gestión.
         </p>
       )}
       {s.snmpTrapPort < 1024 && (
-        <p className="mt-2 text-[11.5px] text-muted">En Linux y macOS el puerto 162 puede requerir privilegios; si no inicia, usa 1162 y configúralo en el equipo.</p>
+        <p className="mt-2 text-body-sm text-muted">En Linux y macOS el puerto 162 puede requerir privilegios; si no inicia, usa 1162 y configúralo en el equipo.</p>
       )}
-      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {error && (
+        <p role="alert" className="mt-2 text-body-sm text-danger">
+          {error}
+        </p>
+      )}
       <div className="mt-3 flex items-center justify-between">
-        <span className="text-[12px] text-muted">{traps.length} recibidos</span>
+        <span className="text-body-sm text-muted">{traps.length} recibidos</span>
         <div className="flex gap-1">
           <Btn
             kind="ghost"
@@ -802,12 +916,19 @@ function TrapSection({
         </div>
       </div>
       <div className="mt-2 max-h-[420px] overflow-y-auto">
-        {traps.length === 0 && <p className="text-[12px] text-muted">{on ? "Esperando traps…" : "Inicia el receptor para ver los traps de los equipos."}</p>}
-        {traps.map((t, i) => {
+        {traps.length === 0 && <p className="text-body-sm text-muted">{on ? "Esperando traps…" : "Inicia el receptor para ver los traps de los equipos."}</p>}
+        {traps.map((t) => {
           const sum = trapSummary(t);
+          const expanded = open === t.id;
           return (
-            <div key={`${t.ts}-${i}`} className="border-t border-line first:border-0 py-1.5 text-[12px]">
-              <button className="w-full flex items-center gap-3 text-left" onClick={() => setOpen(open === i ? null : i)}>
+            <div key={t.id} className="border-t border-line first:border-0 py-1.5 text-body-sm">
+              <button
+                type="button"
+                className="w-full flex items-center gap-3 text-left"
+                aria-expanded={expanded}
+                aria-controls={expanded ? `${detailId}-${t.id}` : undefined}
+                onClick={() => setOpen(expanded ? null : t.id)}
+              >
                 <span className="text-muted whitespace-nowrap tabular-nums">{new Date(t.ts).toLocaleTimeString("es-CL")}</span>
                 <span className="font-mono whitespace-nowrap">{t.src}</span>
                 <span className="text-muted whitespace-nowrap">
@@ -817,8 +938,8 @@ function TrapSection({
                 <span className={`font-medium whitespace-nowrap ${tone[sum.tone]}`}>{sum.title}</span>
                 <span className="text-muted truncate">{sum.detail || t.note || ""}</span>
               </button>
-              {open === i && (
-                <div className="mt-1 ml-4 space-y-0.5 font-mono text-[11.5px] select-text">
+              {expanded && (
+                <div id={`${detailId}-${t.id}`} className="mt-1 ml-4 space-y-0.5 font-mono text-body-sm select-text">
                   {t.uptime && <div className="text-muted">sysUpTime {t.uptime}</div>}
                   {t.user && <div className="text-muted">usuario {t.user}</div>}
                   {t.note && <div className="text-muted">{t.note}</div>}

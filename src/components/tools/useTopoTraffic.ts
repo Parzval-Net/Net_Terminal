@@ -1,24 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { runOnDevice } from "../../lib/deviceRun";
+import { runOnDeviceResult } from "../../lib/deviceRun";
 import { vendorFor } from "../../lib/commands";
 import { computeRisk } from "../../lib/packs";
 import { SnmpProfile, targetParams } from "../../lib/snmp";
 import { PortInfo, TopoNode, TopoVendor, Topology, canonPort, isCliError, knownAddrs, nodeId, promptName } from "../../lib/topology";
 import { atPrompt } from "../../lib/cliText";
-import { OID, TopoRead, ifIndexByPort, ifNames } from "../../lib/topoSnmp";
+import { OID, TopoRead, ifIndexByPort, ifNames, walksComplete } from "../../lib/topoSnmp";
 import {
   CounterSample,
   MAX_TRAFFIC_IFACES,
   PortRate,
   counterOids,
+  maxSampleGapMs,
   parseCliCounters,
   terminalFor,
   parseCounterGets,
+  portEntry,
   portRate,
   trafficCommands,
 } from "../../lib/topoTraffic";
 import type { TerminalRef } from "./FileManager";
+import { promptIsDevice } from "../../lib/hopTab";
 import type { TabRoute } from "../../lib/hopTab";
 
 export type TrafficInterval = 15 | 30 | 60;
@@ -39,10 +42,16 @@ export interface TrafficStatus {
   errors: string[];
   /** Pestañas que no estaban en un prompt (paginador, contraseña, comando en curso): no se les envió nada. */
   busy: string[];
+  /** Lecturas por consola cuya salida se cortó: solo traen parte de las interfaces. */
+  partial: string[];
   last?: number;
 }
 
-const EMPTY: TrafficStatus = { snmp: [], cli: [], none: [], errors: [], busy: [] };
+const EMPTY: TrafficStatus = { snmp: [], cli: [], none: [], errors: [], busy: [], partial: [] };
+/** Plazo de la lectura de contadores por consola: "show interfaces" de un chasis con paginador pasa del minuto. */
+const CLI_READ_SECS = 120;
+/** Un índice de interfaces leído a medias se vuelve a leer pasado este tiempo. */
+const IF_INDEX_RETRY_MS = 5 * 60_000;
 const NO_SECRETS = { community: "", authPass: "", privPass: "" };
 
 /** Interfaces del equipo con algún enlace en el diagrama (clave canonPort). */
@@ -67,6 +76,11 @@ interface IfCache {
   profile: string;
   byPort: Map<string, number>;
   hc: boolean;
+  /**
+   * El recorrido de ifName o ifDescr se cortó (tiempo, tope de filas, error): el índice puede estar
+   * incompleto y se vuelve a leer desde este momento (ms). Antes quedaba guardado hasta reiniciar.
+   */
+  retryAt?: number;
 }
 
 /**
@@ -136,27 +150,40 @@ export function useTopoTraffic({
     const readSnmp = async (n: TopoNode, p: SnmpProfile, ports: string[]): Promise<Map<string, CounterSample>> => {
       const target = targetParams(p, NO_SECRETS);
       let cache = ifCache.current.get(n.id);
-      if (!cache || cache.profile !== p.id) {
+      const started = Date.now();
+      if (!cache || cache.profile !== p.id || (cache.retryAt !== undefined && started >= cache.retryAt)) {
         const r = await invoke<TopoRead>("snmp_topo_read", { target, gets: [], walks: [OID.ifName, OID.ifDescr] });
-        cache = { profile: p.id, byPort: ifIndexByPort(ifNames(r)), hc: true };
+        cache = {
+          profile: p.id,
+          byPort: ifIndexByPort(ifNames(r)),
+          hc: cache?.profile === p.id ? cache.hc : true,
+          ...(walksComplete(r) ? {} : { retryAt: started + IF_INDEX_RETRY_MS }),
+        };
         ifCache.current.set(n.id, cache);
       }
       const idx = new Map<string, number>();
       for (const k of ports) {
-        const i = cache.byPort.get(k);
+        // Clave exacta o, si falta, la única que coincide sin mayúsculas ni subinterfaz (portEntry).
+        const i = portEntry(cache.byPort, k);
         if (i !== undefined) idx.set(k, i);
       }
       if (!idx.size) return new Map();
       const list = [...new Set(idx.values())];
       const read = async (hc: boolean) => {
         const r = await invoke<TopoRead>("snmp_topo_read", { target, gets: counterOids(list, hc), walks: [] });
+        // Un GET con error (tooBig, genErr, authorizationError) no dice que falten los contadores de
+        // 64 bits: se informa y no se cambia de columna. Antes el equipo quedaba en Counter32.
+        if (r.getError) throw new Error(`GET de contadores: ${r.getError}`);
         return parseCounterGets(r.gets, list, hc, Date.now());
       };
       let res = await read(cache.hc);
-      // Agente sin ifXTable (solo contadores de 32 bits): se recuerda y se pide la otra columna.
+      // Agente sin ifXTable (solo contadores de 32 bits): se pide la otra columna y se recuerda solo
+      // si respondió. Si tampoco, los ifIndex guardados ya no existen en el agente (reinicio o
+      // reindexación) y el índice se vuelve a leer en la próxima ronda.
       if (res.hcMissing) {
-        cache.hc = false;
         res = await read(false);
+        if (res.samples.size) cache.hc = false;
+        else ifCache.current.delete(n.id);
       }
       const out = new Map<string, CounterSample>();
       for (const [k, i] of idx) {
@@ -166,7 +193,7 @@ export function useTopoTraffic({
       return out;
     };
 
-    const readCli = async (n: TopoNode, term: TerminalRef, ports: string[], state: Map<string, PortInfo>): Promise<Map<string, CounterSample>> => {
+    const readCli = async (n: TopoNode, term: TerminalRef, ports: string[], state: Map<string, PortInfo>, note: { partial?: string }): Promise<Map<string, CounterSample>> => {
       const h = term.highlight && term.highlight !== "off" ? (vendorFor(term.highlight) as TopoVendor) : undefined;
       // Nunca a ciegas: sin prompt en pantalla (paginador, contraseña, comando del usuario a medias)
       // el primer carácter se pierde y el comando llega mutilado.
@@ -177,24 +204,32 @@ export function useTopoTraffic({
       if (!cmds.length) throw new Error("sin comando de contadores para este fabricante");
       let out = "";
       for (const cmd of cmds) {
-        out = await runOnDevice(term.connId, cmd, 60);
+        const r = await runOnDeviceResult(term.connId, cmd, CLI_READ_SECS);
+        out = r.output;
+        // Salida cortada (plazo, tope de páginas): trae solo parte de las interfaces. Se usan las que
+        // alcanzaron a llegar, se avisa y el comando no se recuerda como bueno.
+        if (r.cut) {
+          note.partial = `${cmd}: ${r.cut}`;
+          break;
+        }
         if (!isCliError(out)) {
           cliCmd.current.set(n.id, cmd);
           break;
         }
       }
-      if (isCliError(out)) {
+      if (!note.partial && isCliError(out)) {
         cliCmd.current.delete(n.id);
         throw new Error(`el equipo no reconoce ${cmds.join(" ni ")}`);
       }
-      // Con saltos, la pestaña puede estar ahora en otro equipo: sus contadores no son de este.
+      // Con saltos, la pestaña puede estar ahora en otro equipo: sus contadores no son de este. El
+      // prompt puede ser un alias del equipo (otro nombre que el del diagrama) o el que guardó la ruta.
       const who = promptName(out);
-      if (who && nodeId(who) !== n.id) throw new Error(`su pestaña está ahora en ${who}`);
+      if (who && !promptIsDevice(who, n.id, n.aliases, term.tabId ? ctx.current.routes?.[term.tabId] : undefined)) throw new Error(`su pestaña está ahora en ${who}`);
       const ts = Date.now();
       const counters = parseCliCounters(out);
       const res = new Map<string, CounterSample>();
       for (const k of ports) {
-        const c = counters.get(k);
+        const c = portEntry(counters, k);
         if (!c) continue;
         res.set(k, { inOctets: c.inOctets, outOctets: c.outOctets, bits: 64, speed: c.speed, ...(c.speedApprox ? { approx: true } : {}), ts, src: "cli" });
         const info: PortInfo = {};
@@ -211,7 +246,8 @@ export function useTopoTraffic({
     const tick = async () => {
       if (document.visibilityState === "hidden") return;
       const { topo: t, profiles: ps, terminals: ts, cli, routes: tabRoutes } = ctx.current;
-      const st: TrafficStatus = { snmp: [], cli: [], none: [], errors: [], busy: [], last: Date.now() };
+      const st: TrafficStatus = { snmp: [], cli: [], none: [], errors: [], busy: [], partial: [], last: Date.now() };
+      const maxGap = maxSampleGapMs(opts.interval);
       const liveNow = new Map<string, Map<string, PortInfo>>();
       const jobs = t.nodes
         .filter((n) => n.explored)
@@ -234,12 +270,18 @@ export function useTopoTraffic({
           inFlight.current.add(n.id);
           try {
             const state = new Map<string, PortInfo>();
-            const samples = p ? await readSnmp(n, p, ports) : await readCli(n, term!, ports, state);
+            const note: { partial?: string } = {};
+            const samples = p ? await readSnmp(n, p, ports) : await readCli(n, term!, ports, state, note);
             if (state.size) liveNow.set(n.id, state);
             const before = prev.current.get(n.id) ?? new Map<string, CounterSample>();
-            const out = new Map<string, PortRate>();
-            for (const [k, s] of samples) out.set(k, portRate(before.get(k), s));
-            prev.current.set(n.id, samples);
+            // Lectura cortada: las interfaces que no alcanzaron a llegar conservan su lectura anterior y su
+            // tasa (mientras no supere la antigüedad máxima) en vez de desaparecer del mapa.
+            const kept = note.partial ? [...(ratesRef.current.get(n.id) ?? [])].filter(([, r]) => Date.now() - r.ts <= maxGap) : [];
+            const out = new Map<string, PortRate>(kept);
+            // Una lectura anterior demasiado antigua (la herramienta estuvo oculta) no se usa para la tasa.
+            for (const [k, s] of samples) out.set(k, portRate(before.get(k), s, maxGap));
+            prev.current.set(n.id, note.partial ? new Map([...before, ...samples]) : samples);
+            if (note.partial) st.partial.push(`${n.name}: ${ports.filter((k) => !samples.has(k)).length} de ${ports.length} interfaces sin leer (${note.partial.slice(0, 120)})`);
             return [n.id, out];
           } catch (e) {
             if (e instanceof BusyTab) {

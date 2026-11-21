@@ -1,13 +1,15 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Columns2, LayoutGrid, Lock, Maximize2, Minimize2, Plus, Rows2, X } from "lucide-react";
+import { Columns2, History, LayoutGrid, Lock, Maximize2, Minimize2, Plus, Radio, Rows2, Search, TextSearch, X } from "lucide-react";
 import { newTabMenuItems } from "./tabMenu";
 import { SplitLayout, layoutLabel } from "../lib/split";
+import { tabPaneNumbers } from "../lib/paneNumbers";
 import type { TabLayout } from "../lib/settings";
 import { MenuItem, layoutItem, splitMenuItems, tabMenuItems } from "./tabMenu";
 import { ConnStatus, Tab, TabState, tabTitle } from "../types";
 import { ContextMenu } from "./Sidebar";
 import { SessionIcon, isQuickSession } from "./SessionIcon";
-import { focusLabel, modLabel } from "../lib/platform";
+import { focusLabel, historyLabel, isMac, modLabel } from "../lib/platform";
+import { resolveTargets, useBroadcastTarget, useWorkspace } from "../lib/broadcast";
 import type { CloseScope } from "../lib/closeAll";
 import { useTabDrag } from "../lib/tabDrag";
 import { useTabKeys } from "../lib/useTabKeys";
@@ -65,6 +67,15 @@ export interface TabBarProps {
   onFocusTab?: (id: string) => void;
   /** Arrastrar una pestaña: la deja antes o después de `to`. */
   onReorder?: (from: string, to: string, after: boolean) => void;
+  /** Abre la paleta "Buscar sesión o acción" (botón Command Center, siempre a la vista). */
+  onPalette?: () => void;
+  /** Buscar en la terminal e Historial de comandos de la pestaña activa: abren o cierran (los mismos de la barra de estado). */
+  onToggleFind?: () => void;
+  findOpen?: boolean;
+  onToggleHistory?: () => void;
+  historyOpen?: boolean;
+  /** Pestaña de cada panel de la vista dividida (posición = número de panel - 1); null sin vista dividida. */
+  splitPanes?: (string | null)[] | null;
 }
 
 /** Línea que marca dónde caerá la pestaña arrastrada. */
@@ -204,6 +215,20 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
     el?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeId, tabs.length]);
 
+  // Pestañas que reciben lo que se envía desde Notas, catálogo o botones cuando el destino no es
+  // solo la pestaña actual: llevan borde superior de aviso e ícono (forma además de color).
+  const bcTarget = useBroadcastTarget();
+  const workspace = useWorkspace();
+  const bcIds = useMemo(() => {
+    if (bcTarget.mode === "current") return null;
+    const r = resolveTargets(bcTarget, tabs, (id) => states[id]?.status, activeId, workspace.panes);
+    return new Set(r.targets.map((t) => t.id));
+  }, [bcTarget, tabs, states, activeId, workspace.panes]);
+  // Número de panel de cada pestaña en la vista dividida (el mismo que muestra la cabecera del panel):
+  // sigue el orden de la barra, de izquierda a derecha.
+  const paneOf = useMemo(() => tabPaneNumbers(props.splitPanes, tabs.map((t) => t.id)), [props.splitPanes, tabs]);
+  const activeTab = tabs.find((t) => t.id === activeId);
+
   const commit = (id: string, value: string) => {
     setEditing(null);
     const tab = tabs.find((t) => t.id === id);
@@ -239,13 +264,15 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
           const active = t.id === activeId;
           const status = states[t.id]?.status ?? "connecting";
           const marker = alerted?.has(t.id) && !active ? "alert" : activity.has(t.id) && !active ? "activity" : null;
+          const pane = paneOf.get(t.id);
+          const bc = !!bcIds?.has(t.id);
           return (
             <div
               key={t.id}
               data-tab={t.id}
               role="tab"
               aria-selected={active}
-              aria-label={tabLabel(tabTitle(t), status, marker, t.readOnly)}
+              aria-label={`${tabLabel(tabTitle(t), status, marker, t.readOnly)}${pane ? `, panel ${pane}` : ""}${bc ? ", recibe la difusión" : ""}`}
               tabIndex={focusId === t.id ? 0 : -1}
               onMouseDown={(e) => {
                 if (e.button === 1) {
@@ -275,11 +302,27 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
               className={`group relative flex items-center gap-2 h-7 pl-3 pr-1 min-w-[128px] max-w-[220px] rounded-t-lg text-[12.5px] cursor-default focus-visible:outline-offset-[-2px] ${
                 drag.dragId === t.id ? "opacity-50" : ""
               } ${drag.target?.id === t.id ? dropMark(drag.target.after ? "right" : "left") : ""} ${
+                bc ? (active ? "shadow-[inset_0_2px_0_0_var(--bc-mark)]" : "shadow-[inset_0_2px_0_0_var(--warn)]") : ""
+              } ${
                 active
                   ? "bg-term text-term-fg border border-line border-b-transparent -mb-px"
                   : "text-muted hover:text-fg hover:bg-hover"
               }`}
+              // En la pestaña activa el fondo es el del tema de terminal: el aviso de difusión se mezcla con
+              // --term-fg, como el punto de estado (dotColor), para mantener >= 3:1 en cualquier combinación.
+              style={bc && active ? ({ "--bc-mark": "color-mix(in oklab, var(--warn) 60%, var(--term-fg))" } as React.CSSProperties) : undefined}
             >
+              {pane && (
+                <span
+                  aria-hidden
+                  title={`Panel ${pane} de la vista dividida`}
+                  className={`shrink-0 min-w-4 h-4 px-1 grid place-items-center rounded border text-[10.5px] font-semibold leading-none tabular-nums ${
+                    active ? "border-term-fg/50 text-term-fg" : "border-field-line text-fg"
+                  }`}
+                >
+                  {pane}
+                </span>
+              )}
               <SessionIcon type={t.session.type} size={13} quick={isQuickSession(t.session)} />
               {editing === t.id ? (
                 <input
@@ -306,6 +349,14 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
                 <span className={`truncate flex-1 ${t.title ? "italic" : ""}`}>{tabTitle(t)}</span>
               )}
               {t.readOnly && <ReadOnlyMark />}
+              {bc && (
+                <span
+                  title="Recibe lo que envías desde Notas, catálogo y botones (difusión)"
+                  className={`shrink-0 grid place-items-center ${active ? "text-[var(--bc-mark)]" : "text-warn"}`}
+                >
+                  <Radio aria-hidden size={12} />
+                </span>
+              )}
               {alerted?.has(t.id) && !active ? (
                 <span aria-hidden className="text-[11px] font-semibold text-danger shrink-0" title="Alerta por palabra clave">
                   ▲
@@ -340,6 +391,46 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
           </button>
         )}
       </div>
+      {/* Acciones de la terminal activa: las mismas de la barra de estado, junto a las pestañas a las que se aplican. */}
+      {activeTab && props.onToggleFind && (
+        <button
+          onClick={props.onToggleFind}
+          title={`Buscar en la terminal (${modLabel}F)`}
+          aria-label="Buscar en la terminal"
+          aria-pressed={!!props.findOpen}
+          className={`mb-[5px] w-7 h-6 shrink-0 grid place-items-center rounded-md hover:bg-hover ${props.findOpen ? "text-accent" : "text-muted hover:text-fg"}`}
+        >
+          <TextSearch aria-hidden size={15} />
+        </button>
+      )}
+      {activeTab && !activeTab.session.scp && props.onToggleHistory && (
+        <button
+          onClick={props.onToggleHistory}
+          // HistoryMenu no se cierra al hacer clic aquí (el botón lo alterna).
+          data-history-btn=""
+          title={`Historial de comandos enviados (${historyLabel})`}
+          aria-label="Historial de comandos enviados"
+          aria-pressed={!!props.historyOpen}
+          className={`mb-[5px] w-7 h-6 shrink-0 grid place-items-center rounded-md hover:bg-hover ${props.historyOpen ? "text-accent" : "text-muted hover:text-fg"}`}
+        >
+          <History aria-hidden size={15} />
+        </button>
+      )}
+      {props.onPalette && (
+        // Command Center: la paleta siempre a la vista, no solo en la pantalla de inicio. En barras angostas queda solo la lupa.
+        <button
+          onClick={props.onPalette}
+          title={`Buscar sesión o acción (${modLabel}K)`}
+          aria-label="Buscar sesión o acción"
+          aria-keyshortcuts={isMac ? "Meta+K" : "Control+Shift+K"}
+          data-command-center=""
+          className="mb-[5px] mx-1 h-6 w-7 @[760px]:w-[260px] shrink-0 flex items-center justify-center @[760px]:justify-start gap-2 @[760px]:px-2 rounded-md border border-line bg-panel text-[12px] text-muted hover:text-fg hover:border-field-line"
+        >
+          <Search aria-hidden size={13} className="shrink-0" />
+          <span className="hidden @[760px]:inline flex-1 min-w-0 truncate text-left">Buscar sesión o acción</span>
+          <kbd className="hidden @[760px]:inline shrink-0 text-[11px] font-sans">{modLabel}K</kbd>
+        </button>
+      )}
       {onSplit && (
         <button
           onClick={(e) => {

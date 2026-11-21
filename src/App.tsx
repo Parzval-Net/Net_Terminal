@@ -1,4 +1,4 @@
-import { type ReactNode, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { moveItem } from "./lib/tabDrag";
 import {
   addSessions,
@@ -31,16 +31,17 @@ import { errText, failText } from "./lib/errors";
 import { TerminalView, TermController } from "./components/TerminalView";
 import type { CredChange } from "./components/SessionModal";
 import { ConfirmDialog } from "./components/ConfirmDialog";
-import { hopCloseNote, runningHops } from "./lib/hopTab";
+import { hopCloseNote, runningHops } from "./lib/hopRegistry";
 import { CloseManyMessage } from "./components/CloseManyMessage";
 import { CloseScope, summarizeClose, tabsToClose } from "./lib/closeAll";
 import { NotesPanel } from "./components/NotesPanel";
 import { CommandsPanel } from "./components/CommandsPanel";
-import { vendorFor } from "./lib/commands";
+import { vendorFor } from "./lib/vendorFor";
 import { CatalogEntry, Pack, PackCommand, Risk, buildCatalog, computeRisk, orderPacks, riskLabel, validatePack } from "./lib/packs";
 import type { ScpRequest } from "./components/tools/FileManager";
 
 import { TemplateDialog, templateVars } from "./components/TemplateDialog";
+import type { FilledTemplate } from "./lib/templateFill";
 import { compile, effectiveRules, onSlowRule } from "./lib/highlight";
 import { allFolders } from "./lib/folders";
 import { useMonitors } from "./lib/monitors";
@@ -51,9 +52,11 @@ import type { ScriptLaunch } from "./components/ScriptLaunchDialog";
 import type { Section } from "./components/SettingsModal";
 import type { Macro } from "./lib/settings";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { BookOpen, NotebookPen, Pin, Search as SearchIcon, Sparkles, SquareTerminal, Wrench, X as XIcon, Zap, Plus } from "lucide-react";
+import { History, Pin, Search as SearchIcon, Sparkles, SquareTerminal, Upload, Wrench, X as XIcon, Zap, Plus } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ConnStatus, Session, Tab, TabState, historyKey, tabTitle } from "./types";
+import { ConnStatus, Session, Tab, TabState, historyKey, sessionTarget, tabTitle } from "./types";
+import { matchConnect, parseQuick, quickTarget } from "./lib/quickTarget";
 import { closeAllLabel, focusLabel, highlightLabel, historyLabel, isMac, localOsVendor, markHereLabel, modLabel, nextMarkLabel, prevMarkLabel } from "./lib/platform";
 import { presets, resolvePreset, useSystemDark } from "./lib/theme";
 import { DataNotices, Settings, logOptions, useSettings } from "./lib/settings";
@@ -63,6 +66,7 @@ import { useShortcuts } from "./lib/useShortcuts";
 import { useAppLayout } from "./lib/useAppLayout";
 import { useTabPlatform } from "./lib/useTabPlatform";
 import { BroadcastBar, BroadcastDialog } from "./components/BroadcastDialog";
+import { BroadcastBanner } from "./components/BroadcastTarget";
 import { Resolved, getBroadcastRun, isBroadcastRunning, publishWorkspace, stopBroadcast, resolveTargets, runBroadcast, targetLabel, useBroadcastTarget, useWorkspace } from "./lib/broadcast";
 import { closeLab, isLabRunning, labOwns, openLab, useLabOpen } from "./lib/cliLab";
 import { persist, stored } from "./lib/prefs";
@@ -71,7 +75,8 @@ import { SplitLayout, SplitState, fillPanes, paneRect } from "./lib/split";
 import logo from "./assets/logo.svg";
 import { plural } from "./lib/plural";
 import { useVaultAutoLock } from "./lib/vaultLock";
-import { isQuickSession } from "./components/SessionIcon";
+import { useModal } from "./lib/useModal";
+import { QuickBolt, SessionIcon, isQuickSession, typeLabel } from "./components/SessionIcon";
 import "./App.css";
 
 // Vistas pesadas y de uso ocasional: se cargan aparte para aligerar el arranque.
@@ -199,7 +204,7 @@ function Workspace({
     defaultCancel?: boolean;
     action: () => void;
   } | null>(null);
-  const [template, setTemplate] = useState<{ text: string; then: (filled: string) => void } | null>(null);
+  const [template, setTemplate] = useState<{ text: string; then: (filled: FilledTemplate) => void } | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [states, setStates] = useState<Record<string, TabState>>({});
@@ -209,6 +214,8 @@ function Workspace({
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  /** "Conectar como…": sesión guardada para la que se pide otro usuario (null: cerrado). */
+  const [openAs, setOpenAs] = useState<Session | null>(null);
   const labOpen = useLabOpen();
   /** Exportar sesiones: undefined cerrado, "" todas, o la carpeta preseleccionada. */
   const [exportFolder, setExportFolder] = useState<string | undefined>(undefined);
@@ -375,6 +382,26 @@ function Workspace({
   useEffect(() => {
     if (activeId && activeId !== "tools") lastTermRef.current = activeId;
   }, [activeId]);
+  // Paleta (Command Center): si al cerrarla quedó otra pestaña activa (abrió una sesión o eligió una),
+  // el foco va a esa terminal. useModal devuelve el foco a quien abrió la paleta y, sin esto, el
+  // botón del Command Center se quedaba con el foco y la terminal sin cursor.
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const paletteFromRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (paletteOpen) paletteFromRef.current = activeIdRef.current;
+  }, [paletteOpen]);
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    requestAnimationFrame(() => {
+      const id = activeIdRef.current;
+      if (!id || id === "tools" || id === paletteFromRef.current) return;
+      // Solo si el foco quedó en el Command Center o en ninguna parte (una acción pudo abrir un diálogo o campo).
+      const a = document.activeElement;
+      if (a && a !== document.body && !a.closest("[data-command-center]")) return;
+      controllers.current.get(id)?.focus();
+    });
+  }, []);
 
   const monitors = useMonitors(settings.monitors, toast);
 
@@ -528,6 +555,25 @@ function Workspace({
     focusPaneRef.current = pane;
     if (tabId) setActiveId(tabId);
   };
+  /**
+   * "Conectar en vista dividida" (árbol): abre la sesión en un panel. Sin vista dividida la activa en
+   * 2 paneles lado a lado (la terminal que se veía a la izquierda); con ella, ocupa el primer panel vacío
+   * o, si no hay, el que sigue al panel con foco (el que se veía no se reemplaza).
+   */
+  const openSplit = (session: Session) => {
+    const prev = activeId !== "tools" ? activeId : lastTermRef.current;
+    const keep = prev && tabs.some((t) => t.id === prev) ? prev : null;
+    const id = openTab(session);
+    setSplit((s) => {
+      if (!s) return { layout: "cols", panes: keep ? [keep, id] : [id, null] };
+      const panes = [...s.panes];
+      const free = panes.indexOf(null);
+      const i = free >= 0 ? free : (focusPaneRef.current + 1) % panes.length;
+      panes[i] = id;
+      focusPaneRef.current = i;
+      return { ...s, panes };
+    });
+  };
   const visibleKey = splitOn ? split!.panes.filter(Boolean).join(",") : null;
   const visiblePanes = useMemo(() => (visibleKey === null ? null : visibleKey.split(",").filter(Boolean)), [visibleKey]);
 
@@ -590,7 +636,7 @@ function Workspace({
   const bcTarget = useBroadcastTarget();
   const broadcastMode = bcTarget.mode !== "current";
   const workspace = useWorkspace();
-  const [broadcast, setBroadcast] = useState<{ text: string; resolved: Resolved; declared?: Risk } | null>(null);
+  const [broadcast, setBroadcast] = useState<{ text: string; shown?: string; resolved: Resolved; declared?: Risk } | null>(null);
   const [bcDelay, setBcDelay] = useState(() => stored("broadcastDelay", 300));
   useEffect(() => persist("broadcastDelay", bcDelay), [bcDelay]);
   useEffect(() => {
@@ -622,11 +668,12 @@ function Workspace({
           ? `Conectando ${tabTitle(activeTab)}…`
           : `${tabTitle(activeTab)} está desconectada. Reconecta para ejecutar.`;
   const returnToTerminal = activeId === "tools" && lastTermTab ? () => setActiveId(lastTermTab.id) : undefined;
-  const openBroadcast = (text: string, declared?: Risk) => {
+  /** `shown`: texto con los secretos de la plantilla enmascarados, para la confirmación (se envía `text`). */
+  const openBroadcast = (text: string, declared?: Risk, shown?: string) => {
     if (isBroadcastRunning()) return toast("Hay un envío a varias sesiones en curso", "error");
     if (isLabRunning()) return toast("El CLI Lab está ejecutando un script: espera a que termine o usa Detener", "error");
     const resolved = resolveTargets(bcTarget, tabs, (id) => states[id]?.status, activeId, visiblePanes);
-    setBroadcast({ text, resolved, declared });
+    setBroadcast({ text, shown, resolved, declared });
   };
   const startBroadcast = (deviceDelayMs: number) => {
     if (!broadcast) return;
@@ -803,9 +850,10 @@ function Workspace({
   /** `checked`: el riesgo ya se confirmó (catálogo) y no se vuelve a preguntar. */
   const sendToSession = (text: string, checked = false, declared?: Risk) => {
     // Las variables {{...}} se piden una sola vez, también al enviar a varias sesiones.
-    const then = (t: string) => (broadcastMode ? openBroadcast(t, declared) : sendResolved(t, checked));
+    // Con secretos en la plantilla, la confirmación muestra ••••••, y el envío no va al historial.
+    const then = (f: FilledTemplate) => (broadcastMode ? openBroadcast(f.text, declared, f.shown) : sendResolved(f.text, checked, activeId, f));
     if (templateVars(text).length) return setTemplate({ text, then });
-    then(text);
+    then({ text, shown: text, secret: false });
   };
 
   /**
@@ -814,12 +862,13 @@ function Workspace({
    * es esa pestaña y ninguna otra.
    */
   const sendToTab = (tabId: string, text: string, checked = false) => {
-    const then = (t: string) => sendResolved(t, checked, tabId);
+    const then = (f: FilledTemplate) => sendResolved(f.text, checked, tabId, f);
     if (templateVars(text).length) return setTemplate({ text, then });
-    then(text);
+    then({ text, shown: text, secret: false });
   };
 
-  const sendResolved = (text: string, checked = false, tabId: string | null = activeId) => {
+  /** `filled`: viene de una plantilla; se muestra su versión enmascarada y, con secretos, no va al historial. */
+  const sendResolved = (text: string, checked = false, tabId: string | null = activeId, filled?: FilledTemplate) => {
     const target = tabs.find((t) => t.id === tabId);
     const ctrl = tabId ? controllers.current.get(tabId) : undefined;
     if (!ctrl || !target || !ctrl.isConnected()) return;
@@ -837,7 +886,8 @@ function Workspace({
       if (target.id !== activeId) setActiveId(target.id);
       ctrl.focus();
       // Historial por equipo: solo envíos explícitos (Notas, catálogo, botones), nunca teclas.
-      if (!session.scp) cmdHistoryAdd(historyKey(session), trimmed).catch(() => {});
+      // Con variables secretas ({{tacacs_key}}, {{auth}}) el texto lleva el valor real: no se guarda en disco.
+      if (!session.scp && !filled?.secret) cmdHistoryAdd(historyKey(session), trimmed).catch(() => {});
     };
     const remote = session.type !== "local";
     // Notas y botones pasan por el mismo motor de riesgo que el catálogo. Lo que puede
@@ -845,7 +895,8 @@ function Workspace({
     const risk = remote && !checked ? computeRisk(trimmed) : "read";
     const ask = remote && (risk === "disruptive" || (settings.confirmSend && (lines.length > 1 || risk === "change")));
     if (ask) {
-      const preview = lines.slice(0, 6).join("\n") + (lines.length > 6 ? "\n…" : "");
+      const shownLines = filled?.secret ? filled.shown.replace(/\s+$/, "").split("\n") : lines;
+      const preview = shownLines.slice(0, 6).join("\n") + (shownLines.length > 6 ? "\n…" : "");
       setConfirm({
         title:
           risk === "disruptive"
@@ -1031,6 +1082,17 @@ function Workspace({
     openMany: (list: Session[]) =>
       list.forEach((s, i) => (i < 5 ? openTab(s) : window.setTimeout(() => openTab(s), Math.floor(i / 5) * 1500))),
     newSession: (folder?: string) => setModal({ folder }),
+    openSplit,
+    openAs: (s: Session) => setOpenAs(s),
+    /**
+     * Conecta con otro usuario sin tocar la sesión guardada: la pestaña lleva una copia con el usuario
+     * nuevo y sin `save_password`, así el backend no autocompleta la contraseña guardada (que es de
+     * otro usuario) y el equipo la pide.
+     */
+    connectAs: (s: Session, username: string) => {
+      setOpenAs(null);
+      openTab({ ...s, username, save_password: undefined }, { title: `${s.name} (${username})` });
+    },
     openQuick: () => setQuickOpen(true),
     saveTabAs: (id: string) => {
       const t = tabs.find((x) => x.id === id);
@@ -1106,7 +1168,7 @@ function Workspace({
     typeCommand: (cmd: string) => {
       if (activeTab?.readOnly) return toast("La pestaña está en solo lectura: no se escribe nada en el equipo", "error");
       const type = (text: string) => activeCtrl()?.type(text);
-      if (templateVars(cmd).length) setTemplate({ text: cmd, then: type });
+      if (templateVars(cmd).length) setTemplate({ text: cmd, then: (f) => type(f.text) });
       else type(cmd);
     },
     addCommand: (vendor: string) => setCmdEdit({ vendor }),
@@ -1231,15 +1293,39 @@ function Workspace({
     },
   });
 
+  // Buscar e Historial de la pestaña activa: abren o cierran. Los usan la barra de pestañas y la de estado.
+  const toggleFind = () => (activeId && findOpenIds[activeId] ? controllers.current.get(activeId)?.closeFind() : h.find());
+  const toggleHistory = () => (historyFor ? h.closeHistory() : h.openHistory());
+  // Acciones de TabBar, VerticalTabs y StatusBar con identidad estable: con flechas nuevas en cada
+  // render su memo no servía y se volvían a dibujar con cada muestra de monitoreo o cambio de App.
+  const bars = useHandlers({
+    focusTab: (id: string) => {
+      if (id === activeId) controllers.current.get(id)?.focus();
+    },
+    palette: () => setPaletteOpen(true),
+    toggleFind,
+    toggleHistory,
+    saveActiveAs: () => {
+      if (activeTab) h.saveTabAs(activeTab.id);
+    },
+    toggleActiveReadOnly: () => {
+      if (activeTab) h.toggleReadOnly(activeTab.id);
+    },
+  });
+  // Pestaña de la que viene Herramientas (para su barra de estado): mismo objeto mientras no cambie.
+  const lastTermState = lastTermTab ? states[lastTermTab.id] : undefined;
+  const toolsBrief = useMemo(
+    () => (activeId === "tools" ? { tab: lastTermTab, state: lastTermState } : undefined),
+    [activeId, lastTermTab, lastTermState],
+  );
+
   // Mismos datos y acciones para la barra horizontal y la columna de pestañas verticales.
   const tabBarProps: TabBarProps = {
     tabs,
     states,
     activeId,
     onSelect: setActiveId,
-    onFocusTab: (id) => {
-      if (id === activeId) controllers.current.get(id)?.focus();
-    },
+    onFocusTab: bars.focusTab,
     onClose: h.requestClose,
     onCloseMany: h.requestCloseMany,
     onNew: newLocal,
@@ -1273,6 +1359,12 @@ function Workspace({
     alerted,
     tabLayout: settings.tabLayout,
     onTabLayout: h.setTabLayout,
+    onPalette: bars.palette,
+    onToggleFind: bars.toggleFind,
+    findOpen: !!activeId && !!findOpenIds[activeId],
+    onToggleHistory: bars.toggleHistory,
+    historyOpen: !!historyFor,
+    splitPanes: splitOn ? split!.panes : null,
   };
 
   const sidebarEl = (extra: Partial<React.ComponentProps<typeof Sidebar>> = {}) => (
@@ -1298,6 +1390,8 @@ function Workspace({
           onConfirm={setConfirm}
           onImportFile={h.openImport}
           onExportFile={h.openExport}
+          onOpenSplit={h.openSplit}
+          onOpenAs={h.openAs}
           {...extra}
         />
   );
@@ -1355,6 +1449,8 @@ function Workspace({
           <div className="flex-1 min-h-0">
             {sidebarEl({
               onOpen: (x: Session) => (setPeek(false), openTab(x)),
+              onOpenSplit: (x: Session) => (setPeek(false), h.openSplit(x)),
+              onOpenAs: (x: Session) => (setPeek(false), h.openAs(x)),
               onOpenMany: (x: Session[]) => (setPeek(false), h.openMany(x)),
               onNew: (f?: string) => (setPeek(false), h.newSession(f)),
               onQuickConnect: () => (setPeek(false), h.openQuick()),
@@ -1414,6 +1510,7 @@ function Workspace({
         )}
         <BroadcastBar />
         <TabBar {...tabBarProps} />
+        {activeId !== "tools" && <BroadcastBanner />}
 
         <div ref={rowRef} className="relative flex-1 min-h-0 flex">
         {settings.tabLayout === "vertical" && <VerticalTabs {...tabBarProps} />}
@@ -1472,13 +1569,14 @@ function Workspace({
           )}
           {tabs.length === 0 && activeId !== "tools" && (
             <EmptyState
+              sessions={sessions}
+              onOpen={openTab}
               onLocal={newLocal}
               onPalette={() => setPaletteOpen(true)}
               onQuick={h.openQuick}
               onNew={() => setModal({})}
+              onImport={h.openImport}
               onTools={h.toggleTools}
-              onCommands={h.toggleCommands}
-              onNotes={h.toggleNotes}
             />
           )}
         </div>
@@ -1548,22 +1646,20 @@ function Workspace({
           />
         )}
 
-        {!focusMode && <StatusBar
+        {/* Pantalla de inicio: sin pestaña la barra de estado no tiene nada que informar y queda como franja
+            vacía; solo se muestra si el servidor MCP está activo (su indicador vive ahí). */}
+        {!focusMode && (!!activeTab || activeId === "tools" || settings.mcpEnabled) && <StatusBar
           tab={activeTab}
           device={settings.lifecycleInfo && activeId ? tabDevice[activeId] : undefined}
           state={activeId ? states[activeId] : undefined}
           onToggleLog={h.toggleLog}
           onReconnect={h.reconnect}
-          onDisconnect={h.disconnect}
           aiEnabled={settings.mcpEnabled}
           aiWindows={mcp.windows.length}
           onAi={h.openAi}
-          onSaveAs={activeTab ? () => h.saveTabAs(activeTab.id) : undefined}
-          findOpen={!!activeId && !!findOpenIds[activeId]}
-          onFind={() => (activeId && findOpenIds[activeId] ? controllers.current.get(activeId)?.closeFind() : h.find())}
-          onHistory={() => (historyFor ? h.closeHistory() : h.openHistory())}
-          historyOpen={!!historyFor}
-          onToggleReadOnly={activeTab ? () => h.toggleReadOnly(activeTab.id) : undefined}
+          onSaveAs={activeTab ? bars.saveActiveAs : undefined}
+          onToggleReadOnly={activeTab ? bars.toggleActiveReadOnly : undefined}
+          tools={toolsBrief}
         />}
       </main>
 
@@ -1631,7 +1727,7 @@ function Workspace({
       )}
       {broadcast && (
         <BroadcastDialog
-          text={broadcast.text}
+          text={broadcast.shown ?? broadcast.text}
           resolved={broadcast.resolved}
           declared={broadcast.declared}
           delayMs={bcDelay}
@@ -1674,6 +1770,7 @@ function Workspace({
           onDelete={cmdEdit.initial ? () => saveUserCommand(cmdEdit.vendor, null, cmdEdit.initial!.cmd) : undefined}
         />
       )}
+      {openAs && <OpenAsDialog session={openAs} onCancel={() => setOpenAs(null)} onConnect={(user) => h.connectAs(openAs, user)} />}
       {template !== null && (
         <TemplateDialog
           text={template.text}
@@ -1688,6 +1785,7 @@ function Workspace({
       {labOpen && (
         <CliLab
           key={labOpen.n}
+          initialScript={labOpen.script}
           // Comando de guardado según el fabricante de la pestaña activa (su resaltado), no el del catálogo.
           vendor={activeTab && activeTab.session.highlight && activeTab.session.highlight !== "default" ? vendorFor(activeTab.session.highlight) : settings.catalogVendor}
           compiled={notesRules}
@@ -1711,7 +1809,7 @@ function Workspace({
       {paletteOpen && (
         <CommandPalette
           sessions={sessions}
-          onClose={() => setPaletteOpen(false)}
+          onClose={closePalette}
           onOpen={openTab}
           actions={[
             // Acciones de la sesión activa que ya no están en la barra de estado.
@@ -1736,7 +1834,7 @@ function Workspace({
                     : []),
                   states[activeTab.id]?.status === "closed"
                     ? { label: "Reconectar sesión", detail: "Vuelve a conectar la pestaña activa", run: () => h.reconnect() }
-                    : { label: "Desconectar sesión", detail: "Corta la conexión; la pestaña queda abierta", run: () => h.disconnect() },
+                    : { label: "Desconectar sesión", detail: "Corta la conexión; la pestaña queda abierta", danger: true, run: () => h.disconnect() },
                 ]
               : []),
             { label: "Modo foco", detail: focusMode ? "Salir: vuelve a mostrar barras y paneles" : "Oculta barras y paneles: solo pestañas y terminal", shortcut: focusLabel, run: h.toggleFocus },
@@ -1779,6 +1877,7 @@ function Workspace({
                     label: "Cerrar todas las sesiones",
                     detail: `${tabs.length} ${tabs.length === 1 ? "pestaña abierta" : "pestañas abiertas"}; pide confirmación si hay conexiones activas`,
                     shortcut: closeAllLabel,
+                    danger: true,
                     run: () => requestCloseMany("all"),
                   },
                 ]
@@ -1797,7 +1896,7 @@ function Workspace({
           focusFallback={() => activeCtrl()?.focus()}
         />
       )}
-      {quickOpen && <QuickConnectDialog onClose={() => setQuickOpen(false)} onOpen={openTab} />}
+      {quickOpen && <QuickConnectDialog onClose={() => setQuickOpen(false)} onOpen={openTab} onSave={(s) => saveSession(s, true)} folders={folders} />}
     </div>
   );
 }
@@ -1815,54 +1914,264 @@ function ToolsLoading({ active }: { active: boolean }) {
   );
 }
 
+/**
+ * "Conectar como…": pide un usuario distinto para una sesión guardada. No ofrece la contraseña ni la
+ * guarda: la conexión la pide el equipo y la sesión guardada queda igual.
+ */
+function OpenAsDialog({ session, onConnect, onCancel }: { session: Session; onConnect: (user: string) => void; onCancel: () => void }) {
+  const modal = useModal({ onClose: onCancel });
+  const hintId = useId();
+  const [user, setUser] = useState("");
+  const value = user.trim();
+  return (
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onCancel}>
+      <form
+        {...modal.dialog}
+        className="w-[400px] max-w-full bg-panel border border-line rounded-xl shadow-pop p-5"
+        onMouseDown={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (value) onConnect(value);
+        }}
+      >
+        <h2 id={modal.titleId} className="text-[14px] font-semibold mb-1">
+          Conectar como…
+        </h2>
+        <p id={hintId} className="text-muted text-[12px] mb-4">
+          {session.name} ({sessionTarget(session)}). La sesión guardada no cambia y su contraseña no se usa: el equipo la pedirá.
+        </p>
+        <label className="block">
+          <span className="block text-[12px] font-medium mb-1">Usuario</span>
+          <input
+            className="field w-full"
+            autoFocus
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby={hintId}
+            placeholder={session.username ? `Distinto de ${session.username}` : "Usuario"}
+            value={user}
+            onChange={(e) => setUser(e.target.value)}
+          />
+        </label>
+        <div className="flex justify-end gap-2 mt-5">
+          <button type="button" onClick={onCancel} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover">
+            Cancelar
+          </button>
+          {/* Deshabilitado neutro, como Btn primario de tools/ui. */}
+          <button
+            type="submit"
+            disabled={!value}
+            className="px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90 disabled:bg-hover disabled:text-muted disabled:pointer-events-none"
+          >
+            Conectar
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/**
+ * Pantalla de inicio (sin pestañas). Una sola tarea principal, conectarse, con el campo "Conectar a…"
+ * (sesión guardada o user@host, como la paleta) y los destinos recientes a un clic. El resto queda en
+ * segundo plano: nueva sesión, importar desde otra app, terminal local, Herramientas y la paleta.
+ */
 function EmptyState({
+  sessions,
+  onOpen,
   onLocal,
   onPalette,
   onQuick,
   onNew,
+  onImport,
   onTools,
-  onCommands,
-  onNotes,
 }: {
+  sessions: Session[];
+  onOpen: (s: Session) => void;
   onLocal: () => void;
   onPalette: () => void;
   onQuick: () => void;
   onNew: () => void;
+  onImport: () => void;
   onTools: () => void;
-  onCommands: () => void;
-  onNotes: () => void;
 }) {
-  // Mismos nombres, íconos y atajos que la barra de actividad y la paleta: una sola forma de llamar a cada cosa.
-  const items: [React.ReactNode, React.ReactNode, string, () => void][] = [
-    [<Zap size={15} />, "Conexión rápida sin guardar", `${modLabel}O`, onQuick],
-    [<SearchIcon size={15} />, "Buscar sesión", `${modLabel}K`, onPalette],
-    [<Plus size={15} />, "Nueva sesión guardada", `${modLabel}N`, onNew],
-    [<SquareTerminal size={15} />, "Terminal local", `${modLabel}T`, onLocal],
-    [<Wrench size={15} />, "Herramientas de red", `${modLabel}E`, onTools],
-    [<BookOpen size={15} />, "Catálogo de comandos", `${modLabel}L`, onCommands],
-    [<NotebookPen size={15} />, "Notas", `${modLabel}J`, onNotes],
+  const id = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
+  const [index, setIndex] = useState(0);
+  const [error, setError] = useState(false);
+  // Últimos destinos de conexión rápida (los mismos que la paleta y Conexión rápida).
+  const [recent, setRecent] = useState<Session[]>([]);
+  useEffect(() => {
+    invoke<string[]>("recent_targets")
+      .then((list) => setRecent(list.map((t) => parseQuick(t)[0]).filter((x): x is Session => !!x).slice(0, 5)))
+      .catch(() => {});
+  }, []);
+  // Foco inicial en el campo, salvo que otro control ya lo tenga (un diálogo abierto al iniciar, por ejemplo).
+  useEffect(() => {
+    if (!document.activeElement || document.activeElement === document.body) inputRef.current?.focus();
+  }, []);
+
+  const matches = useMemo(() => matchConnect(query, sessions), [query, sessions]);
+  useEffect(() => {
+    setIndex(0);
+    setError(false);
+  }, [query]);
+  const listId = `${id}-list`;
+  const hintId = `${id}-hint`;
+  const open = (s: Session, quick: boolean) => {
+    if (quick) invoke("recent_target_add", { target: quickTarget(s) }).catch(() => {});
+    onOpen(s);
+  };
+  const submit = () => {
+    const m = matches[index];
+    if (m) open(m.session, m.quick);
+    else if (query.trim()) setError(true);
+  };
+
+  const secondary: [React.ReactNode, string, string | null, () => void][] = [
+    [<Plus size={14} />, "Nueva sesión", `${modLabel}N`, onNew],
+    [<Upload size={14} />, "Importar sesiones", null, onImport],
+    [<SquareTerminal size={14} />, "Terminal local", `${modLabel}T`, onLocal],
+    [<Wrench size={14} />, "Herramientas", `${modLabel}E`, onTools],
   ];
-  // m-auto en vez de place-items-center: con poca altura la lista se desplaza en lugar de cortarse arriba.
+  // m-auto en vez de place-items-center: con poca altura el contenido se desplaza en lugar de cortarse arriba.
   return (
     <div className="absolute inset-0 flex overflow-y-auto">
-      <div className="w-[340px] max-w-full m-auto px-4 py-4">
-        <img src={logo} alt="" className="w-16 h-16 -ml-2 mb-2 [@media(max-height:560px)]:hidden" draggable={false} />
-        <h1 className="text-[18px] font-semibold mb-1">NetTerminal</h1>
-        <p className="text-muted mb-4">SSH, Telnet y Serial sin complicaciones.</p>
-        <div className="space-y-0.5">
-          {items.map(([icon, label, key, fn], i) => (
+      <div className="w-[480px] max-w-full m-auto px-4 py-6">
+        <div className="flex items-center gap-3 mb-5 [@media(max-height:560px)]:mb-3">
+          <img src={logo} alt="" className="w-10 h-10 shrink-0 [@media(max-height:560px)]:hidden" draggable={false} />
+          <h1 className="text-[18px] font-semibold">NetTerminal</h1>
+        </div>
+
+        <label htmlFor={`${id}-input`} className="block mb-1.5 font-medium">
+          Conectar a…
+        </label>
+        <div className="relative">
+          <Zap aria-hidden size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+          <input
+            ref={inputRef}
+            id={`${id}-input`}
+            role="combobox"
+            aria-expanded={matches.length > 0}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={matches.length ? `${id}-opt-${index}` : undefined}
+            aria-describedby={hintId}
+            aria-invalid={error || undefined}
+            autoComplete="off"
+            spellCheck={false}
+            className="field !h-10 !pl-9 !text-[14px]"
+            placeholder="user@host, IP o sesión"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setIndex((i) => Math.min(i + 1, matches.length - 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setIndex((i) => Math.max(i - 1, 0));
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              } else if (e.key === "Escape" && query) {
+                e.preventDefault();
+                setQuery("");
+              }
+            }}
+          />
+          {/* Lista superpuesta bajo el campo: Recientes y las demás acciones no se corren al escribir. */}
+          {matches.length > 0 && (
+          <ul id={listId} role="listbox" aria-label="Destinos" className="absolute z-10 left-0 right-0 top-full mt-1 p-1 max-h-60 overflow-y-auto bg-panel border border-line rounded-lg shadow-pop">
+            {matches.map(({ session: s, quick }, i) => (
+              <li
+                key={quick ? `quick-${s.type}` : s.id}
+                id={`${id}-opt-${i}`}
+                role="option"
+                aria-selected={i === index}
+                onMouseMove={() => setIndex(i)}
+                // mousedown: el campo no pierde el foco antes de abrir.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => open(s, quick)}
+                className={`flex items-center gap-2.5 px-2.5 h-9 rounded-md cursor-default ${
+                  i === index ? "bg-selected shadow-[inset_2px_0_0_0_var(--accent)]" : ""
+                }`}
+              >
+                {quick ? <QuickBolt size={14} /> : <SessionIcon type={s.type} size={14} />}
+                <span className="flex-1 min-w-0 truncate">
+                  {quick ? `Conexión rápida ${typeLabel[s.type]}` : s.name}
+                  <span className="text-muted">
+                    {" · "}
+                    {sessionTarget(s)}
+                    {!quick && s.folder ? ` · ${s.folder}` : ""}
+                  </span>
+                </span>
+                <span className="text-[11px] font-medium text-muted uppercase">{typeLabel[s.type]}</span>
+              </li>
+            ))}
+          </ul>
+          )}
+        </div>
+        <p id={hintId} role={error ? "alert" : undefined} className={`mt-1.5 text-[11.5px] ${error ? "text-danger" : "text-muted"}`}>
+          {error ? (
+            <>
+              No hay una sesión con ese nombre ni un destino válido. Prueba con <code>admin@10.0.0.1</code> o <code>telnet host 23</code>.
+            </>
+          ) : (
+            <>
+              Enter conecta por SSH; escribe <code>telnet host</code> para Telnet.{" "}
+              <button type="button" onClick={onQuick} className="underline underline-offset-2 hover:text-fg rounded-sm">
+                Serial u opciones avanzadas ({modLabel}O)
+              </button>
+            </>
+          )}
+        </p>
+
+        {recent.length > 0 && (
+          <section aria-labelledby={`${id}-recent`} className="mt-5">
+            <h2 id={`${id}-recent`} className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
+              Recientes
+            </h2>
+            <ul className="space-y-0.5">
+              {recent.map((s, i) => (
+                <li key={`${quickTarget(s)}-${i}`}>
+                  <button
+                    onClick={() => open(s, true)}
+                    title={`Conectar a ${sessionTarget(s)} (${typeLabel[s.type]})`}
+                    className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md hover:bg-hover text-left"
+                  >
+                    <History aria-hidden size={14} className="text-muted shrink-0" />
+                    <span className="flex-1 min-w-0 truncate">{sessionTarget(s)}</span>
+                    <span className="text-[11px] font-medium text-muted uppercase">{typeLabel[s.type]}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <nav aria-label="Otras acciones" className="mt-5 pt-4 border-t border-line flex flex-wrap gap-x-1 gap-y-0.5 text-[12.5px]">
+          {secondary.map(([icon, label, key, fn]) => (
             <button
-              key={i}
+              key={label}
               onClick={fn}
-              title={`${label} (${key})`}
-              className="w-full flex items-center gap-2.5 px-3 h-9 rounded-lg hover:bg-hover text-left"
+              title={key ? `${label} (${key})` : label}
+              className="flex items-center gap-1.5 h-7 px-2 rounded-md text-muted hover:text-fg hover:bg-hover"
             >
-              <span aria-hidden className="text-muted shrink-0">{icon}</span>
-              <span className="flex-1 min-w-0 truncate">{label}</span>
-              <kbd className="text-[11px] text-muted font-sans">{key}</kbd>
+              <span aria-hidden className="shrink-0">{icon}</span>
+              {label}
             </button>
           ))}
-        </div>
+        </nav>
+        <button
+          onClick={onPalette}
+          className="mt-2 flex items-center gap-1.5 h-7 px-2 rounded-md text-[12.5px] text-muted hover:text-fg hover:bg-hover"
+        >
+          <SearchIcon aria-hidden size={14} className="shrink-0" />
+          Todo lo demás:
+          <kbd className="font-sans text-fg">{modLabel}K</kbd>
+        </button>
       </div>
     </div>
   );

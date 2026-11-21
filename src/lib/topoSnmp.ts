@@ -618,9 +618,26 @@ export interface SnmpDiscovery {
   ifIndex: Map<string, number>;
   /** LLDP y CDP vacíos: el protocolo está apagado en el equipo (o el agente no expone la MIB). */
   l2Empty: boolean;
+  /**
+   * Protocolos (CDP, LLDP) leídos completos y con vecinos: solo de esos se da por retirado un enlace
+   * que el equipo dejó de informar. Una tabla vacía no cuenta (por SNMP no se distingue "sin vecinos"
+   * de "el agente no publica esa MIB"), ni una cortada por tiempo, tope de filas o error.
+   */
+  complete: ("CDP" | "LLDP")[];
+  /** ifName e ifDescr leídas completas: el índice de interfaces se puede guardar para el tráfico. */
+  ifIndexComplete: boolean;
   /** Avisos legibles: tablas parciales, topes y errores. */
   notes: string[];
 }
+
+/** Las tablas pedidas (todas, o solo las de `oids`) se leyeron completas: sin corte por tiempo, tope de filas ni error. */
+export function walksComplete(r: TopoRead, oids?: readonly string[]): boolean {
+  const ws = oids ? r.walks.filter((w) => oids.includes(w.oid)) : r.walks;
+  return ws.every((w) => !w.timedOut && !w.truncated && !w.error);
+}
+
+const LLDP_WALKS: string[] = [OID.lldpRemChassisIdSubtype, OID.lldpRemChassisId, OID.lldpRemPortIdSubtype, OID.lldpRemPortId, OID.lldpRemSysName];
+const CDP_WALKS: string[] = [OID.cdpCacheDeviceId, OID.cdpCacheDevicePort];
 
 /** Avisos por tabla: tiempo agotado, tope de filas o error (sin repetir el mismo error). */
 export function walkNotes(r: TopoRead): string[] {
@@ -733,6 +750,11 @@ export function parseSnmpDiscovery(r: TopoRead, o: SnmpPlanOptions, vlanReads: V
     arpRows: o.mac ? arpFromSnmp(r, self) : [],
     ifIndex: ifIndexByPort(names),
     l2Empty: !lldp.length && !cdp.length,
+    complete: [
+      ...(cdp.length && walksComplete(r, CDP_WALKS) ? (["CDP"] as const) : []),
+      ...(lldp.length && walksComplete(r, lldp1.length ? LLDP_WALKS : LLDP_V2_FALLBACK) ? (["LLDP"] as const) : []),
+    ],
+    ifIndexComplete: walksComplete(r, [OID.ifName, OID.ifDescr]),
     notes: [...walkNotes(r), ...vlanReads.flatMap((v) => walkNotes(v.read).map((n) => `VLAN ${v.vlan}: ${n}`))],
   };
 }

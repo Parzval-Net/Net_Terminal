@@ -31,12 +31,19 @@ export interface SecretPrompt {
 
 export type ScriptPrompt = GatePrompt | SecretPrompt;
 
+/** «!» seguido de texto al inicio: expansión de historial de bash («!!», «!rel», «!-2», «!?x»). */
+const HISTORY_EXPANSION = /^![^\s=(]/;
+
 /** Riesgo de una línea que un script quiere ejecutar. */
 export function scriptLineRisk(line: string, opaque: boolean): Risk {
   if (opaque) return "disruptive";
   const l = line.trim();
-  // Igual que la difusión: comentarios y salir de un modo no cambian nada.
-  if (!l || /^(!|#|end$|exit$|quit$|return$)/i.test(l)) return "read";
+  // Comentarios y salir de un modo no cambian nada. «!» solo es comentario suelto o como
+  // separador («!---»): en un destino con bash, «!rel» o «!!» repiten un comando del historial
+  // (no se sabe qué ejecuta, igual que un Tab) y «! reload» lo ejecuta (negación), así que
+  // esa línea la clasifica computeRisk. «#» es comentario en shells y CLIs.
+  if (!l || /^(![-=*#]*$|#|end$|exit$|quit$|return$)/i.test(l)) return "read";
+  if (HISTORY_EXPANSION.test(l)) return "disruptive";
   const risk = computeRisk(l);
   // Línea a línea se pierde el contexto: dentro de una interfaz, "shutdown" o
   // "no ip address" cortan servicio. Se evalúa como si viniera tras otra línea.

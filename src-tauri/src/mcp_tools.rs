@@ -1035,8 +1035,12 @@ fn gate(ctx: &Ctx, host: &dyn Host, tool: &str, info: &ConnInfo, session: &Sessi
     let local = session.session_type == SessionType::Local;
     if !needs_approval(ctx.cfg, local) {
         let risk = host.query_ui("risk", json!({ "command": command })).and_then(|v| v.as_str().map(str::to_string));
-        audit(ctx, host, tool, Some(&info.id), Some(&info.name), Some(command), risk.as_deref(), "sin_aprobacion");
-        return Ok(risk);
+        // Sin la política igual se pregunta lo que puede cortar servicio, como en scripts, difusión
+        // y Notas; también si la interfaz no clasificó el comando (no se sabe qué riesgo tiene).
+        if matches!(risk.as_deref(), Some("read" | "change")) {
+            audit(ctx, host, tool, Some(&info.id), Some(&info.name), Some(command), risk.as_deref(), "sin_aprobacion");
+            return Ok(risk);
+        }
     }
     let v = host.ask(&ApprovalReq { tool, connection: Some(&info.id), target: &info.name, detail: command, client: ctx.client });
     let risk = v.risk.as_deref().filter(|r| matches!(*r, "read" | "change" | "disruptive"));
@@ -1502,6 +1506,8 @@ pub(crate) mod testhost {
         pub run_delay: Duration,
         /// Comando que el equipo responde con error (run_commands se detiene ahí).
         pub fail_on: Option<String>,
+        /// Riesgo que informa la interfaz simulada para cualquier comando.
+        pub risk: &'static str,
     }
 
     pub fn session(id: &str, name: &str, t: SessionType) -> Session {
@@ -1576,6 +1582,7 @@ pub(crate) mod testhost {
                 opened: Mutex::new(vec![]),
                 run_delay: Duration::ZERO,
                 fail_on: None,
+                risk: "read",
             }
         }
     }
@@ -1645,7 +1652,7 @@ pub(crate) mod testhost {
                     }
                     json!({ "unified": out, "stats": { "added": add, "removed": rem, "same": 0 } })
                 }
-                "risk" => json!("read"),
+                "risk" => json!(self.risk),
                 _ => return None,
             })
         }
@@ -2087,6 +2094,26 @@ mod tests {
         assert_eq!(h.audits.lock().unwrap().last().unwrap()["decision"], "sin_aprobacion");
         call_ok(&lax, &h, "run_command", json!({ "connection_id": "t3#1", "command": "ls" }));
         assert_eq!(h.asked.lock().unwrap().len(), 1, "terminal local: siempre");
+    }
+
+    #[test]
+    fn disruptive_or_unclassified_asks_even_without_policy() {
+        let lax = McpConfig { require_approval: false, ..cfg() };
+        // La interfaz clasifica "reload" como corte: se pide aprobación aunque la política esté apagada.
+        let mut h = FakeHost::new();
+        h.risk = "disruptive";
+        call_ok(&lax, &h, "run_command", json!({ "connection_id": "t1#1", "command": "reload" }));
+        assert_eq!(h.asked.lock().unwrap().len(), 1);
+        assert_eq!(h.audits.lock().unwrap().last().unwrap()["decision"], "aprobado");
+        // Un cambio sigue sin diálogo con la política apagada.
+        h.risk = "change";
+        call_ok(&lax, &h, "run_command", json!({ "connection_id": "t1#1", "command": "interface Gi1/0/1" }));
+        assert_eq!(h.asked.lock().unwrap().len(), 1);
+        // Sin respuesta de la interfaz no se sabe el riesgo: también se pregunta.
+        let mut h = FakeHost::new();
+        h.ui = false;
+        call_ok(&lax, &h, "run_command", json!({ "connection_id": "t1#1", "command": "show clock" }));
+        assert_eq!(h.asked.lock().unwrap().len(), 1);
     }
 
     #[test]

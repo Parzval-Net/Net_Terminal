@@ -30,6 +30,7 @@ import { type CatalogVendor, riskLabel } from "../lib/packs";
 import { HighlightEngine, MarkEngine, type MarkInfo } from "../lib/termDecor";
 import { type PasteAnalysis, type PasteDecision, analyzePaste, pasteChunks, pasteDecision, sanitizePaste } from "../lib/pasteGuard";
 import { type TermHl, validateHl } from "../lib/termHl";
+import { forgetTermSize, publishTermSize } from "./StatusBar";
 import { HighlightDialog, LineSendBar, type LineSendOpts, type LineSendState, MarksDialog, PasteDialog, useAnnounce } from "./TermTools";
 import {
   CREDENTIALS,
@@ -102,6 +103,8 @@ const NEWLINE = { cr: "\r", lf: "\n", crlf: "\r\n" } as const;
  */
 const VERSION_CMD = /(?:^|[#>\]$%:]\s*)(?:sh\w* +(?:ver|inv)\w*|dis\w* +ver\w*|get +sys\w* +(?:stat|ver)\w*|show +(?:sysinfo|info)|fap-get-status)\b/i;
 const MAX_RECONNECTS = 30;
+/** Mensajes de credencial rechazada (OpenSSH, Cisco, Huawei, Junos, FortiOS, Telnet). */
+const AUTH_REJECTED = /permission denied|authentication failed|access denied|login incorrect|login invalid|bad password|too many authentication failures/i;
 /** Espera creciente (5, 10, 20, 40, 60 s…) para no gatillar bloqueos de cuenta en TACACS/RADIUS. */
 const reconnectSecs = (attempt: number) => Math.min(60, 5 * 2 ** Math.max(0, attempt - 1));
 
@@ -191,6 +194,11 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
   // "Visible" decide WebGL y el aviso de actividad; "active" (foco) decide el teclado.
   const activeRef = useRef(visible);
   activeRef.current = visible;
+  // Ya avisó salida nueva: App mantiene la marca de la pestaña hasta activarla (marcar de nuevo no
+  // cambia nada), así que en segundo plano no se vuelve a revisar cada bloque con hasVisibleText.
+  // Al activarla, App borra la marca y esto vuelve a revisar.
+  const notifiedRef = useRef(false);
+  if (active) notifiedRef.current = false;
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -296,6 +304,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     term.loadAddon(new WebLinksAddon((_e, uri) => openUrl(uri)));
     term.open(hostRef.current!);
     fit.fit();
+    publishTermSize(id, term.cols, term.rows);
     termRef.current = term;
     fitRef.current = fit;
     searchRef.current = search;
@@ -372,6 +381,13 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       channels = [];
     };
     let lastDataAt = 0;
+    /**
+     * La sesión llegó a estar en uso (mostró un prompt) o duró más de un minuto: recién entonces
+     * se reinicia el contador de reconexiones. Lanzar ssh no basta: si la contraseña guardada se
+     * rechaza, cada caída cuenta como un intento más y la espera crece, sin reintentar para siempre.
+     */
+    let established = false;
+    let connectedAt = 0;
     /** Tras un error de negociación SSH, "L" activa los algoritmos legacy y reconecta. */
     let legacyOffer = false;
     /** Activa legacy en la pestaña (y en la sesión guardada) y reconecta. */
@@ -434,11 +450,17 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       tail = "";
       tracker.clear();
       lastDataAt = 0;
+      established = false;
+      connectedAt = 0;
       const prevConn = connIdRef.current;
       const connId = `${id}#${++attempt}`;
       connIdRef.current = connId;
+      // La conexión anterior (cerrada por el equipo, o reemplazada al reconectar) se libera en el
+      // backend antes de abrir la nueva: si no, el puerto serial, el PTY y el log quedan tomados.
+      // disconnect también quita su marca de solo lectura.
+      if (prevConn) await invoke("disconnect", { id: prevConn }).catch(() => {});
+      if (disposed || connIdRef.current !== connId) return;
       // Solo lectura también en el backend (MCP, scripts, CLI Lab, difusión): la marca va por conexión y se pone antes de conectar.
-      if (prevConn && roSent.current) invoke("set_read_only", { id: prevConn, on: false }).catch(() => {});
       roSent.current = readOnlyRef.current;
       if (roSent.current) invoke("set_read_only", { id: connId, on: true }).catch(() => {});
       setStatus("connecting");
@@ -462,16 +484,24 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         lastDataAt = Date.now();
         const text = decoder.decode(new Uint8Array(buf), { stream: true });
         tail = (tail + text).slice(-400);
+        if (!established) {
+          const t = cleanTail();
+          if (PROMPT.test(t) && !CREDENTIALS.test(t)) established = true;
+        }
         if (tracking()) tracker.output(text, cleanTail);
         hl.push(text);
         // Solo cuenta como salida nueva el texto visible: keepalives, movimientos de cursor o un prompt
         // que se redibuja no marcan la pestaña.
-        if (!activeRef.current && hasVisibleText(text)) onActivity(id);
+        if (!activeRef.current && !notifiedRef.current && hasVisibleText(text)) {
+          notifiedRef.current = true;
+          onActivity(id);
+        }
       };
       channels = [onData as Channel<unknown>];
       const onExit = (reason: string) => {
         hl.flush();
         setStatus("closed");
+        if (established || (connectedAt && Date.now() - connectedAt > 60_000)) retries = 0;
         // Equipo antiguo: se ofrece activar los algoritmos legacy con una tecla.
         const t = cleanTail();
         legacyOffer = false;
@@ -500,6 +530,9 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
           notifyScpExit(sessionRef.current.id, reason);
           // Transferencia SCP: no se repite con Enter para no sobrescribir por accidente.
           term.write(`\r\n${dim(`── ${reason}. Transferencia terminada: puedes cerrar esta pestaña ──`)}\r\n`);
+        } else if (!manualClose && sessionRef.current.auto_reconnect && !established && AUTH_REJECTED.test(t)) {
+          // Credencial rechazada: reintentar solo con la misma contraseña puede bloquear la cuenta (TACACS, RADIUS, AD).
+          term.write(`\r\n${dim(`── ${reason}. El equipo rechazó la credencial: no se reconecta solo para no bloquear la cuenta · Enter: reintentar ──`)}\r\n`);
         } else if (!manualClose && sessionRef.current.auto_reconnect && retries < MAX_RECONNECTS) {
           retries++;
           const wait = reconnectSecs(retries);
@@ -539,7 +572,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         }
         if (statusRef.current === "connecting") {
           setStatus("connected");
-          retries = 0;
+          connectedAt = Date.now();
           runOnConnect(connId);
           // Banner y prompt inicial: una sola lectura de pantalla, fuera del camino de las teclas.
           screenSoon(2500);
@@ -972,8 +1005,12 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       invoke("write", { id: connIdRef.current, data: out }).catch(() => {});
     }
 
+    // Al equipo solo le llega el tamaño final de un arrastre (un window-change por columna redibuja su prompt).
+    let resizeTimer: number | undefined;
     term.onResize(({ cols, rows }) => {
-      invoke("resize", { id: connIdRef.current, cols, rows }).catch(() => {});
+      publishTermSize(id, cols, rows);
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => invoke("resize", { id: connIdRef.current, cols, rows }).catch(() => {}), 120);
     });
 
     // Copiar al seleccionar, como PuTTY/SecureCRT.
@@ -1134,6 +1171,10 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
+        // Las pestañas ocultas (visibility:hidden) conservan su tamaño y su observador dispara igual:
+        // ajustarlas en cada cuadro de un redimensionado reacomodaba su historial y avisaba al equipo
+        // por cada una. Se ajustan al volver a verse (efecto de `visible`).
+        if (!activeRef.current) return;
         if (hostRef.current && hostRef.current.offsetWidth > 0) fit.fit();
       });
     });
@@ -1265,6 +1306,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       host.removeEventListener("contextmenu", onContextMenu);
       host.removeEventListener("paste", onNativePaste, true);
       invoke("disconnect", { id: connIdRef.current }).catch(() => {});
+      forgetTermSize(id);
       term.dispose();
     };
     // El terminal vive mientras exista la pestaña; tema y fuente se actualizan aparte.

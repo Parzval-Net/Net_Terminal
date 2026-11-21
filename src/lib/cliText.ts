@@ -67,6 +67,16 @@ const CLI_ERROR =
   /^\s*(?:%\s*(?:invalid|incomplete|ambiguous|unknown|unrecognized|bad|error|wrong)[^\n]*|error:[^\n]*|command fail[^\n]*|command parse error[^\n]*|unknown (?:action|command)[^\n]*|syntax error[^\n]*|invalid (?:input|command|syntax)[^\n]*|unrecognized command[^\n]*|bad command name[^\n]*|expected end of command[^\n]*)$/im;
 
 /** Quita colores ANSI y aplica retrocesos, como los muestra la terminal (al borrar "--More--"). */
+/**
+ * Marcador del paginador que queda en la salida cuando el equipo no lo borra en el mismo bloque:
+ * " --More-- " de Cisco, "  ---- More ----" de Huawei VRP y "---(more)---"/"---(more 45%)---" de
+ * Junos, con lo que el equipo envía para borrarlo (\r, retrocesos o ESC[K) o los espacios que lo tapan.
+ */
+export const PAGER = /[ \t]*-{2,}[ \t]*\(?more(?: \d+%)?\)?[ \t]*-{2,}[ \t]*(?:\r[ \t]*\r|\x08+[ \t]*\x08+|\x1b\[K)?/gi;
+
+/** Quita los restos del paginador antes de leer la salida con los parsers. */
+export const stripPager = (text: string) => text.replace(PAGER, "");
+
 export function plainCli(text: string): string {
   let out = text.replace(/\r/g, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
   while (out.includes("\b")) {

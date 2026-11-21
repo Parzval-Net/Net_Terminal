@@ -15,6 +15,10 @@
   --accent-fg: #ffffff;
   /* Borde de controles de formulario y pistas de switches: ≥3:1 (WCAG 1.4.11). */
   --field-border: #858c97;
+  /* Borde que marca el estado de un control (opción activa de un segmentado, contadores neutros).
+     Más oscuro que field-border: 4,2:1 sobre panel y 3,5:1 sobre la pista bg-hover aun encima de
+     chrome (WCAG 1.4.11). --border queda para divisores y tarjetas decorativas. */
+  --control-border: #767d88;
   /* Intensidad del fondo de líneas agregadas/quitadas en diffs (texto ≥4.5:1). */
   --diff-tint: 8%;
   --hover: rgba(15, 23, 42, 0.05);
@@ -23,6 +27,8 @@
   --danger-fg: #ffffff;
   --ok: #1a7f37;
   --warn: #8a5a00;
+  /* Texto sobre fondo warn (contadores): 5,9:1 en claro, 9:1 en oscuro. */
+  --warn-fg: #ffffff;
   /* Tráfico sin velocidad conocida en Topología: gris violeta, distinto del azul de
      selección y ruta (5,6:1 sobre panel claro, 6,6:1 sobre panel oscuro). */
   --util-unknown: #6e5f99;
@@ -42,17 +48,23 @@
   --border: #272c35;
   --text: #e4e7eb;
   --muted: #99a0ab;
-  --accent: #5b8def;
-  /* Texto oscuro sobre el azul: el blanco daba 3,2:1. */
+  /* Acento más claro que el #5b8def anterior: texto de acento sobre bg-selected pasa de 4,05:1 a 4,6:1
+     y sobre panel de 5,1:1 a 6:1. */
+  --accent: #6b9bf3;
+  /* Texto oscuro sobre el azul (botón primario, segmentado activo): 6,8:1; 5,8:1 con hover (opacidad 90%).
+     El blanco daba 2,8:1. */
   --accent-fg: #0b1220;
   --field-border: #6b7280;
+  /* 4,3:1 sobre panel y ≥3,7:1 sobre la pista bg-hover. */
+  --control-border: #7a8290;
   --diff-tint: 14%;
   --hover: rgba(255, 255, 255, 0.05);
-  --selected: rgba(91, 141, 239, 0.16);
+  --selected: rgba(107, 155, 243, 0.16);
   --danger: #f2606a;
   --danger-fg: #0e1116;
   --ok: #4cc472;
   --warn: #e0aa45;
+  --warn-fg: #0e1116;
   --util-unknown: #a99bd6;
   --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
   color-scheme: dark;
@@ -65,6 +77,7 @@
   --color-field: var(--field);
   --color-line: var(--border);
   --color-field-line: var(--field-border);
+  --color-control-line: var(--control-border);
   --color-fg: var(--text);
   --color-muted: var(--muted);
   --color-accent: var(--accent);
@@ -79,9 +92,26 @@
   --color-term-fg: var(--term-fg, var(--text));
   --color-ok: var(--ok);
   --color-warn: var(--warn);
+  --color-warn-fg: var(--warn-fg);
   --shadow-pop: var(--shadow);
   --font-sans: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, Ubuntu,
     Cantarell, "Noto Sans", sans-serif;
+}
+
+/* Escala tipográfica de 5 pasos (utilidades text-caption, text-body-sm, text-body, text-title y
+   text-display). Reemplaza los tamaños sueltos de 0,5 px (11,5 y 12,5), que no se distinguen y
+   aplanan la jerarquía. Solo fijan el tamaño: el interlineado sigue el del contenedor.
+   - caption 11: rótulos de métricas, metadatos, contadores y grupos del menú.
+   - body-sm 12: ayudas, texto secundario, botones, tablas y etiquetas de campos.
+   - body 13: texto base (body) y contenido.
+   - title 15: títulos de sección.
+   - display 18: título de la herramienta (ToolHeader). */
+@theme {
+  --text-caption: 11px;
+  --text-body-sm: 12px;
+  --text-body: 13px;
+  --text-title: 15px;
+  --text-display: 18px;
 }
 
 html,
@@ -96,7 +126,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-body);
   -webkit-font-smoothing: antialiased;
   user-select: none;
   -webkit-user-select: none;
@@ -116,6 +146,18 @@ button {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* Segmentado (controls.tsx): reserva el ancho del texto en semibold para que elegir una opción no
+   desplace a las vecinas. El texto alternativo vacío evita que un lector de pantalla lo lea dos veces. */
+.seg-reserve::after {
+  content: attr(data-label);
+  content: attr(data-label) / "";
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  font-weight: 600;
+  pointer-events: none;
 }
 
 .field {
