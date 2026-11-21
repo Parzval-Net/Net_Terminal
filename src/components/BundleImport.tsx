@@ -318,7 +318,7 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
                       <span className="w-3" />
                     )}
                     <Badge status={plan[i]?.status} overwrite={overwrite} />
-                    <span className="w-12 text-right text-[11px] text-muted uppercase">{typeLabel[s.type]}</span>
+                    <span className="w-14 text-right text-[11px] text-muted uppercase">{typeLabel[s.type]}</span>
                   </label>
                 </li>
               ))}

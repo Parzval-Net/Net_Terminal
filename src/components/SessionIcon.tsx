@@ -1,5 +1,6 @@
 import { Cable, Globe, Network, Server, SquareTerminal, Zap } from "lucide-react";
 import { SessionType } from "../types";
+import { SESSION_TYPES } from "../lib/sessionTypes";
 
 // Tonos medios: >= 3:1 (WCAG 1.4.11) tanto sobre fondos claros (blanco, hover, selección)
 // como oscuros (paneles y temas de terminal), porque la pestaña activa usa el fondo del tema
@@ -32,10 +33,5 @@ export function SessionIcon({ type, size = 14, quick = false }: { type: SessionT
 /** Pestaña de una conexión rápida (sin sesión guardada). */
 export const isQuickSession = (s: { id: string; type: SessionType; scp?: unknown }) => !s.id && s.type !== "local" && !s.scp;
 
-export const typeLabel: Record<SessionType, string> = {
-  local: "Local",
-  ssh: "SSH",
-  telnet: "Telnet",
-  serial: "Serial",
-  raw: "TCP",
-};
+/** Rótulo de cada tipo: el mismo de los formularios (src/lib/sessionTypes.ts). */
+export const typeLabel = Object.fromEntries(SESSION_TYPES.map((t) => [t.type, t.label])) as Record<SessionType, string>;

@@ -1848,7 +1848,7 @@ function Workspace({
           focusFallback={() => activeCtrl()?.focus()}
         />
       )}
-      {quickOpen && <QuickConnectDialog onClose={() => setQuickOpen(false)} onOpen={openTab} />}
+      {quickOpen && <QuickConnectDialog onClose={() => setQuickOpen(false)} onOpen={openTab} onSave={(s) => saveSession(s, true)} folders={folders} />}
     </div>
   );
 }
