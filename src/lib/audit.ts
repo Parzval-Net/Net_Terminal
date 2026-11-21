@@ -227,7 +227,14 @@ function buildUnits(rule: Rule, roots: ConfigNode[]): Unit[] | null {
     if (!units.length) return null;
   } else units = blocks.map((b) => ({ heads: [b], block: b, name: captureName(blockRe, b), root: false }));
   if (s.each || units.length === 1) return units;
-  return [{ heads: units.flatMap((u) => u.heads), block: units[0].block, child: units[0].child, name: units[0].name, root: false }];
+  // Sin `each` los bloques se evalúan juntos, pero nunca se mezclan VDOM distintas (FortiOS): una unidad
+  // por contexto, para que el resultado, el plan y el rollback queden en la VDOM que corresponde.
+  const byCtx = new Map<string, Unit[]>();
+  for (const u of units) {
+    const k = u.block?.ctx ?? "";
+    byCtx.set(k, [...(byCtx.get(k) ?? []), u]);
+  }
+  return [...byCtx.values()].map((g) => (g.length === 1 ? g[0] : { heads: g.flatMap((u) => u.heads), block: g[0].block, child: g[0].child, name: g[0].name, root: false }));
 }
 
 // ---------- Condiciones ----------
@@ -418,14 +425,56 @@ function evalCond(c: Cond, u: Unit, env: Env): CondOut {
 
 // ---------- Reglas ----------
 
-const today = (d: Date) => d.toISOString().slice(0, 10);
+/** Fecha local (AAAA-MM-DD): una excepción vence al terminar su día en la hora del equipo, no en UTC. */
+export const localDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+const VDOM_PREFIX = /^\[VDOM [^\]]*\]\s*/;
+const PLUS_SUFFIX = /\s+\(\+\d+\)$/;
+/** Palabras de un texto de bloque, sin comillas y en minúsculas, para comparar sin depender de espacios. */
+const words = (s: string) =>
+  s
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.replace(/^"(.*)"$/, "$1"));
+/** `sub` aparece en `full` como palabras completas y seguidas ("edit 1" no calza con "edit 10"). */
+function hasWords(full: string[], sub: string[]): boolean {
+  if (!sub.length || sub.length > full.length) return false;
+  for (let i = 0; i + sub.length <= full.length; i++) if (sub.every((w, j) => full[i + j] === w)) return true;
+  return false;
+}
+const sameWords = (a: string, b: string) => {
+  const x = words(a);
+  const y = words(b);
+  return x.length === y.length && x.every((w, i) => w === y[i]);
+};
+
+/**
+ * La excepción calza con la unidad. Con " › " es una ruta (bloque › subbloque): cada tramo debe ser igual
+ * al de la etiqueta, desde el comienzo. Sin " › " debe aparecer como palabras completas en la cabecera de
+ * la unidad, en su nombre o en su etiqueta: "edit 1" no cubre "edit 10" ni "Gi0/1" cubre "Gi0/10".
+ */
+export function waiverMatches(match: string | undefined, label: string, heads: string[] = [], name?: string): boolean {
+  const m = (match ?? "").trim();
+  if (!m) return true;
+  const plain = label.replace(PLUS_SUFFIX, "");
+  if (m.includes("›")) {
+    const want = m.split("›").map((x) => x.trim());
+    const path = (VDOM_PREFIX.test(want[0]) ? plain : plain.replace(VDOM_PREFIX, "")).split("›").map((x) => x.trim());
+    return want.length <= path.length && want.every((w, i) => sameWords(w, path[i]));
+  }
+  const sub = words(m.replace(PLUS_SUFFIX, ""));
+  const texts = [plain, plain.replace(VDOM_PREFIX, ""), ...heads, ...(name !== undefined ? [name] : [])];
+  return texts.some((t) => hasWords(words(t), sub));
+}
 
 function waiverFor(er: EffectiveRule, u: Unit, label: string, now: Date): { active?: AppliedWaiver; expired: AppliedWaiver[] } {
-  const text = [label, ...u.heads.map((h) => h.raw)].join("\n");
+  const heads = u.heads.map((h) => firstLine(h.line));
   const expired: AppliedWaiver[] = [];
   for (const w of er.waivers) {
-    if (w.match && !text.includes(w.match)) continue;
-    if (w.expires < today(now)) {
+    if (!waiverMatches(w.match, label, heads, u.name)) continue;
+    if (w.expires < localDay(now)) {
       expired.push(w);
       continue;
     }
@@ -500,6 +549,46 @@ function resolveParams(er: EffectiveRule, given: Record<string, string>): Record
     if (v !== undefined && v !== "") out[k] = v;
   }
   return out;
+}
+
+function condParams(c: Cond | undefined, out: Set<string>): void {
+  if (!c) return;
+  if (c.type === "all" || c.type === "any") return c.conditions.forEach((x) => condParams(x, out));
+  if (c.type !== "value") return;
+  for (const v of Array.isArray(c.value) ? c.value : [String(c.value)]) {
+    const m = /^\{\{\s*([\w.-]+)\s*\}\}$/.exec(v);
+    if (m) out.add(m[1]);
+  }
+}
+
+export interface FilterParam {
+  name: string;
+  spec: ParamSpec;
+  rules: string[];
+}
+
+/**
+ * Parámetros que cambian qué se evalúa (filtros `scope.where`, `applicable` y `check`), no solo el plan:
+ * sin ellos una interfaz WAN sin `role wan` queda fuera y la regla dice "No aplica". La interfaz los pide
+ * antes de auditar.
+ */
+export function filterParams(resolved: ResolvedRules, vendor: AuditVendor): FilterParam[] {
+  const out = new Map<string, FilterParam>();
+  for (const er of resolved.rules) {
+    if (er.rule.vendor !== vendor) continue;
+    const names = new Set<string>();
+    condParams(er.rule.scope?.where, names);
+    condParams(er.rule.applicable, names);
+    condParams(er.rule.check, names);
+    for (const n of names) {
+      const spec = er.rule.params?.[n];
+      if (!spec || spec.secret) continue;
+      const p = out.get(n) ?? { name: n, spec, rules: [] };
+      p.rules.push(er.rule.id);
+      out.set(n, p);
+    }
+  }
+  return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** Evalúa una regla sobre el árbol. Exportada para la prueba en vivo del editor. */

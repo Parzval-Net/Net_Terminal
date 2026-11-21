@@ -852,6 +852,109 @@ const fBad = audit(FORTI_BAD, { device: "FW-LAB" });
   assert.ok(f.includes(`"'=HYPERLINK(1)"`));
 }
 
+// ---------- Excepciones por bloque: palabras completas y rutas ----------
+{
+  const pack = (waivers) => R.resolveRules([...builtin, { layer: "user", pack: { format: "netterminal-rules", formatVersion: 1, id: "w", name: "w", version: "1", waivers } }]);
+  const w = (rule, match) => ({ rule, ...(match !== undefined ? { match } : {}), reason: "x", approvedBy: "CISO", expires: "2027-03-31" });
+  // "edit 1" no cubre edit 10, 11 ni 100.
+  const fwCfg = `config firewall policy\n${[1, 10, 11, 100].map((n) => `    edit ${n}\n        set srcintf "internal"\n        set dstintf "wan1"\n        set srcaddr "all"\n        set dstaddr "all"\n        set action accept\n        set schedule "always"\n        set service "ALL"\n    next\n`).join("")}end\n`;
+  const base = byId(audit(fwCfg, { vendor: "fortinet" }), "NT-FOS-POL-001");
+  assert.equal(base.units.filter((u) => u.status === "fail").length, 4, "las cuatro políticas fallan sin excepción");
+  const one = byId(audit(fwCfg, { vendor: "fortinet" }, pack([w("NT-FOS-POL-001", "edit 1")])), "NT-FOS-POL-001");
+  assert.deepEqual(one.units.map((u) => u.status), ["waived", "fail", "fail", "fail"], "edit 1 solo cubre la política 1");
+  // Ruta completa guardada desde un hallazgo (etiqueta) y ruta parcial antigua "a › b".
+  const label = base.units[1].label;
+  const viaLabel = byId(audit(fwCfg, { vendor: "fortinet" }, pack([w("NT-FOS-POL-001", label)])), "NT-FOS-POL-001");
+  assert.deepEqual(viaLabel.units.map((u) => u.status), ["fail", "waived", "fail", "fail"]);
+  const viaPath = byId(audit(fwCfg, { vendor: "fortinet" }, pack([w("NT-FOS-POL-001", "config firewall policy › edit 11")])), "NT-FOS-POL-001");
+  assert.deepEqual(viaPath.units.map((u) => u.status), ["fail", "fail", "waived", "fail"]);
+  const prefix = byId(audit(fwCfg, { vendor: "fortinet" }, pack([w("NT-FOS-POL-001", "config firewall policy")])), "NT-FOS-POL-001");
+  assert.ok(prefix.units.every((u) => u.status === "waived"), "el bloque entero cubre sus políticas");
+  // Cisco: "GigabitEthernet0/1" no cubre GigabitEthernet0/10; la etiqueta completa (sin " › ") tampoco.
+  const ios = "interface GigabitEthernet0/1\n ip address 192.0.2.1 255.255.255.0\ninterface GigabitEthernet0/10\n ip address 192.0.2.65 255.255.255.192\n";
+  const parp = (m) => byId(audit(ios, { vendor: "cisco" }, pack([w("NT-IOS-PARP-001", m)])), "NT-IOS-PARP-001").units.map((u) => u.status);
+  assert.deepEqual(parp("GigabitEthernet0/1"), ["waived", "fail"]);
+  assert.deepEqual(parp("interface GigabitEthernet0/1"), ["waived", "fail"]);
+  assert.deepEqual(parp("interface GigabitEthernet0/10"), ["fail", "waived"]);
+  assert.deepEqual(parp(undefined), ["waived", "waived"], "sin bloque cubre toda la regla");
+  // Funciones sueltas.
+  assert.equal(A.waiverMatches('edit "breakglass"', 'config system admin › edit "breakglass"'), true);
+  assert.equal(A.waiverMatches("breakglass", 'config system admin › edit "breakglass"'), true, "sin comillas");
+  assert.equal(A.waiverMatches("edit 1", "[VDOM root] config firewall policy › edit 10"), false);
+  assert.equal(A.waiverMatches("[VDOM b] config firewall policy › edit 1", "[VDOM root] config firewall policy › edit 1"), false, "otra VDOM");
+  assert.equal(A.waiverMatches("config firewall policy › edit 1", "[VDOM root] config firewall policy › edit 1"), true);
+  assert.equal(A.waiverMatches("line vty 0 4", "line vty 0 4 (+1)", ["line vty 0 4", "line vty 5 15"]), true);
+  // Vencimiento en el día local.
+  assert.equal(A.localDay(new Date(2026, 0, 31, 23, 59)), "2026-01-31");
+}
+
+// ---------- FortiOS multi-VDOM sin `each`: una unidad por VDOM ----------
+{
+  const ssl = (src) => `config vpn ssl settings\n    set source-interface "wan1"\n    set port 10443\n${src ? `    set source-address ${src}\n` : ""}end\n`;
+  const text = `config global\nconfig system global\n    set admintimeout 10\nend\nend\nconfig vdom\nedit root\n${ssl('"geo-CL"')}next\nedit B\n${ssl('"all"')}next\nend\n`;
+  const r = audit(text, { vendor: "fortinet" });
+  const f = byId(r, "NT-FOS-SSL-001");
+  assert.equal(f.status, "fail", "la VDOM B no cumple aunque root sí");
+  assert.equal(f.units.length, 2);
+  assert.deepEqual(f.units.map((u) => [u.fix.ctx, u.status]), [["vdom:root", "pass"], ["vdom:B", "fail"]]);
+  assert.match(f.units[1].label, /^\[VDOM B\]/);
+  const plan = A.buildPlan(r, resolved, ["NT-FOS-SSL-001"], { params: { sslvpn_source: "geo-CL" } });
+  const t = plan.lines.map((l) => l.text.trim());
+  assert.equal(t[t.indexOf("config vdom") + 1], "edit B", "el plan va en la VDOM que falla");
+  assert.ok(!t.includes("edit root"));
+  const rb = plan.rollback.map((l) => l.text.trim());
+  assert.equal(rb[rb.indexOf("config vdom") + 1], "edit B");
+  assert.ok(rb.includes('set source-address "all"'), "rollback con el valor de B");
+}
+
+// ---------- Parámetros de los filtros (WAN y externas) ----------
+{
+  const names = (v) => A.filterParams(resolved, v).map((p) => p.name);
+  assert.deepEqual(names("fortinet"), ["wan_interfaces"]);
+  assert.deepEqual(names("cisco"), ["external_ifaces"]);
+  const wan = A.filterParams(resolved, "fortinet")[0];
+  assert.ok(wan.rules.includes("NT-FOS-ADM-001") && wan.rules.includes("NT-FOS-POL-002"));
+  const fw = 'config system interface\n    edit "port1"\n        set ip 203.0.113.2 255.255.255.252\n        set allowaccess ping telnet\n    next\nend\n';
+  assert.equal(byId(audit(fw, { vendor: "fortinet" }), "NT-FOS-ADM-001").status, "n/a", "sin el parámetro, port1 no es WAN");
+  assert.equal(byId(audit(fw, { vendor: "fortinet" }, resolved, { params: { wan_interfaces: "port1" } }), "NT-FOS-ADM-001").status, "fail");
+  const ios = "interface GigabitEthernet0/3\n ip address 203.0.113.6 255.255.255.252\n";
+  assert.equal(byId(audit(ios, { vendor: "cisco" }, resolved, { params: { external_ifaces: "GigabitEthernet0/3" } }), "NT-IOS-CDP-001").status, "fail");
+}
+
+// ---------- Plantillas sin caracteres de control ----------
+{
+  const rule = (line) => ({
+    format: "netterminal-rules",
+    formatVersion: 1,
+    id: "ctl",
+    name: "ctl",
+    version: "1",
+    rules: [{ id: "R-CTL", title: "t", severity: "low", vendor: "cisco", controls: [], check: { type: "present", match: "^x" }, remediation: { cisco: [line] } }],
+  });
+  assert.deepEqual(R.validateRulePack(rule("no ip http server")).errors, []);
+  for (const bad of ["no ip\thttp server", "no ip http server\u001b[2J", "a\u0008b", "a\u007fb"]) assert.match(R.validateRulePack(rule(bad)).errors.join(), /caracteres de control/, JSON.stringify(bad));
+}
+
+// ---------- Rollbacks que conservan lo previo ----------
+{
+  const rb = (text, id, params = {}) => A.buildPlan(audit(text, { vendor: id.startsWith("NT-FOS") ? "fortinet" : "cisco" }), resolved, [id], { params }).rollback.map((l) => l.text.trim());
+  // NTP con llave existente: no se borra en el rollback.
+  const ntp = rb("ntp authentication-key 3 md5 ****\nntp server 192.0.2.123\n", "NT-IOS-NTP-002");
+  assert.ok(!ntp.some((l) => l.startsWith("no ntp authentication-key")), "la llave existente queda");
+  const ntpNew = rb("ntp server 192.0.2.123\n", "NT-IOS-NTP-002");
+  assert.ok(ntpNew.includes("no ntp authentication-key 1"), "la llave creada por el plan sí se quita");
+  // archive con write-memory previo: el rollback no lo quita.
+  assert.ok(!rb("archive\n path tftp://192.0.2.20/$h\n write-memory\n", "NT-IOS-ARC-001", { archive_path: "scp://r@192.0.2.20/c/$h" }).includes("no write-memory"));
+  assert.ok(rb("archive\n path tftp://192.0.2.20/$h\n", "NT-IOS-ARC-001", { archive_path: "scp://r@192.0.2.20/c/$h" }).includes("no write-memory"));
+  // FortiOS NTP con servidores: no se toca ntpserver.
+  const fntp = 'config system ntp\n    set ntpsync disable\n    set type custom\n    config ntpserver\n        edit 1\n            set server "192.0.2.9"\n        next\n    end\nend\n';
+  const plan = A.buildPlan(audit(fntp, { vendor: "fortinet" }), resolved, ["NT-FOS-NTP-001"], { params: { ntp_server: "192.0.2.123" } });
+  assert.ok(![...plan.lines, ...plan.rollback].some((l) => /edit 1|delete 1|set server/.test(l.text)), "el servidor existente no se sobrescribe ni se borra");
+  // Política de contraseñas: el rollback restaura los valores previos.
+  const pwp = rb('config system password-policy\n    set status disable\n    set minimum-length 9\nend\n', "NT-FOS-PWP-001");
+  assert.ok(pwp.includes("set minimum-length 9") && pwp.includes("unset min-number"));
+}
+
 // ---------- Rendimiento ----------
 {
   const big = ["version 17.9", "hostname R-BIG"];
