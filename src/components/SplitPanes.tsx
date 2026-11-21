@@ -1,8 +1,9 @@
-import { memo } from "react";
+import { memo, useMemo } from "react";
 import { Radio, X } from "lucide-react";
 import type { Tab, TabState } from "../types";
 import { tabTitle } from "../types";
 import { PANE_HEADER, SplitState, paneRect } from "../lib/split";
+import { paneNumbers } from "../lib/paneNumbers";
 import { statusColor } from "./TabBar";
 import { useBroadcastTargets } from "./BroadcastTarget";
 
@@ -28,6 +29,8 @@ const DIM = "color-mix(in srgb, var(--bg) 28%, transparent)";
  */
 export const SplitPanes = memo(function SplitPanes({ split, tabs, states, activeId, onPick, onFocus }: Props) {
   const bc = useBroadcastTargets();
+  // Número de cada panel según el orden de sus pestañas en la barra (el mismo del badge de la pestaña).
+  const nums = useMemo(() => paneNumbers(split.panes, tabs.map((t) => t.id)), [split.panes, tabs]);
   return (
     <>
       {split.panes.map((id, i) => {
@@ -35,7 +38,7 @@ export const SplitPanes = memo(function SplitPanes({ split, tabs, states, active
         const focused = !!id && id === activeId;
         const tab = tabs.find((t) => t.id === id);
         const target = !!id && bc.multi && bc.ids.includes(id);
-        const n = i + 1;
+        const n = nums[i];
         return (
           <div
             key={i}

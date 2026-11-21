@@ -17,7 +17,7 @@ import {
   osTarget,
 } from "../lib/lifecycle";
 import { store } from "../lib/store";
-import { Tab, TabState, sessionTarget, tunnelLabel } from "../types";
+import { Tab, TabState, sessionTarget, tabTitle, tunnelLabel } from "../types";
 import { BroadcastTargetPicker } from "./BroadcastTarget";
 import { QuickBolt, typeLabel } from "./SessionIcon";
 import { statusColor } from "./TabBar";
@@ -64,6 +64,8 @@ interface Props {
   device?: DeviceInfo;
   /** Desactiva el modo solo lectura de la pestaña (el candado de la barra es el atajo del menú de la pestaña). */
   onToggleReadOnly?: () => void;
+  /** En Herramientas: la pestaña de terminal a la que se vuelve (solo se informa su estado; sin pestaña, "Sin sesión"). */
+  tools?: { tab?: Tab; state?: TabState };
 }
 
 /**
@@ -83,6 +85,7 @@ export const StatusBar = memo(function StatusBar({
   onSaveAs,
   device,
   onToggleReadOnly,
+  tools,
 }: Props) {
   const logHintId = useId();
   const sizes = useSyncExternalStore(termSizes.subscribe, termSizes.get);
@@ -96,8 +99,9 @@ export const StatusBar = memo(function StatusBar({
   );
   if (!tab || !state)
     return (
-      <div className="@container h-7 shrink-0 flex items-center justify-end px-3 bg-chrome border-t border-line text-[12px] text-muted">
-        {ai}
+      <div className="@container h-7 shrink-0 flex items-center gap-2 px-3 bg-chrome border-t border-line text-[12px] text-muted">
+        {tools && <ToolsStatus tab={tools.tab} state={tools.state} />}
+        <div className="ml-auto shrink-0 flex items-center">{ai}</div>
       </div>
     );
   const { session } = tab;
@@ -205,6 +209,34 @@ export const StatusBar = memo(function StatusBar({
     </div>
   );
 });
+
+/**
+ * Barra de estado en Herramientas: el estado de la pestaña de terminal activa (a la que lleva
+ * "Volver a la terminal"), para que la franja no quede vacía. Solo informa; las acciones de la
+ * sesión (log, reconectar) siguen en la vista de terminal.
+ */
+function ToolsStatus({ tab, state }: { tab?: Tab; state?: TabState }) {
+  if (!tab || !state)
+    return (
+      <span role="status" className="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
+        <CircleOff size={12} aria-hidden />
+        Sin sesión
+      </span>
+    );
+  const StatusIcon = statusIcon[state.status];
+  return (
+    <span
+      role="status"
+      className="flex items-center gap-1.5 min-w-0"
+      title={`Terminal activa: ${tabTitle(tab)} (${statusText[state.status]})`}
+    >
+      <StatusIcon size={12} aria-hidden className="shrink-0" style={{ color: statusColor[state.status] }} />
+      <span className="shrink-0 whitespace-nowrap">{statusText[state.status]}</span>
+      <span className="shrink-0 font-medium text-fg/80">{typeLabel[tab.session.type]}</span>
+      <span className="truncate min-w-0 text-fg/80">{tabTitle(tab)}</span>
+    </span>
+  );
+}
 
 function BarBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (

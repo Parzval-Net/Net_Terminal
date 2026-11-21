@@ -48,15 +48,18 @@
   --border: #272c35;
   --text: #e4e7eb;
   --muted: #99a0ab;
-  --accent: #5b8def;
-  /* Texto oscuro sobre el azul: el blanco daba 3,2:1. */
+  /* Acento más claro que el #5b8def anterior: texto de acento sobre bg-selected pasa de 4,05:1 a 4,6:1
+     y sobre panel de 5,1:1 a 6:1. */
+  --accent: #6b9bf3;
+  /* Texto oscuro sobre el azul (botón primario, segmentado activo): 6,8:1; 5,8:1 con hover (opacidad 90%).
+     El blanco daba 2,8:1. */
   --accent-fg: #0b1220;
   --field-border: #6b7280;
   /* 4,3:1 sobre panel y ≥3,7:1 sobre la pista bg-hover. */
   --control-border: #7a8290;
   --diff-tint: 14%;
   --hover: rgba(255, 255, 255, 0.05);
-  --selected: rgba(91, 141, 239, 0.16);
+  --selected: rgba(107, 155, 243, 0.16);
   --danger: #f2606a;
   --danger-fg: #0e1116;
   --ok: #4cc472;

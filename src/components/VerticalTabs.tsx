@@ -9,6 +9,7 @@ import { useTabDrag } from "../lib/tabDrag";
 import { useTabKeys } from "../lib/useTabKeys";
 import { MenuItem, layoutItem, newTabMenuItems, splitMenuItems, tabMenuItems } from "./tabMenu";
 import { layoutLabel } from "../lib/split";
+import { tabPaneNumbers } from "../lib/paneNumbers";
 import { focusLabel, historyLabel, isMac, modLabel } from "../lib/platform";
 import { useBroadcastTargets } from "./BroadcastTarget";
 
@@ -40,11 +41,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
   // los mismos que marca la barra horizontal.
   const bc = useBroadcastTargets();
   const bcIds = useMemo(() => (bc.multi ? new Set(bc.ids) : null), [bc]);
-  const paneOf = useMemo(() => {
-    const m = new Map<string, number>();
-    props.splitPanes?.forEach((id, i) => id && m.set(id, i + 1));
-    return m;
-  }, [props.splitPanes]);
+  const paneOf = useMemo(() => tabPaneNumbers(props.splitPanes, tabs.map((t) => t.id)), [props.splitPanes, tabs]);
   const activeTab = tabs.find((t) => t.id === activeId);
 
   const commit = (id: string, value: string) => {
@@ -140,6 +137,11 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
       <History aria-hidden size={15} />
     </button>
   );
+  // Ancho útil del Command Center (columna menos márgenes y botones de la terminal): el texto solo
+  // va si cabe entero junto al atajo; si no, lupa y atajo; en el mínimo, solo la lupa.
+  const paletteW = width - 12 - (findBtn ? 28 : 0) - (historyBtn ? 28 : 0);
+  const paletteKbd = paletteW >= (isMac ? 56 : 112);
+  const paletteText = paletteW >= (isMac ? 205 : 270);
   const termActions = findBtn || historyBtn ? (
     <>
       {findBtn}
@@ -197,7 +199,7 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
           </button>
         )}
         {collapsed && props.onPalette && (
-          <button onClick={props.onPalette} title={`Buscar sesión o acción (${modLabel}K)`} aria-label="Buscar sesión o acción" aria-keyshortcuts={paletteKeys} className={iconBtn(false)}>
+          <button onClick={props.onPalette} title={`Buscar sesión o acción (${modLabel}K)`} aria-label="Buscar sesión o acción" aria-keyshortcuts={paletteKeys} data-command-center="" className={iconBtn(false)}>
             <Search aria-hidden size={14} />
           </button>
         )}
@@ -221,11 +223,13 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
               title={`Buscar sesión o acción (${modLabel}K)`}
               aria-label="Buscar sesión o acción"
               aria-keyshortcuts={paletteKeys}
+              data-command-center=""
               className="flex-1 min-w-0 h-7 px-2 flex items-center gap-2 rounded-md border border-line bg-panel text-[12px] text-muted hover:text-fg hover:border-field-line"
             >
               <Search aria-hidden size={13} className="shrink-0" />
-              <span className="flex-1 min-w-0 truncate text-left">Buscar sesión o acción</span>
-              {width >= 240 && <kbd className="shrink-0 text-[11px] font-sans">{modLabel}K</kbd>}
+              {/* Angosta: solo la lupa y el atajo (el nombre queda en title y aria-label), nunca texto truncado. */}
+              {paletteText ? <span className="flex-1 min-w-0 truncate text-left">Buscar sesión o acción</span> : <span className="flex-1" />}
+              {paletteKbd && <kbd className="shrink-0 text-[11px] font-sans">{modLabel}K</kbd>}
             </button>
           )}
           {termActions}
