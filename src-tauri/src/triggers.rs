@@ -5,6 +5,7 @@
 
 use regex::{RegexBuilder, RegexSet, RegexSetBuilder};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -126,9 +127,10 @@ pub struct Watcher {
     folder: String,
     gen: u64,
     compiled: Option<Arc<Compiled>>,
-    /// Reglas que aplican a esta sesión (por carpeta) y su último aviso.
+    /// Reglas que aplican a esta sesión (por carpeta), en el orden del set.
     applies: Vec<bool>,
-    last: Vec<Option<Instant>>,
+    /// Último aviso por id de regla: sobrevive a los cambios de reglas.
+    last: HashMap<String, Instant>,
     line: String,
 }
 
@@ -141,24 +143,32 @@ impl Watcher {
             gen: u64::MAX,
             compiled: None,
             applies: Vec::new(),
-            last: Vec::new(),
+            last: HashMap::new(),
             line: String::new(),
         }
     }
 
+    /// Reglas nuevas (cambió la generación). Editar o activar otra alerta no reinicia el plazo
+    /// entre avisos de las que siguen (se conserva por id) ni descarta la línea a medio llegar.
     fn refresh(&mut self, gen: u64) {
         self.gen = gen;
-        self.compiled = self.hub.current();
-        self.line.clear();
-        let Some(c) = &self.compiled else {
+        let next = self.hub.current();
+        let Some(c) = &next else {
+            // Sin reglas no se acumula texto: lo pendiente quedaría viejo.
+            self.compiled = None;
             self.applies.clear();
             self.last.clear();
+            self.line.clear();
             return;
         };
         self.applies = c.rules.iter().map(|(_, f)| f.as_deref().is_none_or(|f| in_folder(&self.folder, f))).collect();
-        self.last = vec![None; c.rules.len()];
-        if !self.applies.contains(&true) {
+        // Solo se olvidan las reglas eliminadas.
+        self.last.retain(|id, _| c.rules.iter().any(|(r, _)| r == id));
+        if self.applies.contains(&true) {
+            self.compiled = next;
+        } else {
             self.compiled = None; // ninguna regla aplica a esta sesión: costo cero
+            self.line.clear();
         }
     }
 
@@ -198,10 +208,11 @@ impl Watcher {
         }
         let now = Instant::now();
         for i in c.set.matches(line).iter() {
-            if !self.applies[i] || self.last[i].is_some_and(|t| now.duration_since(t) < COOLDOWN) {
+            let id = &c.rules[i].0;
+            if !self.applies[i] || self.last.get(id).is_some_and(|t| now.duration_since(*t) < COOLDOWN) {
                 continue;
             }
-            self.last[i] = Some(now);
+            self.last.insert(id.clone(), now);
             let mut shown = line.trim();
             if shown.len() > MAX_SHOWN {
                 let mut cut = MAX_SHOWN;
@@ -272,7 +283,7 @@ mod tests {
         b.feed("link flap\n");
         assert_eq!(hits.lock().unwrap().len(), 2);
         // Pasada la ventana vuelve a avisar.
-        a.last[0] = Some(Instant::now() - COOLDOWN - Duration::from_millis(1));
+        a.last.insert("r".into(), Instant::now() - COOLDOWN - Duration::from_millis(1));
         a.feed("link flap\n");
         assert_eq!(hits.lock().unwrap().len(), 3);
     }
@@ -290,6 +301,31 @@ mod tests {
         inside.feed("down\nparcial");
         assert!(inside.compiled.is_none() && inside.line.is_empty());
         assert_eq!(hits.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rule_changes_keep_cooldown_and_partial_line() {
+        let hits: Arc<Mutex<Vec<Hit>>> = Arc::default();
+        let h = hits.clone();
+        let notify: Notify = Arc::new(move |hit| h.lock().unwrap().push(hit));
+        let hub = Arc::new(Hub::default());
+        hub.configure(vec![rule("flap", "flap", false, false, None)], notify.clone()).unwrap();
+        let mut w = Watcher::new(hub.clone(), "c".into(), None);
+        w.feed("link flap\nBGP nei");
+        assert_eq!(hits.lock().unwrap().len(), 1);
+        // Se agrega otra alerta (cambia la generación) con un flap en curso y una línea a medias.
+        hub.configure(vec![rule("flap", "flap", false, false, None), rule("bgp", "BGP.*Down", true, false, None)], notify.clone())
+            .unwrap();
+        w.feed("ghbor 192.0.2.1 Down\nlink flap\n");
+        let got: Vec<String> = hits.lock().unwrap().iter().map(|h| h.rule.clone()).collect();
+        // La línea partida avisa y el flap no se repite antes de 10 s.
+        assert_eq!(got, ["flap", "bgp"]);
+        // Una regla eliminada y vuelta a crear parte de cero.
+        hub.configure(vec![rule("bgp", "BGP.*Down", true, false, None)], notify.clone()).unwrap();
+        w.feed("x\n");
+        hub.configure(vec![rule("flap", "flap", false, false, None)], notify).unwrap();
+        w.feed("link flap\n");
+        assert_eq!(hits.lock().unwrap().len(), 3);
     }
 
     #[test]

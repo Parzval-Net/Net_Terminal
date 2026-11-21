@@ -7,6 +7,7 @@ import { CodeEditor, RISK_MARK, RISK_TEXT, renderHighlighted, riskCount } from "
 import { cssColor } from "../lib/highlight";
 import { TargetOptions } from "./BroadcastTarget";
 import { BroadcastDialog } from "./BroadcastDialog";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { fillTemplate, templateVars } from "./TemplateDialog";
 import { Compiled } from "../lib/highlight";
 import { Resolved, isBroadcastRunning, targetLabel, useBroadcastTarget, useWorkspace } from "../lib/broadcast";
@@ -86,6 +87,8 @@ export function CliLab(p: Props) {
   const [msg, setMsg] = useState("");
   /** Nombre en edición al guardar un script nuevo (sin window.prompt: no existe en todas las webviews). */
   const [naming, setNaming] = useState<string | null>(null);
+  /** Nota elegida con cambios sin guardar: se confirma antes de reemplazar el texto. */
+  const [replacing, setReplacing] = useState<string | null>(null);
   const run = useLabRun();
   const target = useBroadcastTarget();
   const ws = useWorkspace();
@@ -100,8 +103,9 @@ export function CliLab(p: Props) {
   }, [text]);
   useEffect(() => () => persist(DRAFT, { text: draft.current }), []);
   useEffect(() => persist(OPTS, opts), [opts]);
-  // Esc cierra el laboratorio, salvo con el aviso de envío abierto o un nombre en edición (ambos usan Esc).
-  const modal = useModal({ onClose: confirm || naming !== null ? undefined : p.onClose });
+  // Esc cierra el laboratorio, salvo con un aviso abierto o un nombre en edición (usan Esc).
+  // El foco inicial va al editor del script, no al selector de notas del encabezado.
+  const modal = useModal({ onClose: confirm || replacing || naming !== null ? undefined : p.onClose, initialFocus: "textarea" });
 
   const vars = useMemo(() => templateVars(text), [text]);
   const lines = useMemo(() => scriptLines(text), [text]);
@@ -155,6 +159,16 @@ export function CliLab(p: Props) {
     ).catch((e) => setMsg(String(e)));
   };
 
+  /** Detener: deja de esperar la línea en curso al instante; el equipo puede seguir con ella. */
+  const stop = () => {
+    const busy = run?.items.filter((i) => i.status === "running").length ?? 0;
+    stopLab();
+    if (busy)
+      setMsg(
+        `Detenido. ${busy === 1 ? "Un equipo estaba" : `${busy} equipos estaban`} ejecutando una línea y puede${busy === 1 ? "" : "n"} seguir con ella hasta terminarla (máx. ${Math.max(5, Math.min(600, opts.timeout))} s).`,
+      );
+  };
+
   const writeNote = async (name: string) => {
     try {
       await invoke("save_note", { name, content: text });
@@ -183,8 +197,10 @@ export function CliLab(p: Props) {
     setNaming(null);
     void writeNote(name);
   };
-  const openNote = async (name: string) => {
+  const openNote = async (name: string, discard = false) => {
     if (!name) return;
+    // Abrir una nota reemplaza el texto: con cambios sin guardar se pregunta antes.
+    if (dirty && !discard) return setReplacing(name);
     try {
       const content = await invoke<string>("read_note", { name });
       setText(content);
@@ -198,8 +214,10 @@ export function CliLab(p: Props) {
 
   const n = p.resolve().targets.length;
 
-  // Sin equipo elegido se muestra el primero con error; la vista salta al comando que falló.
-  const shown = run?.items.find((i) => i.tabId === view) ?? (run?.running ? null : (run?.items.find((i) => i.status === "error") ?? null));
+  // Sin equipo elegido se muestra el primero con error (o el primero, si todos salieron bien);
+  // la vista salta al comando que falló.
+  const shown =
+    run?.items.find((i) => i.tabId === view) ?? (run?.running ? null : (run?.items.find((i) => i.status === "error") ?? run?.items[0] ?? null));
   const failRef = useRef<HTMLDivElement>(null);
   const failKey = shown && !run?.running ? `${shown.tabId}:${shown.steps.length}` : "";
   useEffect(() => {
@@ -438,7 +456,7 @@ export function CliLab(p: Props) {
                 </p>
               )}
               {running ? (
-                <button onClick={stopLab} className="w-full flex items-center justify-center gap-1.5 h-8 rounded-md bg-danger text-danger-fg font-medium hover:opacity-90">
+                <button onClick={stop} className="w-full flex items-center justify-center gap-1.5 h-8 rounded-md bg-danger text-danger-fg font-medium hover:opacity-90">
                   <Square size={11} fill="currentColor" /> Detener
                 </button>
               ) : (
@@ -458,6 +476,20 @@ export function CliLab(p: Props) {
         </div>
 
       </div>
+      {replacing && (
+        <ConfirmDialog
+          title="Descartar cambios sin guardar"
+          message={`El script del editor tiene cambios sin guardar. Si abres "${replacing}", se reemplaza y esos cambios se pierden.`}
+          confirmLabel={`Abrir ${replacing}`}
+          danger
+          onCancel={() => setReplacing(null)}
+          onConfirm={() => {
+            const name = replacing;
+            setReplacing(null);
+            void openNote(name, true);
+          }}
+        />
+      )}
       {confirm && (
         <BroadcastDialog
           text={confirm.shown}

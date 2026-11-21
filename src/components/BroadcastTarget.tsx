@@ -64,7 +64,10 @@ function TargetPopover({ pos, anchor, onClose }: { pos: PopPos; anchor: React.Re
     };
   }, [anchor, onClose]);
   useEffect(() => {
-    popRef.current?.querySelector<HTMLElement>("input:checked, input:not(:disabled)")?.focus();
+    // La opción marcada (una lista de selectores con coma devuelve la primera en el documento,
+    // no la marcada: el foco caía en "Pestaña actual" y Espacio apagaba la difusión).
+    const pop = popRef.current;
+    (pop?.querySelector<HTMLElement>('input[name="bc-mode"]:checked') ?? pop?.querySelector<HTMLElement>("input:not(:disabled)"))?.focus();
   }, []);
   return (
     <div

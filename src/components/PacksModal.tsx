@@ -2,9 +2,10 @@ import { useMemo, useState } from "react";
 import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, Download, FileJson, Lock, Search, Trash2, Upload, X } from "lucide-react";
+import { AlertTriangle, Download, FileJson, Lock, Search, Upload, X } from "lucide-react";
 import { OS_VENDORS, Pack, Risk, Validation, buildCatalog, riskLabel, validatePack } from "../lib/packs";
 import { useDragResize } from "../lib/useDragResize";
+import { InlineConfirm } from "./InlineConfirm";
 
 interface Props {
   packs: Pack[];
@@ -182,6 +183,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
                           checked={enabled}
                           onChange={(e) => onToggle(p.id, e.target.checked)}
                           title={enabled ? "Desactivar" : "Activar"}
+                          aria-label={`Usar ${p.name} en el catálogo`}
                         />
                       </label>
                       <div className="min-w-0 flex-1">
@@ -197,21 +199,27 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
                       </div>
                       {!p.builtin && (
                         <>
-                          <button title="Exportar para compartir" onClick={() => exportPack(p.id)} className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover">
-                            <Download size={14} />
-                          </button>
-                          <button
-                            title={confirmDelete === p.id ? "Clic para confirmar" : "Eliminar"}
-                            onMouseLeave={() => setConfirmDelete(null)}
-                            onClick={async () => {
-                              if (confirmDelete !== p.id) return setConfirmDelete(p.id);
+                          {confirmDelete !== p.id && (
+                            <button
+                              title="Exportar para compartir"
+                              aria-label={`Exportar ${p.name}`}
+                              onClick={() => exportPack(p.id)}
+                              className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
+                            >
+                              <Download size={14} />
+                            </button>
+                          )}
+                          <InlineConfirm
+                            name={p.name}
+                            asking={confirmDelete === p.id}
+                            onAsk={() => setConfirmDelete(p.id)}
+                            onCancel={() => setConfirmDelete((c) => (c === p.id ? null : c))}
+                            onConfirm={async () => {
+                              setConfirmDelete(null);
                               await invoke("cmdpack_delete", { id: p.id }).catch((e) => setError(String(e)));
                               onChanged();
                             }}
-                            className={`w-7 h-7 grid place-items-center rounded-md hover:bg-hover ${confirmDelete === p.id ? "text-danger" : "text-muted hover:text-danger"}`}
-                          >
-                            <Trash2 size={14} />
-                          </button>
+                          />
                         </>
                       )}
                     </div>

@@ -372,14 +372,39 @@ export function riskyRegex(pattern: string, ignoreCase = true): string | null {
   return redosRisk(pattern, ignoreCase);
 }
 
-/** Valida un patrón; devuelve el mensaje de error o null. */
+/**
+ * Errores comunes del motor de expresiones regulares, en español y con qué corregir. Cubre los
+ * textos de V8 (Windows, Linux) y de JavaScriptCore (macOS), que dicen lo mismo con otras palabras.
+ */
+const REGEX_ERRORS: [RegExp, string][] = [
+  [/unterminated group|missing \)/i, "Falta cerrar un paréntesis ( )"],
+  [/unmatched ('\)'|parenthes)/i, "Sobra un paréntesis de cierre )"],
+  [/unterminated character class|missing terminating \]/i, "Falta cerrar un corchete [ ]"],
+  [/nothing to repeat/i, "Un *, + o ? no tiene qué repetir: escríbelo como \\*, \\+ o \\? si buscas el carácter"],
+  [/numbers out of order/i, "En {n,m} el mínimo es mayor que el máximo"],
+  [/range out of order/i, "Rango invertido en [ ]: va de menor a mayor (a-z, 0-9)"],
+  [/\\ at end of pattern/i, "El patrón termina en \\: escríbelo como \\\\ si buscas la barra"],
+  [/invalid group|unrecognized character after \(\?/i, "Grupo inválido: revisa lo que sigue a (?"],
+  [/group (specifier )?name/i, "Nombre de grupo inválido o repetido en (?<nombre>…)"],
+  [/incomplete quantifier|lone quantifier/i, "Cuantificador { } incompleto: escríbelo como \\{ si buscas la llave"],
+  [/invalid (unicode |hexadecimal )?escape|invalid escaped/i, "Secuencia de escape inválida (\\ seguida de un carácter no válido)"],
+];
+
+/** Mensaje del motor sin "Invalid regular expression: /patrón/flags:" (los flags internos confunden). */
+function engineDetail(message: string): string {
+  return message.replace(/^Invalid regular expression:\s*(\/.*\/[a-z]*:\s*)?/is, "").trim();
+}
+
+/** Valida un patrón; devuelve el mensaje de error (en español) o null. */
 export function regexError(pattern: string): string | null {
   if (!pattern) return "Patrón vacío";
   try {
     new RegExp(pattern, "gmd");
     return null;
   } catch (e) {
-    return (e as Error).message;
+    const detail = engineDetail((e as Error).message);
+    const known = REGEX_ERRORS.find(([re]) => re.test(detail));
+    return known ? known[1] : `Expresión regular inválida (${detail})`;
   }
 }
 

@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Pencil, Plus } from "lucide-react";
 import { Settings } from "../lib/settings";
 import { type AlertRule, alertError, newAlert } from "../lib/alerts";
+import { InlineConfirm } from "./InlineConfirm";
 
 interface Props {
   settings: Settings;
@@ -14,6 +15,8 @@ export function AlertSettings({ settings: s, folders, onChange }: Props) {
   const rules = s.alertRules ?? [];
   const [draft, setDraft] = useState<AlertRule | null>(null);
   const [sample, setSample] = useState("");
+  /** Alerta con la pregunta "¿Eliminar?" abierta (una a la vez). */
+  const [removing, setRemoving] = useState<string | null>(null);
 
   const save = (list: AlertRule[]) => onChange({ alertRules: list });
   const commit = () => {
@@ -67,14 +70,16 @@ export function AlertSettings({ settings: s, folders, onChange }: Props) {
             >
               <Pencil size={13} />
             </button>
-            <button
-              onClick={() => save(rules.filter((x) => x.id !== r.id))}
-              title="Eliminar"
-              aria-label={`Eliminar ${r.name || r.pattern}`}
-              className="w-7 h-7 grid place-items-center rounded-md text-muted hover:text-danger hover:bg-hover"
-            >
-              <Trash2 size={13} />
-            </button>
+            <InlineConfirm
+              name={r.name || r.pattern}
+              asking={removing === r.id}
+              onAsk={() => setRemoving(r.id)}
+              onCancel={() => setRemoving((x) => (x === r.id ? null : x))}
+              onConfirm={() => {
+                setRemoving(null);
+                save(rules.filter((x) => x.id !== r.id));
+              }}
+            />
           </div>
         ))}
         {!rules.length && <p className="text-[12px] text-muted">Sin alertas.</p>}

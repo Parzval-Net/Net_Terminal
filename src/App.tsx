@@ -41,6 +41,7 @@ import { CatalogEntry, Pack, PackCommand, Risk, buildCatalog, computeRisk, order
 import type { ScpRequest } from "./components/tools/FileManager";
 
 import { TemplateDialog, templateVars } from "./components/TemplateDialog";
+import type { FilledTemplate } from "./lib/templateFill";
 import { compile, effectiveRules, onSlowRule } from "./lib/highlight";
 import { allFolders } from "./lib/folders";
 import { useMonitors } from "./lib/monitors";
@@ -203,7 +204,7 @@ function Workspace({
     defaultCancel?: boolean;
     action: () => void;
   } | null>(null);
-  const [template, setTemplate] = useState<{ text: string; then: (filled: string) => void } | null>(null);
+  const [template, setTemplate] = useState<{ text: string; then: (filled: FilledTemplate) => void } | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [states, setStates] = useState<Record<string, TabState>>({});
@@ -635,7 +636,7 @@ function Workspace({
   const bcTarget = useBroadcastTarget();
   const broadcastMode = bcTarget.mode !== "current";
   const workspace = useWorkspace();
-  const [broadcast, setBroadcast] = useState<{ text: string; resolved: Resolved; declared?: Risk } | null>(null);
+  const [broadcast, setBroadcast] = useState<{ text: string; shown?: string; resolved: Resolved; declared?: Risk } | null>(null);
   const [bcDelay, setBcDelay] = useState(() => stored("broadcastDelay", 300));
   useEffect(() => persist("broadcastDelay", bcDelay), [bcDelay]);
   useEffect(() => {
@@ -667,11 +668,12 @@ function Workspace({
           ? `Conectando ${tabTitle(activeTab)}…`
           : `${tabTitle(activeTab)} está desconectada. Reconecta para ejecutar.`;
   const returnToTerminal = activeId === "tools" && lastTermTab ? () => setActiveId(lastTermTab.id) : undefined;
-  const openBroadcast = (text: string, declared?: Risk) => {
+  /** `shown`: texto con los secretos de la plantilla enmascarados, para la confirmación (se envía `text`). */
+  const openBroadcast = (text: string, declared?: Risk, shown?: string) => {
     if (isBroadcastRunning()) return toast("Hay un envío a varias sesiones en curso", "error");
     if (isLabRunning()) return toast("El CLI Lab está ejecutando un script: espera a que termine o usa Detener", "error");
     const resolved = resolveTargets(bcTarget, tabs, (id) => states[id]?.status, activeId, visiblePanes);
-    setBroadcast({ text, resolved, declared });
+    setBroadcast({ text, shown, resolved, declared });
   };
   const startBroadcast = (deviceDelayMs: number) => {
     if (!broadcast) return;
@@ -848,9 +850,10 @@ function Workspace({
   /** `checked`: el riesgo ya se confirmó (catálogo) y no se vuelve a preguntar. */
   const sendToSession = (text: string, checked = false, declared?: Risk) => {
     // Las variables {{...}} se piden una sola vez, también al enviar a varias sesiones.
-    const then = (t: string) => (broadcastMode ? openBroadcast(t, declared) : sendResolved(t, checked));
+    // Con secretos en la plantilla, la confirmación muestra ••••••, y el envío no va al historial.
+    const then = (f: FilledTemplate) => (broadcastMode ? openBroadcast(f.text, declared, f.shown) : sendResolved(f.text, checked, activeId, f));
     if (templateVars(text).length) return setTemplate({ text, then });
-    then(text);
+    then({ text, shown: text, secret: false });
   };
 
   /**
@@ -859,12 +862,13 @@ function Workspace({
    * es esa pestaña y ninguna otra.
    */
   const sendToTab = (tabId: string, text: string, checked = false) => {
-    const then = (t: string) => sendResolved(t, checked, tabId);
+    const then = (f: FilledTemplate) => sendResolved(f.text, checked, tabId, f);
     if (templateVars(text).length) return setTemplate({ text, then });
-    then(text);
+    then({ text, shown: text, secret: false });
   };
 
-  const sendResolved = (text: string, checked = false, tabId: string | null = activeId) => {
+  /** `filled`: viene de una plantilla; se muestra su versión enmascarada y, con secretos, no va al historial. */
+  const sendResolved = (text: string, checked = false, tabId: string | null = activeId, filled?: FilledTemplate) => {
     const target = tabs.find((t) => t.id === tabId);
     const ctrl = tabId ? controllers.current.get(tabId) : undefined;
     if (!ctrl || !target || !ctrl.isConnected()) return;
@@ -882,7 +886,8 @@ function Workspace({
       if (target.id !== activeId) setActiveId(target.id);
       ctrl.focus();
       // Historial por equipo: solo envíos explícitos (Notas, catálogo, botones), nunca teclas.
-      if (!session.scp) cmdHistoryAdd(historyKey(session), trimmed).catch(() => {});
+      // Con variables secretas ({{tacacs_key}}, {{auth}}) el texto lleva el valor real: no se guarda en disco.
+      if (!session.scp && !filled?.secret) cmdHistoryAdd(historyKey(session), trimmed).catch(() => {});
     };
     const remote = session.type !== "local";
     // Notas y botones pasan por el mismo motor de riesgo que el catálogo. Lo que puede
@@ -890,7 +895,8 @@ function Workspace({
     const risk = remote && !checked ? computeRisk(trimmed) : "read";
     const ask = remote && (risk === "disruptive" || (settings.confirmSend && (lines.length > 1 || risk === "change")));
     if (ask) {
-      const preview = lines.slice(0, 6).join("\n") + (lines.length > 6 ? "\n…" : "");
+      const shownLines = filled?.secret ? filled.shown.replace(/\s+$/, "").split("\n") : lines;
+      const preview = shownLines.slice(0, 6).join("\n") + (shownLines.length > 6 ? "\n…" : "");
       setConfirm({
         title:
           risk === "disruptive"
@@ -1162,7 +1168,7 @@ function Workspace({
     typeCommand: (cmd: string) => {
       if (activeTab?.readOnly) return toast("La pestaña está en solo lectura: no se escribe nada en el equipo", "error");
       const type = (text: string) => activeCtrl()?.type(text);
-      if (templateVars(cmd).length) setTemplate({ text: cmd, then: type });
+      if (templateVars(cmd).length) setTemplate({ text: cmd, then: (f) => type(f.text) });
       else type(cmd);
     },
     addCommand: (vendor: string) => setCmdEdit({ vendor }),
@@ -1701,7 +1707,7 @@ function Workspace({
       )}
       {broadcast && (
         <BroadcastDialog
-          text={broadcast.text}
+          text={broadcast.shown ?? broadcast.text}
           resolved={broadcast.resolved}
           declared={broadcast.declared}
           delayMs={bcDelay}
