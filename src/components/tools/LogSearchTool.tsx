@@ -333,10 +333,14 @@ export default function LogSearchTool({
 
   return (
     <div className="space-y-4" onKeyDown={(e) => e.key === "Escape" && running && (e.stopPropagation(), stop())}>
-      <Section
-        title="Buscar en logs y respaldos"
-        hint="Texto o regex en logs, respaldos y notas. Sin índice: lee archivo por archivo."
-      >
+      {/* Encabezado de la herramienta: título, propósito y acción a la derecha. TODO: usar ToolHeader de ui.tsx cuando exista. */}
+      <header className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-[15px] font-semibold leading-tight">Buscar en logs</h2>
+          <p className="mt-0.5 text-[12px] text-muted line-clamp-2">Texto o regex en logs, respaldos y notas. Sin índice: lee archivo por archivo.</p>
+        </div>
+      </header>
+      <Section title="Qué buscar">
         {autoLog === false && (
           // Sin grabación automática una búsqueda vacía no prueba que el evento no ocurrió.
           <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-line bg-hover px-3 py-2 text-[12px]">
