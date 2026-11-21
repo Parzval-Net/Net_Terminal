@@ -1676,7 +1676,7 @@ const MAC_UA = /Mac|iPhone|iPad/.test(navigator.userAgent);
 const key = (k) =>
   window.dispatchEvent(new KeyboardEvent("keydown", { key: MAC_UA ? k : k.toUpperCase(), code: `Key${k.toUpperCase()}`, metaKey: MAC_UA, ctrlKey: !MAC_UA, shiftKey: !MAC_UA, bubbles: true, cancelable: true }));
 async function quickTo(host) {
-  await click("Conexión rápida sin guardar");
+  key("o"); await wait(300);
   typeInto(document.querySelector('input[placeholder="192.0.2.10 o hostname"]'), host);
   await click("Conectar");
 }
@@ -1698,10 +1698,10 @@ const scenes = {
   about: async () => { await click("Ajustes"); await click("Acerca de"); },
   settings: async () => { await open("core-sw01"); await click("Ajustes"); },
   logs: async () => { await open("core-sw01"); await click("Ajustes"); await click("Logs"); },
-  quick: async () => { await click("Conexión rápida sin guardar"); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); if (h) { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); } },
-  quickserial: async () => { await click("Conexión rápida sin guardar"); await click("Serial"); },
+  quick: async () => { key("o"); await wait(300); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); if (h) { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); } },
+  quickserial: async () => { key("o"); await wait(300); await click("Serial"); },
   // Pestaña abierta por conexión rápida: "Guardar como sesión…" en la barra de estado.
-  quicktab: async () => { await click("Conexión rápida sin guardar"); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); await click("Conectar"); },
+  quicktab: async () => { key("o"); await wait(300); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); await click("Conectar"); },
   packs: async () => { await open("core-sw01"); await click("Catálogo de comandos"); await click("Packs de comandos"); },
   split: async () => { await open("core-sw01"); await open("ar-wan01"); await open("dist-sw01"); await open("sw-acceso-sur"); await click("Vista dividida: ver 2 o 4 pestañas a la vez"); await click("4 en cuadrícula (2x2)"); },
   backup: async () => { await open("core-sw01"); await open("ar-wan01"); await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Respaldos"); await click("Comparar A y B"); },
@@ -1849,7 +1849,7 @@ Object.assign(scenes, {
   "s-vault": async () => { await click("Ajustes"); await wait(300); await click("Credenciales"); },
   "session-new": async () => { await click("Nueva sesión"); },
   "session-edit": async () => { await wait(300); const row = [...document.querySelectorAll("[title]")].find((e) => e.title.startsWith("192.0.2.1")); row?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })); const ed = row?.querySelector('[title="Editar"]') ?? find("Editar"); ed?.dispatchEvent(new MouseEvent("click", { bubbles: true })); },
-  "quick-telnet": async () => { await click("Conexión rápida sin guardar"); await click("Telnet"); },
+  "quick-telnet": async () => { key("o"); await wait(300); await click("Telnet"); },
   confirm: async () => { await open("core-sw01"); await open("ar-wan01"); await wait(300); window.dispatchEvent(new KeyboardEvent("keydown", { key: "w", metaKey: true, ctrlKey: true, bubbles: true })); },
   approval: async () => { await wait(800); emit("mcp-approval", { id: "a1", tool: "send_command", target: "core-sw01 (192.0.2.1)", detail: "configure terminal\ninterface GigabitEthernet1/0/4\n no shutdown\nend" }); },
   // Con &mcp=1: aprobación de una consulta con la conexión real de la pestaña (ofrece la ventana de consultas)
