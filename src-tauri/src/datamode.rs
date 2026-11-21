@@ -270,8 +270,8 @@ pub fn data_unlock(master: String, app: tauri::AppHandle, state: State<'_, AppSt
     Ok(r)
 }
 
-/// Bloquea los datos y la bóveda.
-#[tauri::command]
+/// Bloquea los datos y la bóveda. async: el bloqueo escribe lo pendiente de los logs cifrados.
+#[tauri::command(async)]
 pub fn data_lock(app: tauri::AppHandle, state: State<'_, AppState>) {
     state.creds.lock();
     state.bundle.clear();

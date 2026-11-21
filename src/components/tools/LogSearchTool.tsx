@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -121,7 +121,7 @@ function Check({ checked, onChange, label, disabled }: { checked: boolean; onCha
   );
 }
 
-function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit) => void }) {
+const HitRow = memo(function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit) => void }) {
   const ctx = (text: string, n: number, key: string) => (
     <div key={key} className="flex gap-2 text-muted">
       <span className="w-12 shrink-0 text-right tabular-nums select-none">{n}</span>
@@ -129,7 +129,9 @@ function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit) => void }) {
     </div>
   );
   return (
-    <div className="group py-1 border-t border-line first:border-0 font-mono text-[11.5px] leading-[1.45]">
+    // Hasta miles de coincidencias: las que quedan fuera de la vista no se calculan ni se pintan
+    // (content-visibility). El tamaño estimado se reemplaza por el real una vez dibujada.
+    <div className="group py-1 border-t border-line first:border-0 font-mono text-[11.5px] leading-[1.45] [content-visibility:auto] [contain-intrinsic-size:auto_44px]">
       {hit.before.map((t, i) => ctx(t, hit.line - hit.before.length + i, `b${i}`))}
       <div className="flex gap-2">
         <span className="w-12 shrink-0 text-right tabular-nums text-muted select-none">{hit.line}</span>
@@ -150,7 +152,8 @@ function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit) => void }) {
           onClick={() => onCopy(hit)}
           title="Copiar línea"
           aria-label={`Copiar la línea ${hit.line}`}
-          className="shrink-0 w-6 h-6 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
+          // Anillo de foco por dentro: la fila recorta lo que sale de su borde (content-visibility).
+          className="shrink-0 w-6 h-6 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover focus-visible:outline-offset-[-2px]"
         >
           <Copy size={12} />
         </button>
@@ -158,9 +161,13 @@ function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit) => void }) {
       {hit.after.map((t, i) => ctx(t, hit.line + 1 + i, `a${i}`))}
     </div>
   );
-}
+});
 
-function FileGroup({
+/**
+ * Memorizado: cada evento de avance trae solo los archivos nuevos (los demás conservan su objeto) y
+ * al escribir en el campo de búsqueda los resultados no cambian; así no se redibujan miles de líneas.
+ */
+const FileGroup = memo(function FileGroup({
   file,
   open,
   onToggle,
@@ -171,7 +178,7 @@ function FileGroup({
 }: {
   file: FileHits;
   open: boolean;
-  onToggle: () => void;
+  onToggle: (f: FileHits) => void;
   onOpen: (f: FileHits, reveal: boolean) => void;
   /** Visor dentro de la app (descifra en memoria; la única forma de leerlo con la carpeta cifrada). */
   onView: (f: FileHits) => void;
@@ -186,7 +193,7 @@ function FileGroup({
         <button
           type="button"
           aria-expanded={open}
-          onClick={onToggle}
+          onClick={() => onToggle(file)}
           className="flex-1 min-w-0 flex items-center gap-2 pl-2 pr-1 py-1.5 text-left rounded-lg hover:bg-hover"
         >
           <ChevronRight size={14} aria-hidden className={`shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`} />
@@ -249,7 +256,9 @@ function FileGroup({
       )}
     </section>
   );
-}
+});
+
+const fileKey = (f: FileHits) => `${f.kind}:${f.rel}`;
 
 export default function LogSearchTool({
   visible,
@@ -302,13 +311,17 @@ export default function LogSearchTool({
     start(r.params);
   };
 
-  const key = (f: FileHits) => `${f.kind}:${f.rel}`;
-  const toggle = (f: FileHits) =>
-    setCollapsed((s) => {
-      const n = new Set(s);
-      if (!n.delete(key(f))) n.add(key(f));
-      return n;
-    });
+  const key = fileKey;
+  // Acciones estables (solo usan setters): FileGroup y HitRow están memorizados.
+  const toggle = useCallback(
+    (f: FileHits) =>
+      setCollapsed((s) => {
+        const n = new Set(s);
+        if (!n.delete(key(f))) n.add(key(f));
+        return n;
+      }),
+    [key],
+  );
   const [viewing, setViewing] = useState<FileHits | null>(null);
   const [encrypted, setEncrypted] = useState(false);
   useEffect(() => {
@@ -316,15 +329,15 @@ export default function LogSearchTool({
       .then((s) => setEncrypted(!!s?.encrypted))
       .catch(() => {});
   }, []);
-  const openFile = (f: FileHits, reveal: boolean) => {
+  const openFile = useCallback((f: FileHits, reveal: boolean) => {
     setError("");
     invoke("logsearch_open", { kind: f.kind, rel: f.rel, reveal }).catch((e) => setError(String(e)));
-  };
-  const copy = (h: Hit) => {
+  }, []);
+  const copy = useCallback((h: Hit) => {
     writeText(copyLine(h))
       .then(() => setNote("Línea copiada."))
       .catch(() => setError("No se pudo copiar al portapapeles."));
-  };
+  }, []);
 
   const { files, progress, summary } = state;
   const hits = useMemo(() => totalHits(files), [files]);
@@ -493,7 +506,7 @@ export default function LogSearchTool({
         >
           <div className="space-y-2">
             {files.map((f) => (
-              <FileGroup key={key(f)} file={f} open={!collapsed.has(key(f))} onToggle={() => toggle(f)} onOpen={openFile} onView={setViewing} encrypted={encrypted} onCopy={copy} />
+              <FileGroup key={key(f)} file={f} open={!collapsed.has(key(f))} onToggle={toggle} onOpen={openFile} onView={setViewing} encrypted={encrypted} onCopy={copy} />
             ))}
           </div>
         </Section>

@@ -202,7 +202,7 @@ export function BroadcastBar() {
           {current ? ` · ${current.name}` : ""}
         </span>
         <div className="w-32 h-1.5 rounded-full bg-hover overflow-hidden">
-          <div className="h-full bg-accent transition-all" style={{ width: `${pct}%` }} />
+          <div className="h-full w-full origin-left bg-accent transition-transform" style={{ transform: `scaleX(${pct / 100})` }} />
         </div>
         <span className="flex-1" />
         <button className="text-accent hover:underline" onClick={() => setDetail((d) => !d)}>

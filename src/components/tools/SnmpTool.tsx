@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -841,8 +841,6 @@ function TrapSection({
     refreshRunning();
   };
 
-  const tone = { danger: "text-danger", ok: "text-ok", warn: "text-warn", muted: "text-fg" } as const;
-
   return (
     <Section
       title="Receptor de traps"
@@ -917,43 +915,59 @@ function TrapSection({
       </div>
       <div className="mt-2 max-h-[420px] overflow-y-auto">
         {traps.length === 0 && <p className="text-body-sm text-muted">{on ? "Esperando traps…" : "Inicia el receptor para ver los traps de los equipos."}</p>}
-        {traps.map((t) => {
-          const sum = trapSummary(t);
-          const expanded = open === t.id;
-          return (
-            <div key={t.id} className="border-t border-line first:border-0 py-1.5 text-body-sm">
-              <button
-                type="button"
-                className="w-full flex items-center gap-3 text-left"
-                aria-expanded={expanded}
-                aria-controls={expanded ? `${detailId}-${t.id}` : undefined}
-                onClick={() => setOpen(expanded ? null : t.id)}
-              >
-                <span className="text-muted whitespace-nowrap tabular-nums">{new Date(t.ts).toLocaleTimeString("es-CL")}</span>
-                <span className="font-mono whitespace-nowrap">{t.src}</span>
-                <span className="text-muted whitespace-nowrap">
-                  {t.version}
-                  {t.kind === "inform" ? " inform" : ""}
-                </span>
-                <span className={`font-medium whitespace-nowrap ${tone[sum.tone]}`}>{sum.title}</span>
-                <span className="text-muted truncate">{sum.detail || t.note || ""}</span>
-              </button>
-              {expanded && (
-                <div id={`${detailId}-${t.id}`} className="mt-1 ml-4 space-y-0.5 font-mono text-body-sm select-text">
-                  {t.uptime && <div className="text-muted">sysUpTime {t.uptime}</div>}
-                  {t.user && <div className="text-muted">usuario {t.user}</div>}
-                  {t.note && <div className="text-muted">{t.note}</div>}
-                  {t.vbs.map((v, k) => (
-                    <div key={k} className="break-all">
-                      <span className="text-muted">{oidName(v.oid) || v.oid}</span> = {v.value}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {traps.map((t) => (
+          <TrapItem key={t.id} t={t} expanded={open === t.id} detailId={detailId} onToggle={setOpen} />
+        ))}
       </div>
     </Section>
   );
 }
+
+const TRAP_TONE = { danger: "text-danger", ok: "text-ok", warn: "text-warn", muted: "text-fg" } as const;
+
+/** Fila de trap memorizada: con 2.000 traps en la lista, al llegar uno nuevo solo se dibuja ese. */
+const TrapItem = memo(function TrapItem({
+  t,
+  expanded,
+  detailId,
+  onToggle,
+}: {
+  t: TrapRow;
+  expanded: boolean;
+  detailId: string;
+  onToggle: (id: number | null) => void;
+}) {
+  const sum = trapSummary(t);
+  return (
+    <div className="border-t border-line first:border-0 py-1.5 text-body-sm">
+      <button
+        type="button"
+        className="w-full flex items-center gap-3 text-left"
+        aria-expanded={expanded}
+        aria-controls={expanded ? `${detailId}-${t.id}` : undefined}
+        onClick={() => onToggle(expanded ? null : t.id)}
+      >
+        <span className="text-muted whitespace-nowrap tabular-nums">{new Date(t.ts).toLocaleTimeString("es-CL")}</span>
+        <span className="font-mono whitespace-nowrap">{t.src}</span>
+        <span className="text-muted whitespace-nowrap">
+          {t.version}
+          {t.kind === "inform" ? " inform" : ""}
+        </span>
+        <span className={`font-medium whitespace-nowrap ${TRAP_TONE[sum.tone]}`}>{sum.title}</span>
+        <span className="text-muted truncate">{sum.detail || t.note || ""}</span>
+      </button>
+      {expanded && (
+        <div id={`${detailId}-${t.id}`} className="mt-1 ml-4 space-y-0.5 font-mono text-body-sm select-text">
+          {t.uptime && <div className="text-muted">sysUpTime {t.uptime}</div>}
+          {t.user && <div className="text-muted">usuario {t.user}</div>}
+          {t.note && <div className="text-muted">{t.note}</div>}
+          {t.vbs.map((v, k) => (
+            <div key={k} className="break-all">
+              <span className="text-muted">{oidName(v.oid) || v.oid}</span> = {v.value}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});

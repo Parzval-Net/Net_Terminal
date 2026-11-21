@@ -259,6 +259,20 @@ button {
   }
 }
 
+/* Vistas ocultas con visibility:hidden (Herramientas en segundo plano, app bloqueada): las animaciones
+   infinitas de adentro (animate-pulse, animate-spin) seguían corriendo y recalculaban estilos en cada
+   cuadro sin verse. Se pausan y retoman donde quedaron al volver a mostrarse. */
+/* Panel desplazándose (useScrollQuiet): sin hover en las filas que pasan bajo el cursor. */
+[data-scrolling] * {
+  pointer-events: none !important;
+}
+
+.anims-paused *,
+.anims-paused *::before,
+.anims-paused *::after {
+  animation-play-state: paused !important;
+}
+
 /* Diálogos: el contenedor recibe el foco solo por programa (no hay nada enfocable dentro); sin anillo. */
 [role="dialog"]:focus,
 [role="alertdialog"]:focus {

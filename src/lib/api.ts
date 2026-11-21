@@ -54,9 +54,13 @@ export interface McpAuditEvent {
 /** Carpeta de logs elegida por el usuario (null: la predeterminada). */
 export const logsDirSet = (path: string | null) => invoke("logs_dir_set", { path });
 
-/** Enciende o apaga el log de una conexión; devuelve la ruta del archivo (null si quedó apagado). */
-export const setLogging = (id: string, enabled: boolean, opts: ReturnType<typeof logOptions>) =>
-  invoke<string | null>("set_logging", { id, enabled, ...opts });
+/**
+ * Enciende o apaga el log de una conexión; devuelve la ruta del archivo (null si quedó apagado).
+ * `resume`: archivo en el que seguir escribiendo tras reconectar. Async en el backend: la cola
+ * por conexión evita que un "apagar" rápido termine antes que el "encender" previo.
+ */
+export const setLogging = (id: string, enabled: boolean, opts: ReturnType<typeof logOptions>, resume?: string | null) =>
+  inOrder(`log:${id}`, () => invoke<string | null>("set_logging", { id, enabled, ...opts, resume }));
 
 // ---------- Sesiones guardadas y credenciales ----------
 

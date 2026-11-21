@@ -838,8 +838,8 @@ Permisos: `session` (leer y enviar comandos a la sesión activa, con el mismo co
 
 ## Publicar una versión
 
-1. Sube la versión en `package.json`, `src-tauri/Cargo.toml` y `src-tauri/tauri.conf.json`.
-2. `git tag v0.5.3 && git push origin v0.5.3`
+1. Sube la versión en `package.json`, `src-tauri/Cargo.toml` y `src-tauri/tauri.conf.json` (y agrega `novedades/vX.Y.Z.md`).
+2. Al llegar ese cambio a `main`, el workflow `release-tag` crea el tag `vX.Y.Z` sobre ese commit y lanza `build` en el tag (también se puede subir el tag a mano: `git tag v0.5.3 && git push origin v0.5.3`). Si una regla del repositorio restringe la creación de tags, "GitHub Actions" debe estar en su lista de excepciones.
 3. El workflow compila los 3 sistemas, firma los paquetes de actualización y crea el Release con instaladores, zip portable y `latest.json`.
 4. El workflow valida que el tag apunte a un commit de `main` y coincida con la versión de `tauri.conf.json`. El job que firma usa el environment `release`: apruébalo en la pestaña Actions para continuar.
 
@@ -892,6 +892,8 @@ Las pruebas de Node importan los `.ts` de `src/lib` directamente y requieren Nod
 
 - **`App.tsx`**: `lib/api.ts` agrupa las llamadas al backend (`invoke`) con nombre y tipo; `lib/useShortcuts.ts` (atajos globales), `lib/useUpdater.ts` (aviso y actualización), `lib/useTabPlatform.ts` (plataforma y ciclo de vida por pestaña) y `lib/useAppLayout.ts` (barra de sesiones, paneles de Notas y Comandos, modo foco y barra flotante, sobre `lib/panelLayout.ts`).
 - **Topología** (`components/tools/topology/`): `useTopoSnapshots`, `useTopoSelection` (equipo y ruta), `useTopoZoom` (con `useTopoSize`, sobre `lib/mapZoom.ts`), `useTopoHops` (saltos, rutas y credenciales, sobre `lib/hopTab.ts`) y `useTopoDiscovery` (consola y SNMP, con el lector de comandos de `lib/topoRun.ts`). Vistas: `TopoToolbar`, `TopoCanvas` (`TopoLayers`, `LinkTip`, `MapSummary`, `MapLegend`, `ZoomControls`) y `TopoPanel` con sus secciones (`PanelConfig`, `PanelStatus`, `PanelItem`). Constantes, tipos, estilos y persistencia de la interfaz: `topoConst`, `topoTypes`, `topoStyle`, `topoUi`.
+- **Presupuestos de rendimiento** (`npm run perf`, `scripts/perf/perf.mjs`; job `perf` de `ci` con `SLACK=1.5`): sobre un build de producción de la demo mide fluidez (60 fps esperados: mínimo 55 fps y hasta 3 cuadros de más de 18 ms por escenario) al arrastrar CLI Lab y Ajustes, desplazar la terminal y la auditoría, cambiar de pestaña y mover o hacer zoom en la topología con tráfico; el tiempo hasta ver el contenido al abrir CLI Lab, Herramientas, cada módulo y Ajustes (100 ms la primera vez y 50 ms al volver, el umbral de respuesta "instantánea"); la CPU en reposo con todo abierto (10 %) y el JavaScript inicial de la app (400 KB gzip). El terminal se mide sin WebGL porque sin GPU Chromium lo emula por software. `CPU=4` simula un equipo 4 veces más lento. Dentro de la app, la paleta de comandos tiene "Medidor de fluidez (FPS)" para comprobarlo en macOS (WebKit), Windows o Linux.
+- Vistas en chunks propios: usar `lazyView` (`src/lib/lazyView.tsx`), no `React.lazy` con `Suspense`, que retiene hasta 300 ms el contenido aunque ya esté descargado; agregarlas a la precarga en reposo (`LAZY_DIALOGS` en `App.tsx` o `preloadTools` en `ToolsView.tsx`).
 - Una prueba de rendimiento manual al tocar Topología: con `?scene=topology-big` (400 equipos) del backend simulado, arrastrar un equipo debe volver a dibujar solo sus enlaces y él (≈2 `LinkView` y 1 `NodeView` por movimiento) y el zoom y el arrastre del fondo no deben dibujar ninguna capa del mapa.
 
 ### Versión de esquema y respaldos de datos

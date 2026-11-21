@@ -2,14 +2,15 @@
   "name": "netterminal",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",
-  "version": "0.9.25",
+  "version": "0.9.26",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node scripts/tests/run-all.mjs"
+    "test": "node scripts/tests/run-all.mjs",
+    "perf": "node scripts/perf/perf.mjs"
   },
   "engines": {
     "node": ">=22.15"

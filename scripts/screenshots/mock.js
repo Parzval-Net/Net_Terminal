@@ -577,8 +577,8 @@ const handlers = {
   get_settings: () => settings,
   save_settings: () => null,
   save_topology: () => null,
-  app_version: () => "0.9.25",
-  update_check: () => ({ current: "0.9.25", latest: "0.9.25", newer: false, url: "", notes: "", published: "", supported: true, reason: null }),
+  app_version: () => "0.9.26",
+  update_check: () => ({ current: "0.9.26", latest: "0.9.26", newer: false, url: "", notes: "", published: "", supported: true, reason: null }),
   app_repo: () => "Parzval-Net/Net_Terminal",
   cmdpacks_list: () => [],
   list_notes: () => [
@@ -933,7 +933,7 @@ const handlers = {
   bundle_inspect: ({ password }) => {
     if (password !== "respaldo-de-prueba") throw "Contraseña incorrecta, o el archivo está dañado o fue modificado";
     return {
-      token: "tok1", app: "0.9.25", created: "2026-11-02T10:00:00Z",
+      token: "tok1", app: "0.9.26", created: "2026-11-02T10:00:00Z",
       sessions: [
         { id: "b1", name: "core-sw03", type: "ssh", host: "192.0.2.3", username: "admin", folder: "Sitio Central/Core", created_at: "" },
         { id: "b2", name: "sw-acceso-norte", type: "telnet", host: "203.0.113.99", folder: "Sucursales/Norte", created_at: "" },
@@ -1631,6 +1631,8 @@ window.__TAURI_INTERNALS__ = {
   },
 };
 window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+// Medición: emite un evento del backend simulado (p. ej. ráfagas de syslog o traps) desde Playwright.
+window.__ntMockEmit = emit;
 
 // ---- Escenas para las capturas: demo.html?scene=<nombre> ----
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -1,4 +1,4 @@
-import { type ReactNode, Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { moveItem } from "./lib/tabDrag";
 import {
   addSessions,
@@ -28,13 +28,13 @@ import { ActivityBar } from "./components/ActivityBar";
 import { HistoryMenu } from "./components/HistoryMenu";
 import { Toasts, type ToastItem, type ToastKind } from "./components/Toasts";
 import { errText, failText } from "./lib/errors";
-import { TerminalView, TermController } from "./components/TerminalView";
+import { TerminalView, TermController, preloadTermAddons } from "./components/TerminalView";
 import type { CredChange } from "./components/SessionModal";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { hopCloseNote, runningHops } from "./lib/hopRegistry";
 import { CloseManyMessage } from "./components/CloseManyMessage";
 import { CloseScope, summarizeClose, tabsToClose } from "./lib/closeAll";
-import { NotesPanel } from "./components/NotesPanel";
+import { panelClass } from "./components/PanelResize";
 import { CommandsPanel } from "./components/CommandsPanel";
 import { vendorFor } from "./lib/vendorFor";
 import { CatalogEntry, Pack, PackCommand, Risk, buildCatalog, computeRisk, orderPacks, riskLabel, validatePack } from "./lib/packs";
@@ -78,11 +78,27 @@ import { useVaultAutoLock } from "./lib/vaultLock";
 import { useModal } from "./lib/useModal";
 import { QuickBolt, SessionIcon, isQuickSession, typeLabel } from "./components/SessionIcon";
 import "./App.css";
+import { lazyView } from "./lib/lazyView";
+import { PerfMeter } from "./components/PerfMeter";
 
 // Vistas pesadas y de uso ocasional: se cargan aparte para aligerar el arranque.
-const ToolsView = lazy(() => import("./components/tools/ToolsView").then((m) => ({ default: m.ToolsView })));
-const SettingsModal = lazy(() => import("./components/SettingsModal").then((m) => ({ default: m.SettingsModal })));
-const ImportDialog = lazy(() => import("./components/ImportDialog").then((m) => ({ default: m.ImportDialog })));
+// Se precargan cuando la app queda libre tras el arranque: al abrirlas ya están y se dibujan al instante.
+const ToolsView = lazyView(
+  () =>
+    import("./components/tools/ToolsView").then((m) => {
+      m.preloadTools();
+      return m.ToolsView;
+    }),
+  (p: { active: boolean }) => <ToolsLoading active={p.active} />,
+);
+// Panel de notas (con editor, candado y vista de diagramas): solo al abrirlo. Mientras llega el
+// chunk se reserva su ancho para que el diseño no salte.
+const NotesPanel = lazyView(
+  () => import("./components/NotesPanel").then((m) => m.NotesPanel),
+  (p: { width: number; overlay?: boolean }) => <aside aria-hidden className={panelClass(!!p.overlay)} style={{ width: p.width }} />,
+);
+const SettingsModal = lazyView(() => import("./components/SettingsModal").then((m) => m.SettingsModal));
+const ImportDialog = lazyView(() => import("./components/ImportDialog").then((m) => m.ImportDialog));
 
 /**
  * Diálogos que solo se montan al abrirse: fuera del arranque, en chunks propios que se precargan
@@ -100,22 +116,7 @@ const DIALOGS = {
   exportSessions: () => import("./components/ExportSessionsDialog").then((m) => m.ExportSessionsDialog),
   cliLab: () => import("./components/CliLab").then((m) => m.CliLab),
 };
-function lazyDialog<P extends object>(load: () => Promise<React.ComponentType<P>>) {
-  // Sin React.lazy: Suspense retiene hasta 300 ms el contenido que reemplaza al fallback, y el
-  // diálogo tardaba en aparecer aunque ya estuviera precargado.
-  let Comp: React.ComponentType<P> | null = null;
-  let pending: Promise<void> | null = null;
-  const preload = () => (pending ??= load().then((c) => void (Comp = c)));
-  function LazyDialog(props: P) {
-    const [, loaded] = useState(false);
-    useEffect(() => {
-      if (!Comp) preload().then(() => loaded(true), console.error);
-    }, []);
-    return Comp ? <Comp {...props} /> : null;
-  }
-  LazyDialog.preload = preload;
-  return LazyDialog;
-}
+const lazyDialog = lazyView;
 const SessionModal = lazyDialog(DIALOGS.session);
 const CommandPalette = lazyDialog(DIALOGS.palette);
 const QuickConnectDialog = lazyDialog(DIALOGS.quick);
@@ -126,7 +127,7 @@ const ApprovalDialog = lazyDialog(DIALOGS.approval);
 const ScriptLaunchDialog = lazyDialog(DIALOGS.script);
 const ExportSessionsDialog = lazyDialog(DIALOGS.exportSessions);
 const CliLab = lazyDialog(DIALOGS.cliLab);
-const LAZY_DIALOGS = [SessionModal, CommandPalette, QuickConnectDialog, PacksModal, CommandEditor, MacroModal, ApprovalDialog, ScriptLaunchDialog];
+const LAZY_DIALOGS = [ToolsView, SettingsModal, CliLab, SessionModal, CommandPalette, QuickConnectDialog, PacksModal, CommandEditor, MacroModal, ApprovalDialog, ScriptLaunchDialog, ExportSessionsDialog, ImportDialog];
 
 const LOCAL: Session = { id: "local", name: "Terminal local", type: "local", created_at: "" };
 
@@ -212,6 +213,7 @@ function Workspace({
   /** `tabId`: la pestaña de conexión rápida que pasa a usar la sesión guardada. */
   const [modal, setModal] = useState<{ session?: Session; folder?: string; tabId?: string } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [perfMeter, setPerfMeter] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   /** "Conectar como…": sesión guardada para la que se pide otro usuario (null: cerrado). */
@@ -760,6 +762,8 @@ function Workspace({
     const load = () => {
       import("./lib/builtinPacks").then((m) => setBuiltinPacks(m.builtinPacks)).catch(console.error);
       for (const d of LAZY_DIALOGS) d.preload().catch(() => {});
+      preloadTermAddons().catch(() => {});
+      NotesPanel.preload().catch(() => {});
     };
     if (typeof window.requestIdleCallback !== "function") {
       const t = window.setTimeout(load, 200);
@@ -1546,7 +1550,7 @@ function Workspace({
             <SplitPanes split={split!} tabs={tabs} states={states} activeId={activeId} onPick={h.pickPane} onFocus={setActiveId} />
           )}
           {toolsOpen && (
-            <Suspense fallback={<ToolsLoading active={activeId === "tools"} />}>
+            <>
               <ToolsView
                 active={activeId === "tools"}
                 onBack={h.toggleTools}
@@ -1565,7 +1569,7 @@ function Workspace({
                 onScp={h.scp}
                 terminals={terminals}
               />
-            </Suspense>
+            </>
           )}
           {tabs.length === 0 && activeId !== "tools" && (
             <EmptyState
@@ -1674,7 +1678,7 @@ function Workspace({
         />
       )}
       {settingsOpen && (
-        <Suspense fallback={null}>
+        <>
           <SettingsModal
             settings={settings}
             appDark={dark}
@@ -1695,7 +1699,7 @@ function Workspace({
               activeCtrl()?.focus();
             }}
           />
-        </Suspense>
+        </>
       )}
       {confirm && (
         <ConfirmDialog
@@ -1802,10 +1806,11 @@ function Workspace({
         <ExportSessionsDialog sessions={sessions} folder={exportFolder || undefined} onClose={() => setExportFolder(undefined)} />
       )}
       {importOpen && (
-        <Suspense fallback={null}>
+        <>
           <ImportDialog folders={folders} sessions={sessions} onImport={importSessions} onClose={() => setImportOpen(false)} settings={settings} onSettings={update} onPacks={loadPacks} />
-        </Suspense>
+        </>
       )}
+      {perfMeter && <PerfMeter onClose={() => setPerfMeter(false)} />}
       {paletteOpen && (
         <CommandPalette
           sessions={sessions}
@@ -1837,6 +1842,11 @@ function Workspace({
                     : { label: "Desconectar sesión", detail: "Corta la conexión; la pestaña queda abierta", danger: true, run: () => h.disconnect() },
                 ]
               : []),
+            {
+              label: perfMeter ? "Ocultar medidor de fluidez" : "Medidor de fluidez (FPS)",
+              detail: "Muestra cuadros por segundo y el cuadro más lento mientras usas la app",
+              run: () => setPerfMeter((v) => !v),
+            },
             { label: "Modo foco", detail: focusMode ? "Salir: vuelve a mostrar barras y paneles" : "Oculta barras y paneles: solo pestañas y terminal", shortcut: focusLabel, run: h.toggleFocus },
             { label: "Agregar script desde el equipo…", detail: "Copia un .py de cualquier carpeta a la carpeta de scripts", run: h.addScript },
             ...(settings.showButtonBar
