@@ -35,10 +35,14 @@ export default function BackupTool({
   /** Sesiones guardadas en el árbol, para decir cuántas de ellas están conectadas (opcional). */
   totalSessions?: number;
 }) {
-  // Una sesión puede estar abierta en varias pestañas: se respalda una vez.
+  // Una sesión puede estar abierta en varias pestañas: se respalda una vez. Las conexiones rápidas
+  // no tienen id de sesión (""): cada una es un equipo distinto y se distingue por su conexión.
   const devices = useMemo(() => {
     const seen = new Set<string>();
-    return terminals.filter((t) => (seen.has(t.session.id) ? false : (seen.add(t.session.id), true)));
+    return terminals.filter((t) => {
+      const key = t.session.id || t.connId;
+      return seen.has(key) ? false : (seen.add(key), true);
+    });
   }, [terminals]);
   const folders = useMemo(
     () => [...new Set(devices.map((d) => normPath(d.session.folder)).filter(Boolean))].sort(),

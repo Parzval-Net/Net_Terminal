@@ -89,6 +89,18 @@ assert.equal(Q.fold("Conexión RÁPIDA"), "conexion rapida");
   assert.equal(tildes[0].session.name, "conexion-lab", "sin tildes");
 
   assert.equal(Q.matchConnect("core", sessions, 2).filter((m) => !m.quick).length, 2, "límite de guardadas");
+
+  // IP completa: Enter (primer candidato) no abre otra sesión guardada cuyo host solo la contiene.
+  const exact = Q.matchConnect("192.0.2.1", sessions);
+  assert.equal(exact[0].session.name, "core-sw01", "host exacto primero, aunque 192.0.2.10 esté antes en la lista");
+  assert.ok(exact[1].quick && exact[2].quick, "luego la conexión rápida");
+  assert.equal(exact[3].session.name, "core", "las que solo contienen la IP van al final");
+  const fresh = Q.matchConnect("192.0.2.", sessions);
+  assert.ok(!fresh[0].quick, "IP a medio escribir: sigue siendo una búsqueda, guardadas primero");
+  const other = Q.matchConnect("10.0.0.9", [s("lab", "10.0.0.99"), s("lab2", "10.0.0.90")]);
+  assert.ok(other[0].quick, "sin sesión guardada exacta, la conexión rápida va primero");
+  assert.equal(other[0].session.host, "10.0.0.9");
+  assert.equal(other.filter((m) => !m.quick).length, 2, "las parciales siguen disponibles");
 }
 
 console.log("quickTarget: OK");

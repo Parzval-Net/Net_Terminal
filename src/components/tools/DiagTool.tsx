@@ -43,11 +43,12 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
   const [scanning, setScanning] = useState(false);
   const [portErr, setPortErr] = useState("");
 
-  useEffect(() => () => void invoke("monitor_stop", { id: QUICK }), []);
+  useEffect(() => () => void invoke("monitor_stop", { id: QUICK }).catch(() => {}), []);
 
   const togglePing = async () => {
     if (pinging) {
-      await invoke("monitor_stop", { id: QUICK });
+      // Aunque detener falle (el monitor ya no existe), el botón vuelve a "Iniciar".
+      await invoke("monitor_stop", { id: QUICK }).catch(() => {});
       return setPinging(false);
     }
     setPingErr("");

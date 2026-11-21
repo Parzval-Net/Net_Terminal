@@ -366,7 +366,12 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
 type TargetFn = () => ReturnType<typeof targetParams>;
 
 function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProfile }) {
-  const [op, setOp] = useState<Op>("get");
+  const [opSel, setOp] = useState<Op>("get");
+  // SNMPv1 no tiene GETBULK: si quedó elegido y el perfil pasa a v1, la consulta usa GETNEXT
+  // (antes no quedaba ninguna opción marcada ni alcanzable con teclado y se enviaba GETBULK).
+  const op: Op = opSel === "getbulk" && profile.version === "1" ? "getnext" : opSel;
+  /** Operación de la consulta en curso: "Detener" depende de ella, no de la opción marcada ahora. */
+  const [runOp, setRunOp] = useState<Op | null>(null);
   const [oid, setOid] = useState("1.3.6.1.2.1.1.1.0");
   const [maxRep, setMaxRep] = useState(10);
   const [maxRows, setMaxRows] = useState(10000);
@@ -406,6 +411,7 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
     setStatus("");
     setRows([]);
     setBusy(true);
+    setRunOp(o);
     const oids = id.split(/[\s,]+/).filter(Boolean);
     const start = performance.now();
     try {
@@ -473,7 +479,7 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
             <input className="field" type="number" min={1} max={100000} value={maxRows} onChange={(e) => setMaxRows(Math.min(100000, Math.max(1, Number(e.target.value) || 10000)))} />
           </Label>
         )}
-        {busy && op === "walk" ? (
+        {busy && runOp === "walk" ? (
           <Btn onClick={stop}>
             <Square size={13} /> Detener
           </Btn>

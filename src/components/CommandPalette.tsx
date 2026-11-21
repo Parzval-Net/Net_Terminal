@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, History, ListX, Search } from "lucide-react";
 import { Session, sessionTarget } from "../types";
@@ -43,6 +43,7 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
   const modal = useModal({ onClose });
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
   // Últimos destinos de conexión rápida (archivo en la carpeta de datos, máx. 20).
   const [recent, setRecent] = useState<string[]>([]);
   useEffect(() => {
@@ -94,6 +95,9 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
   const clearRecent = () => {
     invoke("recent_targets_clear").catch(() => {});
     setRecent([]);
+    // La lista se acorta y el botón desaparece: la opción activa vuelve al inicio y el foco al campo.
+    setIndex(0);
+    inputRef.current?.focus();
   };
 
   // Grupos consecutivos de la lista plana (el índice de cada opción sigue siendo global: flechas y aria-activedescendant).
@@ -181,6 +185,7 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
         <div className="flex items-center gap-2.5 px-4 h-12 border-b border-line">
           <Search aria-hidden size={16} className="text-muted" />
           <input
+            ref={inputRef}
             autoFocus
             role="combobox"
             aria-expanded
@@ -205,31 +210,37 @@ export function CommandPalette({ sessions, onClose, onOpen, actions = [] }: Prop
             }}
           />
         </div>
-        <ul id="palette-list" role="listbox" aria-label="Resultados" className="max-h-[50vh] overflow-y-auto p-1.5">
-          {groups.map((g) => (
-            <li key={`${g.group}-${g.start}`} role="presentation" className="[&+&]:mt-1.5">
-              <div className="flex items-center justify-between px-3 h-7 text-[11px] font-semibold uppercase tracking-wide text-muted">
-                <span id={`palette-grp-${g.group}`}>{GROUP_LABEL[g.group]}</span>
-                {g.group === "recent" && (
-                  <button
-                    className="h-6 px-1.5 -mr-1.5 rounded normal-case font-normal tracking-normal hover:text-fg hover:bg-hover"
-                    onClick={clearRecent}
-                  >
-                    Borrar recientes
-                  </button>
-                )}
-              </div>
-              <ul role="group" aria-labelledby={`palette-grp-${g.group}`}>
-                {g.items.map((item, k) => renderItem(item, g.start + k))}
-              </ul>
-            </li>
-          ))}
-          {items.length === 0 && (
-            <li role="presentation" className="px-3 py-6 text-center text-muted text-[12px]">
-              Sin resultados. Prueba con <code>ssh user@host</code> o <code>telnet host 23</code>.
-            </li>
+        {/* "Borrar recientes" va fuera del listbox (un listbox solo admite opciones y grupos): queda sobre el encabezado de Recientes. */}
+        <div className="relative max-h-[50vh] overflow-y-auto p-1.5">
+          {groups[0]?.group === "recent" && (
+            <button
+              className="absolute z-10 top-2 right-3 h-6 px-1.5 rounded text-[11px] text-muted hover:text-fg hover:bg-hover"
+              onClick={clearRecent}
+            >
+              Borrar recientes
+            </button>
           )}
-        </ul>
+          <ul id="palette-list" role="listbox" aria-label="Resultados">
+            {groups.map((g) => (
+              <li key={`${g.group}-${g.start}`} role="presentation" className="[&+&]:mt-1.5">
+                <div
+                  id={`palette-grp-${g.group}`}
+                  className="flex items-center px-3 h-7 text-[11px] font-semibold uppercase tracking-wide text-muted"
+                >
+                  {GROUP_LABEL[g.group]}
+                </div>
+                <ul role="group" aria-labelledby={`palette-grp-${g.group}`}>
+                  {g.items.map((item, k) => renderItem(item, g.start + k))}
+                </ul>
+              </li>
+            ))}
+            {items.length === 0 && (
+              <li role="presentation" className="px-3 py-6 text-center text-muted text-[12px]">
+                Sin resultados. Prueba con <code>ssh user@host</code> o <code>telnet host 23</code>.
+              </li>
+            )}
+          </ul>
+        </div>
       </div>
     </div>
   );

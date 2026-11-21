@@ -159,6 +159,7 @@ export const Sidebar = memo(function Sidebar(p: Props) {
   /** Aviso bajo la cabecera: los errores en rojo; una confirmación (p. ej. host copiado) en tono neutro. */
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
+  const addWasOpen = useRef(false);
   // Teclado (árbol WAI-ARIA con tabindex móvil): la fila que recibe el foco con Tab y la que debe tomarlo tras el próximo dibujo.
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const pendingFocus = useRef<{ key: string; tries: number } | null>(null);
@@ -835,7 +836,13 @@ export const Sidebar = memo(function Sidebar(p: Props) {
             aria-label="Agregar sesión o carpeta"
             aria-haspopup="menu"
             aria-expanded={menu?.owner === "add"}
-            onClick={(e) => addMenu(e.currentTarget)}
+            // El mousedown fuera del menú ya lo cierra: con el menú abierto, el clic en "+" no lo reabre.
+            onMouseDown={() => (addWasOpen.current = menu?.owner === "add")}
+            onClick={(e) => {
+              const wasOpen = addWasOpen.current && e.detail !== 0;
+              addWasOpen.current = false;
+              if (!wasOpen) addMenu(e.currentTarget);
+            }}
           >
             <Plus size={16} />
           </HeadBtn>
@@ -849,7 +856,7 @@ export const Sidebar = memo(function Sidebar(p: Props) {
             className={`field !h-7 !pl-8 !text-[12px] ${matches ? "!pr-10" : ""}`}
             placeholder="Filtrar sesiones…"
             title="Filtra las sesiones por nombre, IP, usuario o carpeta. Esc: limpiar"
-            aria-label="Filtrar sesiones por nombre, IP o carpeta"
+            aria-label="Filtrar sesiones por nombre, IP, usuario o carpeta"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             ref={filterRef}

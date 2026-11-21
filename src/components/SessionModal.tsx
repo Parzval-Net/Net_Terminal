@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, KeyRound, Plus, Trash2, X } from "lucide-react";
@@ -84,8 +84,10 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
 
   // El nombre sigue al host mientras esté vacío o sea el host anterior; en una sesión ya guardada no se toca.
   const followName = !initial?.id;
+  // Un nombre escrito a mano no se pisa aunque coincida con lo que va del host ("sw" y luego host "sw1…").
+  const nameTyped = useRef(false);
   const setHost = (host: string) =>
-    setS((p) => ({ ...p, host, name: followName ? followHostName(p.name, p.host, host) : p.name }));
+    setS((p) => ({ ...p, host, name: followName && !nameTyped.current ? followHostName(p.name, p.host, host) : p.name }));
   // Opciones avanzadas de SSH: abiertas si la sesión ya usa alguna; después se abren y cierran solo a mano.
   const [sshAdvanced, setSshAdvanced] = useState(() => !!(s.ssh_args || s.legacy_ssh));
 
@@ -244,7 +246,10 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
                 className="field"
                 value={s.name}
                 placeholder={s.type === "serial" ? "Consola switch" : s.type === "local" ? "Terminal local" : "Se toma del host"}
-                onChange={(e) => set("name", e.target.value)}
+                onChange={(e) => {
+                  nameTyped.current = !!e.target.value.trim();
+                  set("name", e.target.value);
+                }}
               />
             </Field>
             <Field label="Carpeta">
