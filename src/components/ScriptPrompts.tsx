@@ -5,6 +5,7 @@ import { FileCode2, KeyRound } from "lucide-react";
 import { riskLabel, type Risk } from "../lib/packs";
 import { type GatePrompt, type ScriptPrompt, type SecretPrompt, autoDecision, scriptLineRisk } from "../lib/scriptGate";
 import { useDragResize } from "../lib/useDragResize";
+import { useArmed } from "../lib/approvalArm";
 import { useModal } from "../lib/useModal";
 
 interface Props {
@@ -49,9 +50,10 @@ export function ScriptPrompts({ toast }: Props) {
     setQueue((q) => q.slice(1));
   };
   return current.kind === "gate" ? (
-    <GateDialog key={current.id} prompt={current} pending={queue.length} onDecide={(ok) => done(ok)} />
+    // El id es por ejecución: la clave incluye el run para que dos scripts no compartan diálogo.
+    <GateDialog key={`${current.run}:${current.id}`} prompt={current} pending={queue.length} onDecide={(ok) => done(ok)} />
   ) : (
-    <SecretDialog key={current.id} prompt={current} onDone={(v) => done(v !== null, v ?? undefined)} />
+    <SecretDialog key={`${current.run}:${current.id}`} prompt={current} onDone={(v) => done(v !== null, v ?? undefined)} />
   );
 }
 
@@ -59,6 +61,8 @@ function GateDialog({ prompt: p, pending, onDecide }: { prompt: GatePrompt; pend
   const win = useDragResize("scriptGateWindow", false);
   const modal = useModal();
   const risk: Risk = scriptLineRisk(p.line, p.opaque);
+  // Cada pedido nuevo deja «Permitir» inactivo un momento: un doble clic no aprueba el siguiente.
+  const { armed, canApprove } = useArmed(`${p.run}:${p.id}`);
   useEffect(() => {
     // Esc rechaza; Enter no aprueba a propósito (hay que hacer clic en Permitir).
     const onKey = (e: KeyboardEvent) => {
@@ -117,8 +121,9 @@ function GateDialog({ prompt: p, pending, onDecide }: { prompt: GatePrompt; pend
             Rechazar y detener
           </button>
           <button
-            onClick={() => onDecide(true)}
-            className={`px-3.5 h-8 rounded-md font-medium hover:opacity-90 ${risk === "disruptive" ? "bg-danger text-danger-fg" : "bg-accent text-accent-fg"}`}
+            onClick={() => canApprove() && onDecide(true)}
+            disabled={!armed}
+            className={`px-3.5 h-8 rounded-md font-medium hover:opacity-90 disabled:opacity-50 ${risk === "disruptive" ? "bg-danger text-danger-fg" : "bg-accent text-accent-fg"}`}
           >
             Permitir
           </button>
@@ -132,6 +137,8 @@ function SecretDialog({ prompt: p, onDone }: { prompt: SecretPrompt; onDone: (va
   const win = useDragResize<HTMLFormElement>("scriptSecretWindow", false);
   const modal = useModal();
   const input = useRef<HTMLInputElement>(null);
+  // Un Enter sostenido o un doble clic en Entregar no debe entregar vacío el pedido siguiente.
+  const { armed, canApprove } = useArmed(`${p.run}:${p.id}`);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -146,6 +153,7 @@ function SecretDialog({ prompt: p, onDone }: { prompt: SecretPrompt; onDone: (va
   // El valor se lee del campo al enviar: no pasa por el estado de React.
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canApprove()) return;
     const value = input.current?.value ?? "";
     if (input.current) input.current.value = "";
     onDone(value);
@@ -193,7 +201,7 @@ function SecretDialog({ prompt: p, onDone }: { prompt: SecretPrompt; onDone: (va
           <button type="button" onClick={() => onDone(null)} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover">
             Cancelar
           </button>
-          <button type="submit" className="px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90">
+          <button type="submit" disabled={!armed} className="px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90 disabled:opacity-50">
             Entregar
           </button>
         </footer>

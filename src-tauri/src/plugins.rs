@@ -6,6 +6,8 @@
 //!   y el código de entrada antes de confirmar.
 //! - Al aprobar se guarda el SHA-256 de todos los archivos. Si cambian después, el
 //!   plugin queda bloqueado hasta que el usuario lo revise y lo vuelva a habilitar.
+//!   Deshabilitar no borra ese hash: un plugin deshabilitado se sigue vigilando, y habilitar
+//!   un contenido distinto del aprobado exige que sea el mismo que se mostró en la revisión.
 //! - Sin el permiso "session" el plugin no puede leer ni escribir en la sesión.
 //! - Los .zip se extraen sin rutas fuera de la carpeta (zip slip) y con límites de
 //!   tamaño. Los permisos son declarativos: Python corre con los privilegios del
@@ -14,7 +16,7 @@
 use crate::scripts::{RunSpec, ScriptRunner};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -57,8 +59,16 @@ fn default_entry() -> String {
 
 #[derive(Serialize, Deserialize, Default)]
 struct State {
-    /// id -> hash aprobado (presente = habilitado)
+    /// id -> hash del contenido aprobado. Se conserva al deshabilitar, para seguir detectando
+    /// cambios: sin él, un plugin deshabilitado y luego modificado se reaprobaba con un clic.
     approved: BTreeMap<String, String>,
+    /// Plugins aprobados que el usuario deshabilitó.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    disabled: BTreeSet<String>,
+    /// id -> hash del código que se mostró en la última revisión (`read_code`). Habilitar un
+    /// contenido distinto del aprobado solo vale si coincide: se aprueba lo que se vio.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    reviewed: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +78,9 @@ pub struct PluginInfo {
     enabled: bool,
     /// Archivos modificados desde la aprobación.
     tampered: bool,
+    /// Sin aprobación guardada (copiado a mano a la carpeta de plugins o deshabilitado con una
+    /// versión anterior de la app): hay que revisar su código antes de habilitarlo.
+    unreviewed: bool,
 }
 
 #[derive(Serialize)]
@@ -160,6 +173,14 @@ fn walk(root: &Path) -> Result<Vec<(String, u64)>, String> {
 /// (`import x` usa x.pyc si no hay x.py), extensiones nativas y archivos .pth.
 const OPAQUE_CODE: [&str; 8] = ["pyc", "pyo", "so", "pyd", "dylib", "dll", "pth", "exe"];
 
+/// Extensiones que Python importa como código fuente (`.pyw` en Windows): se validan y se
+/// muestran en la revisión.
+const SOURCE_EXT: [&str; 2] = ["py", "pyw"];
+
+fn is_source(rel: &str) -> bool {
+    Path::new(rel).extension().and_then(|e| e.to_str()).is_some_and(|e| SOURCE_EXT.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 /// Declaración de codificación de PEP 263 en una de las dos primeras líneas.
 fn coding_cookie(line: &str) -> Option<String> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -176,7 +197,8 @@ fn check_reviewable(root: &Path, files: &[(String, u64)]) -> Result<(), String> 
         if OPAQUE_CODE.contains(&ext.as_str()) {
             return Err(format!("El plugin incluye código que no se puede revisar: {rel}"));
         }
-        if ext != "py" {
+        // En Windows Python también importa .pyw como código fuente.
+        if !SOURCE_EXT.contains(&ext.as_str()) {
             continue;
         }
         let bytes = fs::read(root.join(rel)).map_err(|e| e.to_string())?;
@@ -261,7 +283,8 @@ pub fn list(data: &Path) -> Vec<PluginInfo> {
             let m = read_manifest(&e.path()).ok()?;
             let approved = st.approved.get(&m.id);
             let tampered = approved.map(|h| hash_cached(&e.path()).ok().as_ref() != Some(h)).unwrap_or(false);
-            Some(PluginInfo { enabled: approved.is_some() && !tampered, tampered, manifest: m })
+            let enabled = approved.is_some() && !tampered && !st.disabled.contains(&m.id);
+            Some(PluginInfo { enabled, tampered, unreviewed: approved.is_none(), manifest: m })
         })
         .collect();
     out.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
@@ -301,11 +324,22 @@ fn plugin_root(staging: &Path) -> Result<PathBuf, String> {
     if staging.join("plugin.json").is_file() {
         return Ok(staging.to_path_buf());
     }
-    let subdirs: Vec<_> = fs::read_dir(staging).map_err(|e| e.to_string())?.flatten().filter(|e| e.path().is_dir()).collect();
+    let subdirs: Vec<_> = fs::read_dir(staging)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .filter(|e| e.path().is_dir() && !mac_metadata(&e.file_name().to_string_lossy()))
+        .collect();
     match subdirs.as_slice() {
         [one] if one.path().join("plugin.json").is_file() => Ok(one.path()),
         _ => Err("No se encontró plugin.json".into()),
     }
+}
+
+/// Metadatos que agrega el Finder de macOS al comprimir: la carpeta `__MACOSX`, los archivos
+/// `._x` (atributos extendidos, binarios aunque terminen en .py) y `.DS_Store`. No son parte
+/// del plugin y se omiten al extraer.
+fn mac_metadata(name: &str) -> bool {
+    name == "__MACOSX" || name == ".DS_Store" || name.starts_with("._")
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
@@ -332,6 +366,9 @@ fn extract_zip(zip_path: &Path, to: &Path) -> Result<(), String> {
         let Some(rel) = entry.enclosed_name() else {
             return Err(format!("Ruta peligrosa en el zip: {}", entry.name().unwrap_or_default()));
         };
+        if rel.components().any(|c| mac_metadata(&c.as_os_str().to_string_lossy())) {
+            continue;
+        }
         if entry.is_symlink() {
             return Err("El zip contiene enlaces simbólicos".into());
         }
@@ -371,6 +408,8 @@ pub fn confirm(data: &Path, staging_id: &str) -> Result<String, String> {
     let _ = fs::remove_dir_all(&staging);
     let mut st = load_state(data);
     st.approved.insert(m.id.clone(), hash(&target)?);
+    st.disabled.remove(&m.id);
+    st.reviewed.remove(&m.id);
     save_state(data, &st)?;
     Ok(m.name)
 }
@@ -381,7 +420,12 @@ pub fn cancel(data: &Path, staging_id: &str) {
     }
 }
 
-/// Habilitar = aprobar el contenido actual (vuelve a calcular el hash).
+/// Error al habilitar un contenido que no es el que se mostró en la revisión.
+pub const NOT_REVIEWED: &str = "El código del plugin no es el que revisaste (cambió o no se ha revisado). Revísalo de nuevo antes de habilitarlo.";
+
+/// Deshabilitar conserva el hash aprobado. Habilitar el mismo contenido aprobado es directo; un
+/// contenido distinto (alterado o sin aprobación) solo se aprueba si es exactamente el que se
+/// mostró en la última revisión (`read_code`).
 pub fn set_enabled(data: &Path, id: &str, enabled: bool) -> Result<(), String> {
     if !valid_id(id) {
         return Err("id inválido".into());
@@ -390,9 +434,19 @@ pub fn set_enabled(data: &Path, id: &str, enabled: bool) -> Result<(), String> {
     if enabled {
         let root = dir(data).join(id);
         read_manifest(&root)?;
-        st.approved.insert(id.into(), hash(&root)?);
+        let files = walk(&root)?;
+        check_reviewable(&root, &files)?;
+        let current = hash(&root)?;
+        if st.approved.get(id) != Some(&current) {
+            if st.reviewed.get(id) != Some(&current) {
+                return Err(NOT_REVIEWED.into());
+            }
+            st.approved.insert(id.into(), current);
+        }
+        st.disabled.remove(id);
+        st.reviewed.remove(id);
     } else {
-        st.approved.remove(id);
+        st.disabled.insert(id.into());
     }
     save_state(data, &st)
 }
@@ -403,17 +457,32 @@ pub fn uninstall(data: &Path, id: &str) -> Result<(), String> {
     }
     let mut st = load_state(data);
     st.approved.remove(id);
+    st.disabled.remove(id);
+    st.reviewed.remove(id);
     save_state(data, &st)?;
     fs::remove_dir_all(dir(data).join(id)).map_err(|e| e.to_string())
 }
 
+/// Código del plugin para revisarlo. Registra el hash de lo mostrado: es lo único que
+/// `set_enabled` aprueba si difiere del contenido aprobado.
 pub fn read_code(data: &Path, id: &str) -> Result<String, String> {
     if !valid_id(id) {
         return Err("id inválido".into());
     }
     let root = dir(data).join(id);
     let m = read_manifest(&root)?;
-    Ok(code_listing(&root, &m.entry, &walk(&root)?))
+    let before = hash(&root)?;
+    let text = code_listing(&root, &m.entry, &walk(&root)?);
+    // Si algo cambió mientras se leía, lo mostrado no corresponde a ningún hash.
+    if hash(&root)? != before {
+        return Err("El plugin cambió mientras se leía su código. Vuelve a intentarlo.".into());
+    }
+    let mut st = load_state(data);
+    if st.reviewed.get(id) != Some(&before) {
+        st.reviewed.insert(id.into(), before);
+        save_state(data, &st)?;
+    }
+    Ok(text)
 }
 
 /// Todo el código Python del plugin para revisarlo: primero el punto de entrada y luego el
@@ -421,7 +490,7 @@ pub fn read_code(data: &Path, id: &str) -> Result<String, String> {
 fn code_listing(root: &Path, entry: &str, files: &[(String, u64)]) -> String {
     const MAX_LINES: usize = 4000;
     let mut order: Vec<&str> = vec![entry];
-    order.extend(files.iter().map(|f| f.0.as_str()).filter(|f| f.ends_with(".py") && *f != entry));
+    order.extend(files.iter().map(|f| f.0.as_str()).filter(|f| is_source(f) && *f != entry));
     let mut out = Vec::new();
     for rel in order {
         let text = fs::read_to_string(root.join(rel)).unwrap_or_else(|e| format!("(no se pudo leer: {e})"));
@@ -453,7 +522,7 @@ pub fn run(
     let root = dir(data).join(id);
     let m = read_manifest(&root)?;
     let st = load_state(data);
-    let approved = st.approved.get(id).ok_or("El plugin está deshabilitado")?;
+    let approved = st.approved.get(id).filter(|_| !st.disabled.contains(id)).ok_or("El plugin está deshabilitado")?;
     if &hash(&root)? != approved {
         return Err("El plugin cambió desde que lo aprobaste. Revísalo y vuelve a habilitarlo.".into());
     }
@@ -551,6 +620,9 @@ mod tests {
         fs::write(data.join("plugins/demo/main.py"), "import os\n").unwrap();
         let l = list(&data);
         assert!(!l[0].enabled && l[0].tampered);
+        // Un contenido alterado no se aprueba sin pasar por la revisión de su código.
+        assert_eq!(set_enabled(&data, "demo", true).unwrap_err(), NOT_REVIEWED);
+        assert!(read_code(&data, "demo").unwrap().contains("import os"));
         // Mismo tamaño y misma fecha de modificación: la caché no debe ocultar el cambio.
         set_enabled(&data, "demo", true).unwrap();
         assert!(list(&data)[0].enabled);
@@ -560,11 +632,104 @@ mod tests {
         fs::File::options().write(true).open(&main).unwrap().set_modified(mtime).unwrap();
         let l = list(&data);
         assert!(!l[0].enabled && l[0].tampered);
-        // Re-aprobar
+        // Re-aprobar tras revisar
+        read_code(&data, "demo").unwrap();
         set_enabled(&data, "demo", true).unwrap();
         assert!(list(&data)[0].enabled);
         uninstall(&data, "demo").unwrap();
         assert!(list(&data).is_empty());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn disabled_plugin_stays_watched_and_only_reviewed_code_is_approved() {
+        let base = std::env::temp_dir().join(format!("nt-plug-dis-{}", uuid::Uuid::new_v4()));
+        let data = base.join("data");
+        let src = base.join("src");
+        sample(&src);
+        confirm(&data, &stage(&data, &src).unwrap().staging).unwrap();
+        let main = data.join("plugins/demo/main.py");
+        // Deshabilitar y volver a habilitar sin cambios: directo, sin revisión.
+        set_enabled(&data, "demo", false).unwrap();
+        let l = list(&data);
+        assert!(!l[0].enabled && !l[0].tampered && !l[0].unreviewed);
+        set_enabled(&data, "demo", true).unwrap();
+        assert!(list(&data)[0].enabled);
+        // Deshabilitado y modificado: se sigue viendo como alterado y el switch no lo reaprueba.
+        set_enabled(&data, "demo", false).unwrap();
+        fs::write(&main, "import shutil\n").unwrap();
+        let l = list(&data);
+        assert!(!l[0].enabled && l[0].tampered);
+        assert_eq!(set_enabled(&data, "demo", true).unwrap_err(), NOT_REVIEWED);
+        assert!(!list(&data)[0].enabled);
+        // Cambia entre la revisión y la aprobación: se aprueba solo lo que se mostró.
+        assert!(read_code(&data, "demo").unwrap().contains("import shutil"));
+        fs::write(&main, "import socket\n").unwrap();
+        assert_eq!(set_enabled(&data, "demo", true).unwrap_err(), NOT_REVIEWED);
+        read_code(&data, "demo").unwrap();
+        set_enabled(&data, "demo", true).unwrap();
+        let l = list(&data);
+        assert!(l[0].enabled && !l[0].tampered);
+        // Un plugin copiado a mano a la carpeta, sin aprobación: hay que revisarlo primero.
+        sample(&data.join("plugins/manual"));
+        let manifest = fs::read_to_string(data.join("plugins/manual/plugin.json")).unwrap().replace("\"demo\"", "\"manual\"");
+        fs::write(data.join("plugins/manual/plugin.json"), manifest).unwrap();
+        let m = list(&data).into_iter().find(|p| p.manifest.id == "manual").unwrap();
+        assert!(!m.enabled && m.unreviewed && !m.tampered);
+        assert_eq!(set_enabled(&data, "manual", true).unwrap_err(), NOT_REVIEWED);
+        read_code(&data, "manual").unwrap();
+        set_enabled(&data, "manual", true).unwrap();
+        assert!(list(&data).iter().all(|p| p.enabled));
+        // Un estado de versiones anteriores (solo `approved`) se sigue leyendo.
+        fs::write(data.join("plugins/.state.json"), r#"{"approved":{}}"#).unwrap();
+        assert!(list(&data).iter().all(|p| p.unreviewed && !p.enabled));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn finder_zip_and_pyw_sources() {
+        use std::io::Write as _;
+        let base = std::env::temp_dir().join(format!("nt-plug-mac-{}", uuid::Uuid::new_v4()));
+        let data = base.join("data");
+        fs::create_dir_all(&base).unwrap();
+        let opts = zip::write::SimpleFileOptions::default();
+        let manifest = r#"{"id":"mac","name":"Mac","version":"1","permissions":[],"actions":[{"id":"a","label":"a"}]}"#;
+        // Carpeta comprimida desde el Finder: mi-plugin/ y __MACOSX/ con archivos ._ binarios.
+        let zpath = base.join("finder.zip");
+        let mut w = zip::ZipWriter::new(fs::File::create(&zpath).unwrap());
+        for (name, body) in [
+            ("mi-plugin/plugin.json", manifest.as_bytes()),
+            ("mi-plugin/main.py", b"print(1)\n".as_slice()),
+            ("mi-plugin/.DS_Store", b"\x00\x01".as_slice()),
+            ("__MACOSX/mi-plugin/._main.py", b"\x00\x05\x16\x07\xff".as_slice()),
+        ] {
+            w.start_file(name, opts).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+        let preview = stage(&data, &zpath).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(preview.files.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["main.py", "plugin.json"]);
+        cancel(&data, &preview.staging);
+        // Contenido comprimido directamente: el ._main.py en la raíz también se omite.
+        let zpath = base.join("finder2.zip");
+        let mut w = zip::ZipWriter::new(fs::File::create(&zpath).unwrap());
+        for (name, body) in [("plugin.json", manifest.as_bytes()), ("main.py", b"print(1)\n".as_slice()), ("._main.py", b"\xff\xfe".as_slice())] {
+            w.start_file(name, opts).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+        let preview = stage(&data, &zpath).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(preview.files.len(), 2);
+        cancel(&data, &preview.staging);
+        // .pyw: Python en Windows lo importa como fuente; se muestra y se valida igual que .py.
+        let src = base.join("pyw");
+        sample(&src);
+        fs::write(src.join("util.pyw"), "VALOR = 42\n").unwrap();
+        let preview = stage(&data, &src).unwrap();
+        assert!(preview.code.contains("# ===== util.pyw =====") && preview.code.contains("VALOR = 42"));
+        cancel(&data, &preview.staging);
+        fs::write(src.join("util.pyw"), "# coding: utf-7\n+AAo-print(1)\n").unwrap();
+        assert!(stage(&data, &src).err().unwrap().contains("utf-7"));
         let _ = fs::remove_dir_all(base);
     }
 
