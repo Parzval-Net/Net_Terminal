@@ -838,8 +838,8 @@ Permisos: `session` (leer y enviar comandos a la sesión activa, con el mismo co
 
 ## Publicar una versión
 
-1. Sube la versión en `package.json`, `src-tauri/Cargo.toml` y `src-tauri/tauri.conf.json`.
-2. `git tag v0.5.3 && git push origin v0.5.3`
+1. Sube la versión en `package.json`, `src-tauri/Cargo.toml` y `src-tauri/tauri.conf.json` (y agrega `novedades/vX.Y.Z.md`).
+2. Al llegar ese cambio a `main`, el workflow `release-tag` crea el tag `vX.Y.Z` sobre ese commit y lanza `build` en el tag (también se puede subir el tag a mano: `git tag v0.5.3 && git push origin v0.5.3`). Si una regla del repositorio restringe la creación de tags, "GitHub Actions" debe estar en su lista de excepciones.
 3. El workflow compila los 3 sistemas, firma los paquetes de actualización y crea el Release con instaladores, zip portable y `latest.json`.
 4. El workflow valida que el tag apunte a un commit de `main` y coincida con la versión de `tauri.conf.json`. El job que firma usa el environment `release`: apruébalo en la pestaña Actions para continuar.
 
