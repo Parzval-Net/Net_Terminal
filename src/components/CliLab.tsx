@@ -3,7 +3,7 @@ import type { ITheme } from "@xterm/xterm";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, CircleAlert, CircleCheck, Copy, Play, Plus, Save, Square, Terminal, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { CodeEditor, renderHighlighted } from "./CodeEditor";
+import { CodeEditor, RISK_MARK, RISK_TEXT, renderHighlighted, riskCount } from "./CodeEditor";
 import { cssColor } from "../lib/highlight";
 import { TargetOptions } from "./BroadcastTarget";
 import { BroadcastDialog } from "./BroadcastDialog";
@@ -105,6 +105,8 @@ export function CliLab(p: Props) {
 
   const vars = useMemo(() => templateVars(text), [text]);
   const lines = useMemo(() => scriptLines(text), [text]);
+  // Riesgo de los comandos que se ejecutarán (sin comentarios), para el resumen junto a Ejecutar.
+  const labRisk = useMemo(() => riskCount(lines.join("\n")), [lines]);
   const dirty = note ? note.saved !== text : !!text.trim();
   const openable = useMemo(() => {
     const list = notes.filter((x) => !x.protected);
@@ -313,6 +315,7 @@ export function CliLab(p: Props) {
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-b border-line">
               <CodeEditor
                 gutter
+                risk
                 value={text}
                 onChange={setText}
                 compiled={p.compiled}
@@ -421,6 +424,19 @@ export function CliLab(p: Props) {
               <p role="status" aria-live="polite" className={`text-[11.5px] text-warn ${msg ? "" : "hidden"}`}>
                 {msg}
               </p>
+              {/* Resumen de riesgo donde se decide el envío: ícono del catálogo y texto, nunca solo color. */}
+              {!running && labRisk.changes > 0 && (
+                <p
+                  className={`flex items-start gap-1.5 text-[11.5px] leading-snug ${RISK_TEXT[labRisk.disruptive ? "disruptive" : "change"]}`}
+                  title="El detalle por línea está en la columna a la izquierda del editor"
+                >
+                  <span aria-hidden className="text-[10px] leading-[1.6]">{RISK_MARK[labRisk.disruptive ? "disruptive" : "change"]}</span>
+                  <span>
+                    {labRisk.changes} de {plural(labRisk.lines, "comando", "comandos")} {labRisk.changes === 1 ? "cambia" : "cambian"} config/estado
+                    {labRisk.disruptive > 0 && `; ${plural(labRisk.disruptive, "puede", "pueden")} cortar servicio`}
+                  </span>
+                </p>
+              )}
               {running ? (
                 <button onClick={stopLab} className="w-full flex items-center justify-center gap-1.5 h-8 rounded-md bg-danger text-danger-fg font-medium hover:opacity-90">
                   <Square size={11} fill="currentColor" /> Detener

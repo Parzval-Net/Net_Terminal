@@ -4,12 +4,13 @@ import type { ITheme } from "@xterm/xterm";
 import { ArrowDownToLine, Check, FolderOpen, Lock, MoreHorizontal, Network, Pencil, Plus, Replace, Search, Send, SendHorizontal, ShieldCheck, Trash2, Workflow, X } from "lucide-react";
 import { DiagramPreview } from "./DiagramPreview";
 import { NETWORK_TEMPLATE } from "../lib/mermaidBlocks";
-import { CodeEditor } from "./CodeEditor";
+import { CodeEditor, RISK_MARK, RISK_TEXT, riskCount } from "./CodeEditor";
 import { NoteSecurity, NoteUnlock } from "./NoteLock";
 import { Compiled } from "../lib/highlight";
 import { fontStack } from "../lib/theme";
 import { isMac, modLabel } from "../lib/platform";
 import { PanelResize, panelClass } from "./PanelResize";
+import { plural } from "../lib/plural";
 
 /** Atajos del editor de notas: Ctrl o ⌘ más Enter (sin la tecla extra que usan los atajos globales de la app). */
 const sendKey = isMac ? "⌘" : "Ctrl+";
@@ -450,6 +451,9 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
   const blocked = p.blocked ?? "Conecta una sesión para enviar.";
   const lineReason = locked ? "Desbloquea la nota para enviar" : !p.target ? blocked : null;
   const allReason = locked ? "Desbloquea la nota para enviar" : !p.target ? blocked : !content.trim() ? "La nota está vacía" : null;
+  // Resumen de riesgo de "Todo": computeRisk está memorizado por línea, así que recalcularlo en cada tecla es barato.
+  const sendRisk = useMemo(() => (locked ? null : riskCount(content)), [content, locked]);
+  const allRisk = !sendRisk?.changes ? null : sendRisk.disruptive ? "disruptive" : "change";
 
   return (
     <aside
@@ -706,6 +710,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
           ref={editorRef}
           value={content}
           onChange={edit}
+          risk
           compiled={p.compiled}
           theme={p.theme}
           font={fontStack(p.font)}
@@ -749,9 +754,34 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
             onClick={() => p.onSend(content)}
             disabled={!!allReason}
             aria-describedby={allReason ? footId : undefined}
-            title={allReason ?? `Enviar toda la nota (${sendKey}${isMac ? "⇧" : "Shift+"}Enter)`}
+            title={
+              allReason ??
+              `Enviar toda la nota (${sendKey}${isMac ? "⇧" : "Shift+"}Enter)${
+                sendRisk && allRisk
+                  ? `\n${plural(sendRisk.changes, "línea cambia", "líneas cambian")} config/estado${sendRisk.disruptive ? `; ${plural(sendRisk.disruptive, "puede", "pueden")} cortar servicio` : ""}`
+                  : ""
+              }`
+            }
+            className={allRisk ? RISK_TEXT[allRisk] : undefined}
           >
-            <Send size={13} /> Todo
+            {sendRisk && allRisk ? (
+              <>
+                {/* Con cambios, el botón resume el envío con el ícono del catálogo (▲ cambio, ✕ disruptivo). */}
+                <span aria-hidden className="text-[11px] leading-none">{RISK_MARK[allRisk]}</span>
+                <span className="@[20rem]:hidden">
+                  Todo · {sendRisk.changes}
+                  <span className="sr-only"> {sendRisk.changes === 1 ? "cambio" : "cambios"}</span>
+                </span>
+                <span className="hidden @[20rem]:inline">
+                  Enviar {plural(sendRisk.lines, "línea", "líneas")} · {plural(sendRisk.changes, "cambio", "cambios")}
+                </span>
+                {sendRisk.disruptive > 0 && <span className="sr-only">, {plural(sendRisk.disruptive, "puede", "pueden")} cortar servicio</span>}
+              </>
+            ) : (
+              <>
+                <Send size={13} /> Todo
+              </>
+            )}
           </FootBtn>
           <FootBtn
             onClick={capture}
@@ -817,11 +847,12 @@ function MenuItem(p: { icon: React.ReactNode; label: string; hint?: string; onCl
   );
 }
 
-function FootBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+/** Botón del pie. `className` reemplaza el color de texto (el riesgo de "Todo" va en warn o danger). */
+function FootBtn({ className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
       {...props}
-      className="shrink-0 whitespace-nowrap flex items-center gap-1.5 px-2 h-7 rounded-md text-[12px] text-muted hover:text-fg hover:bg-hover disabled:opacity-40 disabled:hover:bg-transparent"
+      className={`shrink-0 whitespace-nowrap flex items-center gap-1.5 px-2 h-7 rounded-md text-[12px] hover:bg-hover disabled:opacity-40 disabled:hover:bg-transparent ${className ?? "text-muted hover:text-fg"}`}
     />
   );
 }
