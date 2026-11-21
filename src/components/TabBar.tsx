@@ -210,9 +210,21 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
   // La pestaña activa siempre visible: con muchas pestañas o la ventana angosta quedaba fuera
   // de la franja (que se desplaza sin barra visible).
   const stripRef = useRef<HTMLDivElement>(null);
+  // Solo desplaza la franja (no los contenedores de la app) y en el cuadro siguiente: al cambiar de
+  // pestaña con el teclado, medir en el mismo efecto forzaba un cálculo de diseño extra antes de pintar.
   useEffect(() => {
-    const el = stripRef.current?.querySelector<HTMLElement>(`[data-tab="${activeId}"]`);
-    el?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const frame = requestAnimationFrame(() => {
+      const strip = stripRef.current;
+      const el = strip?.querySelector<HTMLElement>(`[data-tab="${activeId}"]`);
+      if (!strip || !el) return;
+      const r = el.getBoundingClientRect();
+      const sr = strip.getBoundingClientRect();
+      const left = r.left - sr.left + strip.scrollLeft;
+      const right = left + r.width;
+      if (left < strip.scrollLeft) strip.scrollLeft = left;
+      else if (right > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = right - strip.clientWidth;
+    });
+    return () => cancelAnimationFrame(frame);
   }, [activeId, tabs.length]);
 
   // Pestañas que reciben lo que se envía desde Notas, catálogo o botones cuando el destino no es

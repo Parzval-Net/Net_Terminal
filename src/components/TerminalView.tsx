@@ -1368,8 +1368,17 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     return () => window.clearTimeout(release);
   }, [visible]);
 
+  // Foco sin desplazar contenedores y en el cuadro siguiente, para no forzar un cálculo de diseño
+  // en medio del cambio de pestaña.
   useEffect(() => {
-    if (active) termRef.current?.focus();
+    if (!active) return;
+    const frame = requestAnimationFrame(() => {
+      const t = termRef.current;
+      if (!t) return;
+      if (t.textarea) t.textarea.focus({ preventScroll: true });
+      else t.focus();
+    });
+    return () => cancelAnimationFrame(frame);
   }, [active]);
   // Un diálogo de la pestaña no sobrevive a que deje de verse (cambio de pestaña con el teclado): su trampa de foco
   // quedaría activa sin que se vea. Un pegado pendiente se cancela: no se escribe nada.

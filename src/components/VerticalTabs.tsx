@@ -67,11 +67,19 @@ export const VerticalTabs = memo(function VerticalTabs(props: TabBarProps) {
     const el = e.currentTarget;
     el.setPointerCapture(e.pointerId);
     document.body.style.cursor = "col-resize";
+    // Un cambio de ancho por cuadro: el mouse emite eventos más rápido que el refresco.
+    let frame = 0;
     const move = (ev: PointerEvent) => {
       last = clamp(startW + ev.clientX - startX);
-      setWidth(last);
+      if (!frame)
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          setWidth(last);
+        });
     };
     const up = () => {
+      cancelAnimationFrame(frame);
+      setWidth(last);
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
       el.removeEventListener("pointercancel", up);
