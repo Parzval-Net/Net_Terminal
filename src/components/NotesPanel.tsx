@@ -4,7 +4,8 @@ import type { ITheme } from "@xterm/xterm";
 import { ArrowDownToLine, Check, FolderOpen, Lock, MoreHorizontal, Network, Pencil, Plus, Replace, Search, Send, SendHorizontal, ShieldCheck, Trash2, Workflow, X } from "lucide-react";
 import { DiagramPreview } from "./DiagramPreview";
 import { NETWORK_TEMPLATE } from "../lib/mermaidBlocks";
-import { CodeEditor, RISK_MARK, RISK_TEXT, riskCount } from "./CodeEditor";
+import { CodeEditor, RISK_MARK, riskCount } from "./CodeEditor";
+import { Btn } from "./tools/ui";
 import { NoteSecurity, NoteUnlock } from "./NoteLock";
 import { Compiled } from "../lib/highlight";
 import { fontStack } from "../lib/theme";
@@ -737,20 +738,31 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
       )}
 
       <footer className="border-t border-line px-2 py-1.5 space-y-1">
-        {/* En un panel angosto los botones bajan a una segunda fila en vez de partir su texto. */}
-        <div className="flex flex-wrap items-center gap-1">
-          <FootBtn
+        {/* Una sola fila: las acciones secundarias son íconos con tooltip a la izquierda y Enviar, la
+            acción principal, es un botón con forma a la derecha (primario, warn si la nota trae
+            cambios o danger si alguno puede cortar servicio). */}
+        <div className="flex items-center gap-1">
+          <FootIcon
+            label="Enviar la línea o selección"
             onClick={sendSelectionOrLine}
             disabled={!!lineReason}
             aria-describedby={lineReason ? footId : undefined}
             title={lineReason ?? `Enviar la línea o selección (${sendKey}Enter)`}
           >
-            <SendHorizontal size={13} />
-            {/* Panel angosto: texto corto para que los botones quepan en una fila. */}
-            <span className="@[20rem]:hidden">Línea</span>
-            <span className="hidden @[20rem]:inline">Línea / selección</span>
-          </FootBtn>
-          <FootBtn
+            <SendHorizontal size={14} />
+          </FootIcon>
+          <FootIcon
+            label="Capturar selección de la terminal"
+            onClick={capture}
+            disabled={locked}
+            aria-describedby={locked ? footId : undefined}
+            title={locked ? "Desbloquea la nota para capturar" : "Agregar a la nota el texto seleccionado en la terminal"}
+          >
+            <ArrowDownToLine size={14} />
+          </FootIcon>
+          <Btn
+            // Deshabilitado va siempre como primario: Btn lo deja neutro, sin el color del riesgo.
+            kind={!allReason && allRisk === "disruptive" ? "danger" : "primary"}
             onClick={() => p.onSend(content)}
             disabled={!!allReason}
             aria-describedby={allReason ? footId : undefined}
@@ -762,35 +774,29 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
                   : ""
               }`
             }
-            className={allRisk ? RISK_TEXT[allRisk] : undefined}
+            className={`ml-auto !h-7 !px-2.5 !text-[12px] ${!allReason && allRisk === "change" ? "!bg-warn !text-warn-fg" : ""}`}
           >
             {sendRisk && allRisk ? (
               <>
-                {/* Con cambios, el botón resume el envío con el ícono del catálogo (▲ cambio, ✕ disruptivo). */}
-                <span aria-hidden className="text-[11px] leading-none">{RISK_MARK[allRisk]}</span>
-                <span className="@[20rem]:hidden">
-                  Todo · {sendRisk.changes}
+                {/* La forma corta nunca pierde las cantidades: "Enviar 13 · 9 ▲" (líneas · cambios). */}
+                <span className="@[20rem]:hidden tabular-nums">
+                  Enviar {sendRisk.lines}
+                  <span className="sr-only"> {sendRisk.lines === 1 ? "línea" : "líneas"}</span> · {sendRisk.changes}
                   <span className="sr-only"> {sendRisk.changes === 1 ? "cambio" : "cambios"}</span>
                 </span>
-                <span className="hidden @[20rem]:inline">
+                <span className="hidden @[20rem]:inline tabular-nums">
                   Enviar {plural(sendRisk.lines, "línea", "líneas")} · {plural(sendRisk.changes, "cambio", "cambios")}
                 </span>
+                {/* Ícono del catálogo (▲ cambio, ✕ disruptivo) además del color. */}
+                <span aria-hidden className="text-[11px] leading-none">{RISK_MARK[allRisk]}</span>
                 {sendRisk.disruptive > 0 && <span className="sr-only">, {plural(sendRisk.disruptive, "puede", "pueden")} cortar servicio</span>}
               </>
             ) : (
               <>
-                <Send size={13} /> Todo
+                <Send size={13} /> Enviar todo
               </>
             )}
-          </FootBtn>
-          <FootBtn
-            onClick={capture}
-            disabled={locked}
-            aria-describedby={locked ? footId : undefined}
-            title={locked ? "Desbloquea la nota para capturar" : "Agregar a la nota el texto seleccionado en la terminal"}
-          >
-            <ArrowDownToLine size={13} /> Capturar
-          </FootBtn>
+          </Btn>
         </div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted min-h-6">
           <span
@@ -847,12 +853,17 @@ function MenuItem(p: { icon: React.ReactNode; label: string; hint?: string; onCl
   );
 }
 
-/** Botón del pie. `className` reemplaza el color de texto (el riesgo de "Todo" va en warn o danger). */
-function FootBtn({ className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+/**
+ * Acción secundaria del pie como ícono. El nombre accesible es fijo (`label`); el tooltip puede
+ * cambiar al motivo por el que está deshabilitada, que además se anuncia con aria-describedby.
+ */
+function FootIcon({ label, className = "", ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string }) {
   return (
     <button
+      type="button"
+      aria-label={label}
       {...props}
-      className={`shrink-0 whitespace-nowrap flex items-center gap-1.5 px-2 h-7 rounded-md text-[12px] hover:bg-hover disabled:opacity-40 disabled:hover:bg-transparent ${className ?? "text-muted hover:text-fg"}`}
+      className={`w-7 h-7 shrink-0 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted ${className}`}
     />
   );
 }

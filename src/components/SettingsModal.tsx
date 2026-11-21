@@ -261,7 +261,10 @@ export function SettingsModal({
             </button>
           </header>
 
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {/* Las ayudas de cada fila (Item, id terminado en -hint) muestran hasta dos líneas en vez de
+              cortarse en una: truncar dejaba "…se ab…" justo antes del dato útil. El texto completo
+              sigue en el tooltip. */}
+          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5 [&_[id$=-hint]]:whitespace-normal [&_[id$=-hint]]:line-clamp-2 [&_[id$=-hint]]:[overflow-wrap:anywhere]">
             {section === "appearance" && (
               <>
                 <Item label="Interfaz">
@@ -615,7 +618,8 @@ export function SettingsModal({
             ) : (
               <span />
             )}
-            <span className="text-[11.5px] text-muted">Los cambios se aplican al instante</span>
+            {/* En Acerca de no hay ajustes que cambiar: el pie no aplica. */}
+            {section !== "about" && <span className="text-[11.5px] text-muted">Los cambios se aplican al instante</span>}
           </footer>
           {confirmReset &&
             createPortal(
@@ -893,10 +897,11 @@ function ThemeCard({
           ))}
         </div>
       </div>
-      <div className="flex items-center justify-between px-2.5 h-7 text-[12px]">
-        <span className="truncate" title={hint ? `${preset.name} · ${hint}` : preset.name}>
-          {preset.name}
-          {hint && <span className="text-muted"> · {hint}</span>}
+      {/* Nombre en una línea y subtítulo debajo: en la misma línea el subtítulo se cortaba ("Sigue la int…"). */}
+      <div className="flex items-center justify-between gap-1 px-2.5 min-h-7 py-1 text-[12px] leading-tight">
+        <span className="min-w-0" title={hint ? `${preset.name} · ${hint}` : preset.name}>
+          <span className="block truncate">{preset.name}</span>
+          {hint && <span className="block truncate text-[11px] text-muted">{hint}</span>}
         </span>
         {selected && <Check size={13} className="text-accent shrink-0" />}
       </div>
