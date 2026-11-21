@@ -7,18 +7,22 @@ import { DEFAULT_INPUT, PLATFORMS, generate, platformInfo, type GenInput } from 
 import { Btn, Label, Section, Toggle } from "./ui";
 
 /**
- * Generador de configuración de agente SNMP de solo lectura. Todo vive en el estado del componente:
- * las contraseñas tecleadas nunca se guardan, no se registran y se pierden al cerrar la herramienta.
+ * Generador de configuración de agente SNMP de solo lectura. Todo vive en el estado del componente
+ * (queda montado al pasar a la pestaña Cliente): las contraseñas tecleadas nunca se guardan, no se
+ * registran y se pierden al cerrar la herramienta.
  */
 export default function SnmpConfigGen() {
   const [inp, setInp] = useState<GenInput>(DEFAULT_INPUT);
   const [copied, setCopied] = useState(false);
   const [msg, setMsg] = useState("");
+  // El error de NMS vacío espera a que el usuario toque el campo: no se marca en rojo al abrir.
+  const [nmsTouched, setNmsTouched] = useState(false);
   const set = (p: Partial<GenInput>) => setInp((c) => ({ ...c, ...p }));
   const info = platformInfo(inp.platform);
   const res = useMemo(() => generate(inp), [inp]);
-  const err = (f: keyof GenInput) => res.errors.filter((e) => e.field === f).map((e) => e.msg).join(" ");
-  const typed = !!(inp.authPass || inp.privPass || inp.community);
+  const nmsPending = !nmsTouched && !inp.nms.trim();
+  const shownErrors = nmsPending ? res.errors.filter((e) => e.field !== "nms") : res.errors;
+  const err = (f: keyof GenInput) => shownErrors.filter((e) => e.field === f).map((e) => e.msg).join(" ");
   const v3 = inp.version === "v3";
 
   const copy = async () => {
@@ -116,7 +120,13 @@ export default function SnmpConfigGen() {
 
         <div className="mt-3 grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
           <Label text="NMS autorizados (IPv4 o CIDR)">
-            <input className={field("nms", "font-mono")} value={inp.nms} placeholder="192.0.2.10, 198.51.100.0/24" onChange={(e) => set({ nms: e.target.value })} />
+            <input
+              className={field("nms", "font-mono")}
+              value={inp.nms}
+              placeholder="192.0.2.10, 198.51.100.0/24"
+              onBlur={() => setNmsTouched(true)}
+              onChange={(e) => set({ nms: e.target.value })}
+            />
             <Err f="nms" />
           </Label>
           <Label text="Receptores de traps (opcional)">
@@ -189,7 +199,7 @@ export default function SnmpConfigGen() {
           </div>
         }
       >
-        {typed && res.text && (
+        {res.typed && res.text && (
           <p className="mb-2 flex items-center gap-1.5 text-[12px] text-warn">
             <AlertTriangle size={13} /> El texto incluye los secretos que escribiste. Si lo descargas, el archivo los guarda en texto claro.
           </p>
@@ -197,7 +207,9 @@ export default function SnmpConfigGen() {
         {res.text ? (
           <pre className="max-h-[480px] overflow-auto rounded-lg bg-hover p-3 font-mono text-[11.5px] leading-[1.5] whitespace-pre select-text">{res.text}</pre>
         ) : (
-          <p className="text-[12px] text-muted">Corrige los campos marcados para generar la configuración.</p>
+          <p className="text-[12px] text-muted">
+            {nmsPending && !shownErrors.length ? "Indica los NMS autorizados para generar la configuración." : "Corrige los campos marcados para generar la configuración."}
+          </p>
         )}
         {msg && <p className="mt-2 text-[12px] text-muted">{msg}</p>}
         <p className="mt-3 text-[11.5px] text-muted">
