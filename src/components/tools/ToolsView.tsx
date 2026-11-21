@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { type ReactElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Activity, ArrowDownUp, Calculator, DatabaseBackup, FileSearch, Gauge, Network, Puzzle, Radar, ScrollText, ShieldCheck, SquareTerminal, Waypoints, Wrench, X } from "lucide-react";
@@ -142,7 +142,7 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
   const go = (id: ModuleId) => {
     persist(LAST_KEY, id);
     setCurrent(id);
-    setVisited((v) => new Set(v).add(id));
+    setVisited((v) => (v.has(id) ? v : new Set(v).add(id)));
   };
 
   useEffect(() => {
@@ -150,94 +150,101 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.modules]);
 
-  const pane = (id: ModuleId) => {
-    switch (id) {
-      case "monitor":
-        return (
-          <MonitorTool
-            targets={settings.monitors}
-            samples={monitors.samples}
-            status={monitors.status}
-            onChange={(m: MonitorTarget[]) => update({ monitors: m })}
-            onClear={monitors.clear}
-            onSilence={monitors.silence}
-          />
-        );
-      case "diag":
-        return <DiagTool samples={monitors.samples} />;
-      case "topology":
-        return (
-          <TopologyTool
-            terminals={terminals}
-            sessions={sessions}
-            topo={settings.topology}
-            snapshots={settings.topoSnapshots}
-            onTopo={onTopo}
-            onSnapshots={onSnapshots}
-            sources={settings.topoSources ?? NO_SOURCES}
-            onSources={onSources}
-            snmpProfiles={settings.snmpProfiles ?? NO_PROFILES}
-            visible={active && current === "topology"}
-            onOpenSession={onOpenSession}
-            tabs={tabs}
-            onFocusTab={onFocusTab}
-            onReconnectTab={onReconnectTab}
-            onConfirm={onConfirm}
-            lifecycle={settings.lifecycleInfo}
-          />
-        );
-      case "subnet":
-        return <SubnetTool />;
-      case "perf":
-        return (
-          <PerfTool
-            history={settings.speedHistory}
-            onResult={(r: SpeedResult) => update((s) => ({ speedHistory: [r, ...s.speedHistory].slice(0, 20) }))}
-            onHistory={(speedHistory: SpeedResult[]) => update({ speedHistory })}
-            onServing={setIperfServing}
-          />
-        );
-      case "transfer":
-        return (
-          <TransferTool
-            settings={settings}
-            running={running}
-            onChange={update}
-            refreshRunning={refreshRunning}
-            terminals={terminals}
-            onConfirm={onConfirm}
-            onScp={onScp}
-          />
-        );
-      case "syslog":
-        return <SyslogTool settings={settings} running={running} onChange={update} refreshRunning={refreshRunning} />;
-      case "plugins":
-        return <PluginsTool connId={connId} onConfirm={onConfirm} />;
-      case "snmp":
-        return (
-          <>
-            <SnmpTool settings={settings} running={running} onChange={update} refreshRunning={refreshRunning} onConfirm={onConfirm} />
-          </>
-        );
-      case "backup":
-        return (
-          <>
-            <BackupTool terminals={terminals} totalSessions={sessions.length} />
-          </>
-        );
-      case "audit":
-        return (
-          <>
-            <AuditTool terminals={terminals} onConfirm={onConfirm} />
-          </>
-        );
-      case "logsearch":
-        return (
-          <>
-            <LogSearchTool visible={active && current === "logsearch"} autoLog={settings.autoLog} onEnableAutoLog={() => update({ autoLog: true })} />
-          </>
-        );
-    }
+  // Acciones estables para los módulos (update ya lo es).
+  const onMonitors = useCallback((m: MonitorTarget[]) => update({ monitors: m }), [update]);
+  const onSpeedResult = useCallback((r: SpeedResult) => update((s) => ({ speedHistory: [r, ...s.speedHistory].slice(0, 20) })), [update]);
+  const onSpeedHistory = useCallback((speedHistory: SpeedResult[]) => update({ speedHistory }), [update]);
+  const onEnableAutoLog = useCallback(() => update({ autoLog: true }), [update]);
+  const topoVisible = active && current === "topology";
+  const logsVisible = active && current === "logsearch";
+
+  // Cada módulo es un elemento memorizado con sus propias dependencias: al cambiar de módulo o alternar
+  // Herramientas/terminal, React reutiliza el mismo elemento y no vuelve a dibujar los módulos visitados
+  // (solo cambia el atributo hidden de su contenedor). Una muestra de Monitoreo redibuja solo Monitoreo y Diagnóstico.
+  const monitorEl = useMemo(
+    () => (
+      <MonitorTool
+        targets={settings.monitors}
+        samples={monitors.samples}
+        status={monitors.status}
+        onChange={onMonitors}
+        onClear={monitors.clear}
+        onSilence={monitors.silence}
+      />
+    ),
+    [settings.monitors, monitors.samples, monitors.status, monitors.clear, monitors.silence, onMonitors],
+  );
+  const diagEl = useMemo(() => <DiagTool samples={monitors.samples} />, [monitors.samples]);
+  const topologyEl = useMemo(
+    () => (
+      <TopologyTool
+        terminals={terminals}
+        sessions={sessions}
+        topo={settings.topology}
+        snapshots={settings.topoSnapshots}
+        onTopo={onTopo}
+        onSnapshots={onSnapshots}
+        sources={settings.topoSources ?? NO_SOURCES}
+        onSources={onSources}
+        snmpProfiles={settings.snmpProfiles ?? NO_PROFILES}
+        visible={topoVisible}
+        onOpenSession={onOpenSession}
+        tabs={tabs}
+        onFocusTab={onFocusTab}
+        onReconnectTab={onReconnectTab}
+        onConfirm={onConfirm}
+        lifecycle={settings.lifecycleInfo}
+      />
+    ),
+    [terminals, sessions, settings.topology, settings.topoSnapshots, onTopo, onSnapshots, settings.topoSources, onSources, settings.snmpProfiles, topoVisible, onOpenSession, tabs, onFocusTab, onReconnectTab, onConfirm, settings.lifecycleInfo],
+  );
+  const subnetEl = useMemo(() => <SubnetTool />, []);
+  const perfEl = useMemo(
+    () => <PerfTool history={settings.speedHistory} onResult={onSpeedResult} onHistory={onSpeedHistory} onServing={setIperfServing} />,
+    [settings.speedHistory, onSpeedResult, onSpeedHistory],
+  );
+  const transferEl = useMemo(
+    () => (
+      <TransferTool
+        settings={settings}
+        running={running}
+        onChange={update}
+        refreshRunning={refreshRunning}
+        terminals={terminals}
+        onConfirm={onConfirm}
+        onScp={onScp}
+      />
+    ),
+    [settings, running, update, refreshRunning, terminals, onConfirm, onScp],
+  );
+  const syslogEl = useMemo(
+    () => <SyslogTool settings={settings} running={running} onChange={update} refreshRunning={refreshRunning} />,
+    [settings, running, update, refreshRunning],
+  );
+  const pluginsEl = useMemo(() => <PluginsTool connId={connId} onConfirm={onConfirm} />, [connId, onConfirm]);
+  const snmpEl = useMemo(
+    () => <SnmpTool settings={settings} running={running} onChange={update} refreshRunning={refreshRunning} onConfirm={onConfirm} />,
+    [settings, running, update, refreshRunning, onConfirm],
+  );
+  const backupEl = useMemo(() => <BackupTool terminals={terminals} totalSessions={sessions.length} />, [terminals, sessions.length]);
+  const auditEl = useMemo(() => <AuditTool terminals={terminals} onConfirm={onConfirm} />, [terminals, onConfirm]);
+  const logsearchEl = useMemo(
+    () => <LogSearchTool visible={logsVisible} autoLog={settings.autoLog} onEnableAutoLog={onEnableAutoLog} />,
+    [logsVisible, settings.autoLog, onEnableAutoLog],
+  );
+  const panes: Record<ModuleId, ReactElement> = {
+    monitor: monitorEl,
+    diag: diagEl,
+    topology: topologyEl,
+    subnet: subnetEl,
+    perf: perfEl,
+    transfer: transferEl,
+    syslog: syslogEl,
+    plugins: pluginsEl,
+    snmp: snmpEl,
+    backup: backupEl,
+    audit: auditEl,
+    logsearch: logsearchEl,
   };
 
   const item = (id: ModuleId, group: string) => {
@@ -350,7 +357,7 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
             .filter((n) => visited.has(n.id))
             .map((n) => (
               <div key={n.id} hidden={n.id !== current} className={n.id === "topology" ? "h-full" : undefined}>
-                {pane(n.id)}
+                {panes[n.id]}
               </div>
             ))}
         </div>
