@@ -234,7 +234,7 @@ export function CliLab(p: Props) {
         {...win.box}
         {...modal.dialog}
         aria-labelledby={undefined}
-        className="@container w-[960px] h-[640px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[min(620px,calc(100vw-2rem))] min-h-[min(420px,calc(100vh-2rem))] max-w-[98vw] max-h-[96vh]"
+        className="@container w-[min(1180px,88vw)] h-[min(760px,84vh)] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[min(620px,calc(100vw-2rem))] min-h-[min(420px,calc(100vh-2rem))] max-w-[98vw] max-h-[96vh]"
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"
         aria-label="CLI Lab"
