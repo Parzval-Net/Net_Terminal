@@ -74,6 +74,7 @@ import { SplitLayout, SplitState, fillPanes, paneRect } from "./lib/split";
 import logo from "./assets/logo.svg";
 import { plural } from "./lib/plural";
 import { useVaultAutoLock } from "./lib/vaultLock";
+import { useModal } from "./lib/useModal";
 import { QuickBolt, SessionIcon, isQuickSession, typeLabel } from "./components/SessionIcon";
 import "./App.css";
 
@@ -212,6 +213,8 @@ function Workspace({
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  /** "Conectar como…": sesión guardada para la que se pide otro usuario (null: cerrado). */
+  const [openAs, setOpenAs] = useState<Session | null>(null);
   const labOpen = useLabOpen();
   /** Exportar sesiones: undefined cerrado, "" todas, o la carpeta preseleccionada. */
   const [exportFolder, setExportFolder] = useState<string | undefined>(undefined);
@@ -530,6 +533,25 @@ function Workspace({
     });
     focusPaneRef.current = pane;
     if (tabId) setActiveId(tabId);
+  };
+  /**
+   * "Conectar en vista dividida" (árbol): abre la sesión en un panel. Sin vista dividida la activa en
+   * 2 paneles lado a lado (la terminal que se veía a la izquierda); con ella, ocupa el primer panel vacío
+   * o, si no hay, el que sigue al panel con foco (el que se veía no se reemplaza).
+   */
+  const openSplit = (session: Session) => {
+    const prev = activeId !== "tools" ? activeId : lastTermRef.current;
+    const keep = prev && tabs.some((t) => t.id === prev) ? prev : null;
+    const id = openTab(session);
+    setSplit((s) => {
+      if (!s) return { layout: "cols", panes: keep ? [keep, id] : [id, null] };
+      const panes = [...s.panes];
+      const free = panes.indexOf(null);
+      const i = free >= 0 ? free : (focusPaneRef.current + 1) % panes.length;
+      panes[i] = id;
+      focusPaneRef.current = i;
+      return { ...s, panes };
+    });
   };
   const visibleKey = splitOn ? split!.panes.filter(Boolean).join(",") : null;
   const visiblePanes = useMemo(() => (visibleKey === null ? null : visibleKey.split(",").filter(Boolean)), [visibleKey]);
@@ -1034,6 +1056,17 @@ function Workspace({
     openMany: (list: Session[]) =>
       list.forEach((s, i) => (i < 5 ? openTab(s) : window.setTimeout(() => openTab(s), Math.floor(i / 5) * 1500))),
     newSession: (folder?: string) => setModal({ folder }),
+    openSplit,
+    openAs: (s: Session) => setOpenAs(s),
+    /**
+     * Conecta con otro usuario sin tocar la sesión guardada: la pestaña lleva una copia con el usuario
+     * nuevo y sin `save_password`, así el backend no autocompleta la contraseña guardada (que es de
+     * otro usuario) y el equipo la pide.
+     */
+    connectAs: (s: Session, username: string) => {
+      setOpenAs(null);
+      openTab({ ...s, username, save_password: undefined }, { title: `${s.name} (${username})` });
+    },
     openQuick: () => setQuickOpen(true),
     saveTabAs: (id: string) => {
       const t = tabs.find((x) => x.id === id);
@@ -1311,6 +1344,8 @@ function Workspace({
           onConfirm={setConfirm}
           onImportFile={h.openImport}
           onExportFile={h.openExport}
+          onOpenSplit={h.openSplit}
+          onOpenAs={h.openAs}
           {...extra}
         />
   );
@@ -1368,6 +1403,8 @@ function Workspace({
           <div className="flex-1 min-h-0">
             {sidebarEl({
               onOpen: (x: Session) => (setPeek(false), openTab(x)),
+              onOpenSplit: (x: Session) => (setPeek(false), h.openSplit(x)),
+              onOpenAs: (x: Session) => (setPeek(false), h.openAs(x)),
               onOpenMany: (x: Session[]) => (setPeek(false), h.openMany(x)),
               onNew: (f?: string) => (setPeek(false), h.newSession(f)),
               onQuickConnect: () => (setPeek(false), h.openQuick()),
@@ -1563,7 +1600,9 @@ function Workspace({
           />
         )}
 
-        {!focusMode && <StatusBar
+        {/* Pantalla de inicio: sin pestaña la barra de estado no tiene nada que informar y queda como franja
+            vacía; solo se muestra si el servidor MCP está activo (su indicador vive ahí). */}
+        {!focusMode && (!!activeTab || activeId === "tools" || settings.mcpEnabled) && <StatusBar
           tab={activeTab}
           device={settings.lifecycleInfo && activeId ? tabDevice[activeId] : undefined}
           state={activeId ? states[activeId] : undefined}
@@ -1684,6 +1723,7 @@ function Workspace({
           onDelete={cmdEdit.initial ? () => saveUserCommand(cmdEdit.vendor, null, cmdEdit.initial!.cmd) : undefined}
         />
       )}
+      {openAs && <OpenAsDialog session={openAs} onCancel={() => setOpenAs(null)} onConnect={(user) => h.connectAs(openAs, user)} />}
       {template !== null && (
         <TemplateDialog
           text={template.text}
@@ -1822,6 +1862,63 @@ function ToolsLoading({ active }: { active: boolean }) {
         <span aria-hidden className="w-4 h-4 rounded-full border-2 border-line border-t-accent animate-spin" />
         Cargando Herramientas…
       </div>
+    </div>
+  );
+}
+
+/**
+ * "Conectar como…": pide un usuario distinto para una sesión guardada. No ofrece la contraseña ni la
+ * guarda: la conexión la pide el equipo y la sesión guardada queda igual.
+ */
+function OpenAsDialog({ session, onConnect, onCancel }: { session: Session; onConnect: (user: string) => void; onCancel: () => void }) {
+  const modal = useModal({ onClose: onCancel });
+  const hintId = useId();
+  const [user, setUser] = useState("");
+  const value = user.trim();
+  return (
+    <div {...modal.overlay} className="fixed inset-0 z-50 grid place-items-center bg-black/25 p-4" onMouseDown={onCancel}>
+      <form
+        {...modal.dialog}
+        className="w-[400px] max-w-full bg-panel border border-line rounded-xl shadow-pop p-5"
+        onMouseDown={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (value) onConnect(value);
+        }}
+      >
+        <h2 id={modal.titleId} className="text-[14px] font-semibold mb-1">
+          Conectar como…
+        </h2>
+        <p id={hintId} className="text-muted text-[12px] mb-4">
+          {session.name} ({sessionTarget(session)}). La sesión guardada no cambia y su contraseña no se usa: el equipo la pedirá.
+        </p>
+        <label className="block">
+          <span className="block text-[12px] font-medium mb-1">Usuario</span>
+          <input
+            className="field w-full"
+            autoFocus
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby={hintId}
+            placeholder={session.username ? `Distinto de ${session.username}` : "Usuario"}
+            value={user}
+            onChange={(e) => setUser(e.target.value)}
+          />
+        </label>
+        <div className="flex justify-end gap-2 mt-5">
+          <button type="button" onClick={onCancel} className="px-3.5 h-8 rounded-md border border-line hover:bg-hover">
+            Cancelar
+          </button>
+          {/* Deshabilitado neutro, como Btn primario de tools/ui. */}
+          <button
+            type="submit"
+            disabled={!value}
+            className="px-3.5 h-8 rounded-md bg-accent text-accent-fg font-medium hover:opacity-90 disabled:bg-hover disabled:text-muted disabled:pointer-events-none"
+          >
+            Conectar
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
