@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderSearch, Gauge, Play, RefreshCw, Square, Trash2 } from "lucide-react";
@@ -231,6 +231,7 @@ function Iperf() {
     } else setPickError(`"${file.split(/[\\/]/).pop()}" no respondió como iperf3 (el archivo debe llamarse iperf3${isWindows ? ".exe" : ""}).`);
   };
 
+  const whyId = useId();
   useEffect(() => {
     void detect();
     invoke<{ name: string; ip: string }[]>("local_ips").then(setIps);
@@ -278,6 +279,8 @@ function Iperf() {
     );
 
   const r = client.result;
+  // Por qué "Medir" no se puede pulsar todavía.
+  const measureWhy = !client.running && !host.trim() ? "Ingresa la IP del servidor iperf3" : undefined;
 
   return (
     <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(400px,1fr))]">
@@ -305,7 +308,7 @@ function Iperf() {
         >
           <div className="grid grid-cols-2 @[36rem]:grid-cols-[1fr_90px_90px_80px] gap-2">
             <Label text="Servidor iperf3">
-              <input className="field" value={host} placeholder="10.0.0.2" onChange={(e) => setHost(e.target.value)} />
+              <input className="field" value={host} placeholder="Ej. 10.0.0.2" onChange={(e) => setHost(e.target.value)} />
             </Label>
             <Label text="Puerto">
               <input className="field" type="number" value={port} onChange={(e) => setPort(Number(e.target.value) || 5201)} />
@@ -333,9 +336,17 @@ function Iperf() {
             {udp && (
               <input className="field !w-24 !h-7" value={bandwidth} title="Ancho de banda objetivo (ej. 100M, 1G)" onChange={(e) => setBandwidth(e.target.value)} />
             )}
-            <Btn type="submit" kind={client.running ? "default" : "primary"} className="ml-auto" disabled={!host.trim()}>
-              {client.running ? <Square size={13} /> : <Play size={13} />} {client.running ? `Midiendo ${seconds} s…` : "Medir"}
-            </Btn>
+            <span className="ml-auto inline-flex items-center gap-2">
+              {/* Motivo visible del botón deshabilitado (no solo el tono atenuado). */}
+              {measureWhy && (
+                <span id={whyId} className="text-[11.5px] text-muted">
+                  {measureWhy}
+                </span>
+              )}
+              <Btn type="submit" kind={client.running ? "default" : "primary"} disabled={!host.trim()} aria-describedby={measureWhy ? whyId : undefined} title={measureWhy}>
+                {client.running ? <Square size={13} /> : <Play size={13} />} {client.running ? `Midiendo ${seconds} s…` : "Medir"}
+              </Btn>
+            </span>
           </div>
         </form>
         {client.error && <p className="mt-2 text-[12px] text-danger">{client.error}</p>}

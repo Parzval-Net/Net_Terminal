@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -28,7 +28,14 @@ type JobState = { state: "pending" | "running" | "ok" | "error"; text?: string }
 /** Máximo de equipos respaldándose a la vez: no satura AAA ni la CPU de los equipos. */
 const CONCURRENCY = 3;
 
-export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) {
+export default function BackupTool({
+  terminals,
+  totalSessions,
+}: {
+  terminals: TerminalRef[];
+  /** Sesiones guardadas en el árbol, para decir cuántas de ellas están conectadas (opcional). */
+  totalSessions?: number;
+}) {
   // Una sesión puede estar abierta en varias pestañas: se respalda una vez.
   const devices = useMemo(() => {
     const seen = new Set<string>();
@@ -49,6 +56,7 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
   const [msg, setMsg] = useState("");
   /** Respaldo abierto en el visor (descifrado en memoria si la carpeta está cifrada), con "Exportar…". */
   const [viewing, setViewing] = useState<string | null>(null);
+  const whyId = useId();
 
   const refresh = useCallback(() => {
     invoke<DeviceBackups[]>("backup_list").then((l) => setList(l ?? [])).catch((e) => setMsg(String(e)));
@@ -175,7 +183,9 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
         }
       >
         {devices.length === 0 ? (
-          <p className="text-[12.5px] text-muted">Conecta una o más sesiones remotas para respaldarlas.</p>
+          <p className="text-[12.5px] text-muted">
+            {totalSessions ? `Sesiones conectadas (0 de ${totalSessions}). ` : ""}Conecta una o más sesiones remotas desde el árbol para respaldarlas.
+          </p>
         ) : (
           <>
             <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -203,6 +213,13 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
               )}
               <span className="flex-1" />
               <Toggle checked={mask} onChange={setMask} label="Enmascarar secretos" />
+            </div>
+            {/* Solo se respaldan sesiones conectadas: se dice cuántas son del total del árbol. */}
+            <div className="flex flex-wrap items-baseline gap-x-2 mb-1.5 text-[12px]">
+              <span className="font-medium">
+                Sesiones conectadas ({totalSessions != null && totalSessions >= devices.length ? `${devices.length} de ${totalSessions}` : devices.length})
+              </span>
+              {(totalSessions == null || totalSessions > devices.length) && <span className="text-muted">Conecta otras desde el árbol para incluirlas.</span>}
             </div>
             <div className="rounded-lg border border-line divide-y divide-[var(--border)]">
               {devices.map((t) => {
@@ -260,9 +277,17 @@ export default function BackupTool({ terminals }: { terminals: TerminalRef[] }) 
                   <Square size={12} fill="currentColor" /> Detener ({doneCount}/{Object.keys(jobs).length})
                 </Btn>
               ) : (
-                <Btn kind="primary" onClick={run} disabled={!selected.size}>
-                  <Play size={13} /> Respaldar {selected.size || ""}
-                </Btn>
+                <>
+                  <Btn kind="primary" onClick={run} disabled={!selected.size} aria-describedby={selected.size ? undefined : whyId}>
+                    <Play size={13} /> Respaldar {selected.size || ""}
+                  </Btn>
+                  {/* Motivo del botón deshabilitado, junto a él. */}
+                  {!selected.size && (
+                    <span id={whyId} className="shrink-0 text-[12px] font-medium">
+                      Marca al menos un equipo
+                    </span>
+                  )}
+                </>
               )}
               <span className="text-[12px] text-muted">
                 {msg ||
