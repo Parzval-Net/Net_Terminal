@@ -60,6 +60,21 @@ export function maskSecrets(text: string, secrets: string[] = []): string {
   return out;
 }
 
+/**
+ * Respuesta de una línea lista para mostrar: el eco del comando real se cambia por su etiqueta
+ * (variables secretas enmascaradas, sin importar su largo) y el resto pasa por maskSecrets.
+ * Así un secreto corto ("ab") no queda en el eco del visor ni en el informe.
+ */
+export function maskOutput(output: string, cmd: string, label: string, secrets: string[] = []): string {
+  const c = cmd.trim();
+  const l = label.trim();
+  const echoed = c && l && c !== l ? output.split(c).join(l) : output;
+  return maskSecrets(echoed, secrets);
+}
+
+/** Aviso de la línea que se dejó de esperar al pulsar Detener. */
+export const STOP_NOTE = "Detenido sin esperar la respuesta: el equipo puede seguir ejecutando este comando hasta terminarlo.";
+
 /** Comandos de guardado por fabricante (catálogo integrado). FortiOS guarda solo al cerrar con "end". */
 export const SAVE_COMMAND: Record<string, string | null> = {
   cisco: "write memory",
@@ -89,6 +104,8 @@ export const useLabOpen = () => useSyncExternalStore(openStore.subscribe, openSt
 export const openLab = () => openStore.set({ n: (openStore.get()?.n ?? 0) + 1 });
 export const closeLab = () => openStore.set(null);
 let stopFlag = false;
+/** Despierta la espera de la línea en curso al pulsar Detener (el backend no la cancela). */
+let stopWake: () => void = () => {};
 
 export const useLabRun = () => useSyncExternalStore(runStore.subscribe, runStore.get);
 export const isLabRunning = () => !!runStore.get()?.running;
@@ -97,6 +114,7 @@ export const labOwns = (tabId: string) =>
   !!runStore.get()?.running && !!runStore.get()?.items.some((i) => i.tabId === tabId && (i.status === "running" || i.status === "pending"));
 export const stopLab = () => {
   stopFlag = true;
+  stopWake();
 };
 export const clearLab = () => {
   if (!runStore.get()?.running) runStore.set(null);
@@ -105,11 +123,13 @@ export const clearLab = () => {
 /**
  * Ejecuta `lines` en cada destino, en orden, con hasta `parallel` equipos a la vez. Con
  * `stopOnError`, el primer error detiene ese equipo (los demás siguen). "Detener" deja
- * sin ejecutar las líneas que faltan en todos.
+ * sin ejecutar las líneas que faltan en todos y deja de esperar la que está en curso: el
+ * backend no la cancela, así que el equipo puede seguir con ella (se avisa en ese paso).
  */
 export async function runLab(targets: LabTarget[], lines: string[], opts: LabOptions): Promise<LabRun> {
   if (isLabRunning()) throw new Error("Ya hay un script en ejecución");
   stopFlag = false;
+  const stopped = new Promise<"stop">((r) => (stopWake = () => r("stop")));
   const items: LabItem[] = targets.map((t) => ({ ...t, status: "pending", steps: [] }));
   const startedAt = Date.now();
   let queued = false;
@@ -139,13 +159,22 @@ export async function runLab(targets: LabTarget[], lines: string[], opts: LabOpt
         item.reason = "Se desconectó";
         return;
       }
+      const label = opts.labels?.[n] ?? cmd;
       let step: LabStep;
       try {
-        const r = await opts.exec(conn, cmd, opts.answer || SAVE_LINE.test(cmd.trim()));
+        const pending = opts.exec(conn, cmd, opts.answer || SAVE_LINE.test(cmd.trim()));
+        const r = await Promise.race([pending, stopped]);
+        if (r === "stop") {
+          pending.catch(() => {}); // termina después, sin nadie que la espere
+          item.steps.push({ cmd: label, ok: false, output: "", note: STOP_NOTE });
+          item.status = "stopped";
+          item.reason = `Detenido en la línea ${n + 1}: el equipo puede seguir ejecutándola`;
+          return;
+        }
         const err = r.declined ? `Pidió confirmación y se respondió que no: ${r.declined}` : cliError(r.output, cmd);
-        step = { cmd: opts.labels?.[n] ?? cmd, ok: !err, output: maskSecrets(r.output, opts.secrets), note: err ? maskSecrets(err, opts.secrets) : undefined };
+        step = { cmd: label, ok: !err, output: maskOutput(r.output, cmd, label, opts.secrets), note: err ? maskOutput(err, cmd, label, opts.secrets) : undefined };
       } catch (e) {
-        step = { cmd: opts.labels?.[n] ?? cmd, ok: false, output: "", note: String(e instanceof Error ? e.message : e) };
+        step = { cmd: label, ok: false, output: "", note: maskOutput(String(e instanceof Error ? e.message : e), cmd, label, opts.secrets) };
       }
       item.steps.push(step);
       schedule();
