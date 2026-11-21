@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Play, Square } from "lucide-react";
 import { Sample, stats } from "../../lib/monitors";
-import { LineChart, StatTile } from "./LineChart";
-import { Btn, Console, Label, Section, fmtMs } from "./ui";
+import { LineChart } from "./LineChart";
+import { Btn, Console, Label, Metric, Section, ToolHeader, fmtMs } from "./ui";
 import { useJob } from "./useJob";
 
 const QUICK = "quick-ping";
@@ -81,6 +81,8 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
 
   return (
     <div className="space-y-4">
+      {/* Sin acción primaria en el encabezado: cada prueba tiene la suya y corren por separado. */}
+      <ToolHeader title="Diagnóstico" description="Ping continuo, traceroute y revisión de puertos TCP desde este PC hacia un equipo." />
       <Section title="Ping continuo" hint="Usa el ping del sistema; no requiere permisos de administrador.">
         <form
           className="flex gap-2 mb-3"
@@ -94,13 +96,13 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
             {pinging ? <Square size={13} /> : <Play size={13} />} {pinging ? "Detener" : "Iniciar"}
           </Btn>
         </form>
-        {pingErr && <p className="mb-2 text-[12px] text-danger">{pingErr}</p>}
-        <div className="grid grid-cols-5 gap-2 mb-3">
-          <StatTile label="Actual" value={st.last?.ok ? fmtMs(st.last.rtt) : st.last ? "Sin resp." : "—"} tone={st.last && !st.last.ok ? "danger" : undefined} />
-          <StatTile label="Promedio" value={fmtMs(st.avg)} />
-          <StatTile label="Mín / máx" value={st.min == null ? "—" : `${st.min.toFixed(0)} / ${st.max!.toFixed(0)}`} />
-          <StatTile label="Jitter" value={fmtMs(st.jitter)} />
-          <StatTile label={`Pérdida (${st.lost}/${st.sent})`} value={`${st.loss.toFixed(1)} %`} tone={st.loss >= 5 ? "danger" : st.loss > 0 ? "warn" : undefined} />
+        {pingErr && <p className="mb-2 text-body-sm text-danger">{pingErr}</p>}
+        <div className="grid grid-cols-5 gap-x-3 gap-y-2 mb-3">
+          <Metric label="Actual" value={st.last?.ok ? fmtMs(st.last.rtt) : st.last ? "Sin resp." : "—"} tone={st.last && !st.last.ok ? "danger" : undefined} />
+          <Metric label="Promedio" value={fmtMs(st.avg)} />
+          <Metric label="Mín / máx" value={st.min == null ? "—" : `${st.min.toFixed(0)} / ${st.max!.toFixed(0)}`} />
+          <Metric label="Jitter" value={fmtMs(st.jitter)} />
+          <Metric label={`Pérdida (${st.lost}/${st.sent})`} value={`${st.loss.toFixed(1)} %`} tone={st.loss >= 5 ? "danger" : st.loss > 0 ? "warn" : undefined} />
         </div>
         <LineChart
           title="Latencia del ping continuo"
@@ -126,7 +128,7 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
               {trace.running ? "Detener" : "Trazar"}
             </Btn>
           </form>
-          {trace.error && <p className="mb-2 text-[12px] text-danger">{trace.error}</p>}
+          {trace.error && <p className="mb-2 text-body-sm text-danger">{trace.error}</p>}
           <Console lines={trace.lines} empty="La ruta aparecerá aquí" />
         </Section>
 
@@ -142,7 +144,7 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
               <input className="field" value={portHost} placeholder="192.0.2.10" onChange={(e) => setPortHost(e.target.value)} />
             </Label>
             <Label text="Puertos">
-              <input className="field font-mono !text-[12px]" value={portText} onChange={(e) => setPortText(e.target.value)} />
+              <input className="field font-mono !text-body-sm" value={portText} onChange={(e) => setPortText(e.target.value)} />
             </Label>
             <div className="self-end">
               <Btn type="submit" kind="primary" disabled={scanning || !portHost.trim() || !parsePorts(portText).length}>
@@ -150,9 +152,9 @@ export function DiagTool({ samples }: { samples: Record<string, Sample[]> }) {
               </Btn>
             </div>
           </form>
-          {portErr && <p className="mb-2 text-[12px] text-danger">{portErr}</p>}
+          {portErr && <p className="mb-2 text-body-sm text-danger">{portErr}</p>}
           <div className="max-h-[220px] overflow-y-auto">
-            <table className="w-full text-[12px]">
+            <table className="w-full text-body-sm tabular-nums">
               <thead className="text-muted text-left">
                 <tr>
                   <th className="font-medium py-1">Puerto</th>

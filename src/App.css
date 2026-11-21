@@ -95,6 +95,22 @@
     Cantarell, "Noto Sans", sans-serif;
 }
 
+/* Escala tipográfica de 5 pasos (utilidades text-caption, text-body-sm, text-body, text-title y
+   text-display). Reemplaza los tamaños sueltos de 0,5 px (11,5 y 12,5), que no se distinguen y
+   aplanan la jerarquía. Solo fijan el tamaño: el interlineado sigue el del contenedor.
+   - caption 11: rótulos de métricas, metadatos, contadores y grupos del menú.
+   - body-sm 12: ayudas, texto secundario, botones, tablas y etiquetas de campos.
+   - body 13: texto base (body) y contenido.
+   - title 15: títulos de sección.
+   - display 18: título de la herramienta (ToolHeader). */
+@theme {
+  --text-caption: 11px;
+  --text-body-sm: 12px;
+  --text-body: 13px;
+  --text-title: 15px;
+  --text-display: 18px;
+}
+
 html,
 body,
 #root {
@@ -107,7 +123,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-body);
   -webkit-font-smoothing: antialiased;
   user-select: none;
   -webkit-user-select: none;
