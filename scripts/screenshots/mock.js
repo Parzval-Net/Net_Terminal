@@ -533,6 +533,21 @@ const mcpAudit = [
   { ts: new Date(now - 60000).toISOString(), client: "Gemini CLI", clientVersion: "0.9", tool: "run_command", connection: "t2#1", target: "dist-sw01", command: "show clock", risk: null, decision: "solo_lectura" },
 ];
 
+// Escena "transfer": un FortiGate que terminó de descargar la imagen y un Catalyst a mitad de camino
+// (direcciones de documentación, RFC 5737).
+function demoTransfers() {
+  const start = Date.now();
+  emit("transfer", { id: "d1", proto: "tftp", client: "192.0.2.10:2071", file: "FGT_200F-v7.4.5.out", dir: "get", bytes: 0, total: 92_340_224, done: false, error: null });
+  emit("transfer", { id: "d2", proto: "tftp", client: "192.0.2.21:49152", file: "c9300-universalk9.17.12.04.SPA.bin", dir: "get", bytes: 0, total: 1_163_845_632, done: false, error: null });
+  emit("transfer", { id: "d3", proto: "tftp", client: "192.0.2.33:51200", file: "sw-acceso-01_20261121-0905.cfg", dir: "put", bytes: 0, total: null, done: false, error: null });
+  const tick = () => {
+    const t = (Date.now() - start) / 1000;
+    emit("transfer", { id: "d1", proto: "tftp", client: "192.0.2.10:2071", file: "FGT_200F-v7.4.5.out", dir: "get", bytes: Math.min(92_340_224, t * 30e6), total: 92_340_224, done: t * 30e6 >= 92_340_224, error: null });
+    emit("transfer", { id: "d2", proto: "tftp", client: "192.0.2.21:49152", file: "c9300-universalk9.17.12.04.SPA.bin", dir: "get", bytes: t * 9.5e6, total: 1_163_845_632, done: false, error: null });
+    emit("transfer", { id: "d3", proto: "tftp", client: "192.0.2.33:51200", file: "sw-acceso-01_20261121-0905.cfg", dir: "put", bytes: 48_211, total: null, done: t > 1, error: null });
+  };
+  setInterval(tick, 300);
+}
 const handlers = {
   mcp_configure: ({ enabled }) => (enabled ? "Escuchando en http://127.0.0.1:47821/mcp" : "Servidor MCP detenido"),
   mcp_decide: (args) => void mcpLog.decisions.push(args),
@@ -645,6 +660,9 @@ const handlers = {
   },
   cmd_history_clear: ({ key }) => (key ? delete cmdHistory[key] : Object.keys(cmdHistory).forEach((k) => delete cmdHistory[k]), null),
   plugins_list: () => [],
+  tftp_delete: () => null,
+  tftp_add: ({ path }) => path.split(/[\\/]/).pop(),
+  write: () => null,
   tftp_files: () => [["c9300-universalk9.17.12.04.SPA.bin", 1_163_845_632], ["AR6100-V300R022C10SPC100.cc", 168_820_736], ["FGT_200F-v7.4.5.out", 92_340_224]],
   // Como el backend: primero la de la ruta por defecto, luego físicas y al final virtuales.
   local_ips: () => [
@@ -1722,7 +1740,14 @@ const scenes = {
     while (sc && sc.scrollHeight <= sc.clientHeight) sc = sc.parentElement;
     if (sc) sc.scrollTop -= 90;
   },
-  transfer: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Transferencias"); await wait(400); [...document.querySelectorAll("h3")].find((h) => h.textContent === "Servidor TFTP")?.scrollIntoView(); },
+  transfer: async () => {
+    await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins");
+    await click("Transferencias");
+    await wait(400);
+    document.querySelector("[aria-label='Iniciar TFTP']")?.click();
+    await wait(300);
+    demoTransfers();
+  },
   // ---- Escenas de QA visual del contenedor de la app ----
   empty: async () => {},
   palette: async () => { await wait(300); key("k"); await wait(300); },
