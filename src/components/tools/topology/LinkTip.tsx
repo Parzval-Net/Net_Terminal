@@ -102,7 +102,15 @@ function LinkTipBody({ d, now }: { d: LinkDetail; now: number }) {
           {!d.speed && <p className="mt-0.5 text-[11px] text-muted">Velocidad del enlace desconocida: sin % de uso.</p>}
         </>
       ) : (
-        <p className="mt-1.5 text-muted">Sin lectura de tráfico</p>
+        <p className="mt-1.5 text-muted [overflow-wrap:anywhere]">
+          {d.noTraffic ? (
+            <>
+              <span className="font-medium text-fg">Sin datos de tráfico.</span> {d.noTraffic}
+            </>
+          ) : (
+            "Sin lectura de tráfico"
+          )}
+        </p>
       )}
       <div className="mt-1.5 space-y-0.5">
         {d.findings.length ? (

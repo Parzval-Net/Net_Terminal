@@ -55,7 +55,7 @@ import {
   utilLevel,
 } from "../../lib/topology";
 import { ConnectPanel } from "./TopoConnect";
-import { LEVEL_RANK, LinkLevel, linkTraffic } from "../../lib/topoTraffic";
+import { LEVEL_RANK, LinkLevel, linkTraffic, noTrafficReason } from "../../lib/topoTraffic";
 import {
   LinkDetail,
   NO_FILTER,
@@ -90,10 +90,11 @@ import { plural } from "../../lib/plural";
 import { TopoLayers } from "./topology/TopoLayers";
 import { TopoCanvas } from "./topology/TopoCanvas";
 import { TopoToolbar } from "./topology/TopoToolbar";
+import { ToolHeader } from "./ui";
 import { HopDialogs } from "./topology/HopDialogs";
 import { TopoPanel } from "./topology/TopoPanel";
 import { FiltersSection, ScopeSection, SourcesSection } from "./topology/PanelConfig";
-import { AttentionSection, SuggestionsSection, TrafficSection } from "./topology/PanelStatus";
+import { AttentionSection, NoTrafficRow, NoTrafficSection, SuggestionsSection, TrafficSection } from "./topology/PanelStatus";
 import { DetailSection, ManualSection, RouteSection, SnapshotsSection } from "./topology/PanelItem";
 import { useTopoSnapshots } from "./topology/useTopoSnapshots";
 import { useTopoHops } from "./topology/useTopoHops";
@@ -637,6 +638,23 @@ export function TopologyTool({
     return { down, load, issues };
   }, [attention]);
   const coverage = useMemo(() => checkCoverage(topoData, traffic.live), [topoData, traffic.live]);
+  /**
+   * Enlaces CDP/LLDP sin datos de tráfico con la lectura activa y el motivo de cada uno (se dibujan en
+   * gris punteado). Los caídos ya están en "Requieren atención"; no suman a su contador.
+   */
+  const noTraffic = useMemo(() => {
+    const m = new Map<string, NoTrafficRow>();
+    if (!trafficOn) return m;
+    for (const l of topo.links) {
+      if (isStale(l) || linkDash(l)) continue;
+      const k = linkKey(l);
+      if (linkRates.has(k) || m.has(k) || linkLevelOf(checks.get(k), undefined) === "down") continue;
+      const r = noTrafficReason(l, topoById, traffic.rates, traffic.status);
+      m.set(k, { key: k, aName: topoById.get(l.a)?.name ?? l.a, bName: topoById.get(l.b)?.name ?? l.b, kind: r.kind, text: r.text });
+    }
+    return m;
+  }, [trafficOn, topo.links, linkRates, checks, topoById, traffic.rates, traffic.status]);
+  const noTrafficRows = useMemo(() => [...noTraffic.values()], [noTraffic]);
   /** Enlaces CDP/LLDP que ya nadie informa: se dibujan fantasma hasta que se vuelvan a ver o se quiten. */
   const staleCount = useMemo(() => topo.links.filter(isStale).length, [topo.links]);
   const purge = () =>
@@ -696,12 +714,14 @@ export function TopologyTool({
         const k = linkKey(l);
         if (!want.has(k)) continue;
         const st = removed.has(k) ? "removed" : added.has(k) ? "added" : null;
-        out.push(linkDetail(v, l, { byId, lt: st ? undefined : linkRates.get(k), issues: st === "removed" ? undefined : checks.get(k), live: traffic.live, state: st }));
+        const d = linkDetail(v, l, { byId, lt: st ? undefined : linkRates.get(k), issues: st === "removed" ? undefined : checks.get(k), live: traffic.live, state: st });
+        const why = st ? undefined : noTraffic.get(k)?.text;
+        out.push(why ? { ...d, noTraffic: why } : d);
       }
       // Los peores primero (caído y saturado), como en la lista de atención.
       return out.sort((x, y) => LEVEL_RANK[y.level] - LEVEL_RANK[x.level]);
     },
-    [checks, linkRates, removed, added, traffic.live],
+    [checks, linkRates, removed, added, traffic.live, noTraffic],
   );
   /** Clic en "Requieren atención": resalta el enlace y lo centra (otro clic en el mismo lo suelta). */
   const focusLinkRef = useRef(focusLink);
@@ -938,8 +958,8 @@ export function TopologyTool({
   const hasPhysical = shown.links.some((l) => !linkDash(l));
   const hasTentative = shown.nodes.some((n) => n.manual || n.addrOnly);
   const hasTraffic = linkRates.size > 0;
-  // Leyenda de estados: con lecturas de tráfico, o cuando hay algo que resaltar (caído, problemas de interfaz).
-  const showStatusLegend = hasTraffic || attention.length > 0;
+  // Leyenda de estados: con el tráfico activo, o cuando hay algo que resaltar (caído, problemas de interfaz).
+  const showStatusLegend = trafficOn || hasTraffic || attention.length > 0;
   const showLegend = legendKinds.length > 0 || hasTentative || showStatusLegend;
 
   const trafficSummary = !trafficOn
@@ -1046,6 +1066,7 @@ export function TopologyTool({
     selected,
     focusLink,
     linkRates,
+    trafficOn,
     detail,
     color: ui.color,
     arrows: arrowsOn,
@@ -1082,6 +1103,7 @@ export function TopologyTool({
     hasTentative,
     showStatusLegend,
     detail,
+    trafficOn,
     hasTraffic,
     color: ui.color,
     arrows: ui.arrows,
@@ -1121,6 +1143,8 @@ export function TopologyTool({
 
   return (
     <div ref={rootRef} className="@container h-full min-h-[280px] flex flex-col gap-3">
+      {/* Encabezado común de las herramientas; en anchos chicos se omite (el menú lateral ya dice Topología) para dejarle alto al mapa. */}
+      {!tiny && <ToolHeader title="Topología" description={hint} />}
       <TopoToolbar
         wide={wide}
         tiny={tiny}
@@ -1274,6 +1298,9 @@ export function TopologyTool({
               open={isOpen("atencion")}
               onToggle={(v) => setOpen("atencion", v)}
             />
+            {trafficOn && (
+              <NoTrafficSection rows={noTrafficRows} focusLink={focusLink} onPick={pickLink} open={isOpen("sindatos")} onToggle={(v) => setOpen("sindatos", v)} />
+            )}
             <TrafficSection
               summary={trafficSummary}
               trafficOn={trafficOn}

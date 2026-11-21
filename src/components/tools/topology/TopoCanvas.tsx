@@ -8,6 +8,7 @@ import { MapLegend } from "./MapLegend";
 import { MapSummary } from "./MapSummary";
 import { TopoLayers } from "./TopoLayers";
 import { ZoomControls } from "./ZoomControls";
+import { MAP_BOTTOM_PAD } from "./useTopoZoom";
 
 /**
  * El mapa: el diagrama SVG con zoom y arrastre, el resumen de atención, los controles de zoom, la
@@ -85,7 +86,9 @@ export function TopoCanvas({
           <svg
             viewBox={`${box.x} ${box.y} ${box.w} ${box.h}`}
             // --ts y --sm: contraescala de los textos y ocultar puertos e IP con poco zoom (ver scaledText).
-            style={{ width: `${zoomUsed * 100}%`, height: `${zoomUsed * 100}%`, cursor: panning ? "grabbing" : "grab", "--ts": textScale(mapK), "--ss": smallScale(mapK), "--sm": labelsVisible(mapK) ? "inline" : "none" } as React.CSSProperties}
+            // El alto descuenta la franja inferior de la Leyenda y el zoom: el encuadre deja el diagrama
+            // sobre ella y el espaciador de abajo permite desplazarlo hasta ahí con zoom.
+            style={{ display: "block", width: `${zoomUsed * 100}%`, height: `calc((100% - ${MAP_BOTTOM_PAD}px) * ${zoomUsed})`, cursor: panning ? "grabbing" : "grab", "--ts": textScale(mapK), "--ss": smallScale(mapK), "--sm": labelsVisible(mapK) ? "inline" : "none" } as React.CSSProperties}
             onPointerDown={onPanStart}
             onPointerMove={onPointerMove}
             onPointerUp={onEndDrag}
@@ -94,6 +97,7 @@ export function TopoCanvas({
             <TopoLayers {...layers} />
           </svg>
         )}
+        {viewCount > 0 && shownCount > 0 && <div aria-hidden className="pointer-events-none" style={{ height: MAP_BOTTOM_PAD }} />}
         {insetRight > 0 && <div aria-hidden className="pointer-events-none absolute left-0 top-0 h-px" style={{ width: `calc(${zoomUsed * 100}% + ${insetRight}px)` }} />}
       </div>
       {!panelOpen && sel && (

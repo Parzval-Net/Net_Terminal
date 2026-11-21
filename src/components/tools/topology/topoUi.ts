@@ -3,7 +3,7 @@ import { DismissedMap, Topology, parseDismissed } from "../../../lib/topology";
 import { NO_SCOPE, TopoScope } from "../../../lib/topoInsights";
 
 /** Secciones del panel lateral. */
-export type PanelSection = "fuentes" | "alcance" | "filtros" | "atencion" | "trafico" | "sugerencias" | "detalle" | "ruta" | "manual" | "snapshots" | "leyenda";
+export type PanelSection = "fuentes" | "alcance" | "filtros" | "atencion" | "sindatos" | "trafico" | "sugerencias" | "detalle" | "ruta" | "manual" | "snapshots" | "leyenda";
 export type DiscoveryMode = "cli" | "snmp";
 
 /**
@@ -44,7 +44,7 @@ export interface TopoUi {
 export const UI_KEY = "topoUi";
 export const UI_DEFAULT: TopoUi = {
   panel: true,
-  sec: { fuentes: false, atencion: true, trafico: false, sugerencias: false, detalle: true, ruta: true, manual: false, snapshots: false, leyenda: false },
+  sec: { fuentes: false, atencion: true, sindatos: false, trafico: false, sugerencias: false, detalle: true, ruta: true, manual: false, snapshots: false, leyenda: false },
   mode: "cli",
   snmpProfile: "",
   interval: 30,

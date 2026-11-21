@@ -10,6 +10,14 @@ export const UTIL_VAR: Record<UtilLevel, string> = { ok: "var(--ok)", warn: "var
 /** Color del tema por estado (normal: gris). El rojo es solo de saturado; caído va en gris oscuro punteado. */
 export const LEVEL_COLOR: Record<TrafficLevelName, string> = { normal: "var(--muted)", high: "var(--warn)", saturated: "var(--danger)" };
 
+/**
+ * Enlace con tráfico normal en la vista por excepción: verde tenue (no compite con alto ni saturado)
+ * y sin datos de tráfico: gris punteado fino. Mismos valores en el mapa y en la leyenda.
+ */
+export const FLOW_OK = "var(--ok)";
+export const FLOW_OK_OPACITY = 0.6;
+export const NO_DATA_DASH = "2 4";
+
 /** Tono de las píldoras: fondo tenue del color, borde del color y texto del mismo tono más oscuro. */
 export const PILL_TONE: Record<"high" | "saturated" | "down", string> = { high: "var(--warn)", saturated: "var(--danger)", down: "var(--muted)" };
 export const pillStyle = (tone: keyof typeof PILL_TONE): React.CSSProperties => ({

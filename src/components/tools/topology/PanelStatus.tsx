@@ -1,9 +1,9 @@
 import { Check } from "lucide-react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { plural } from "../../../lib/plural";
-import { UTIL_HIGH, UTIL_SATURATED } from "../../../lib/topoTraffic";
+import { NO_TRAFFIC_SHORT, NoTrafficKind, UTIL_HIGH, UTIL_SATURATED } from "../../../lib/topoTraffic";
 import { AttentionRow, checkCoverage } from "../../../lib/topoInsights";
-import { LinkSuggestion, TOPO_SOURCES } from "../../../lib/topology";
+import { LinkSuggestion, TOPO_SOURCES, shortName } from "../../../lib/topology";
 import { Btn, Collapsible, Toggle } from "../ui";
 import { TRAFFIC_INTERVALS, TrafficInterval, useTopoTraffic } from "../useTopoTraffic";
 import { AttentionList } from "./AttentionList";
@@ -87,6 +87,65 @@ export function AttentionSection({
   );
 }
 
+/** Enlace sin datos de tráfico con la lectura activa y su motivo (ver noTrafficReason). */
+export interface NoTrafficRow {
+  key: string;
+  aName: string;
+  bName: string;
+  kind: NoTrafficKind;
+  text: string;
+}
+
+/**
+ * Enlaces sin datos de tráfico: por qué cada uno no muestra flujo. Va aparte de "Requieren atención"
+ * y no suma a su contador (no es una falla del enlace, sino de la lectura). Un clic ubica el enlace.
+ */
+export function NoTrafficSection({ rows, focusLink, onPick, open, onToggle }: { rows: NoTrafficRow[]; focusLink: string | null; onPick: (key: string) => void; open: boolean; onToggle: (v: boolean) => void }) {
+  const kinds = new Map<NoTrafficKind, number>();
+  for (const r of rows) kinds.set(r.kind, (kinds.get(r.kind) ?? 0) + 1);
+  const summary = rows.length
+    ? [...kinds]
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `${n} ${NO_TRAFFIC_SHORT[k]}`)
+        .join(" · ")
+    : "Todos los enlaces físicos tienen lectura";
+  return (
+    <Collapsible title="Sin datos de tráfico" badge={rows.length || undefined} badgeTone="neutral" summary={summary} open={open} onToggle={onToggle}>
+      <div className="space-y-2 text-[12px]">
+        {rows.length > 0 ? (
+          <ul className="space-y-0.5 max-h-72 overflow-y-auto">
+            {rows.map((r) => (
+              <li key={r.key}>
+                <button
+                  type="button"
+                  onClick={() => onPick(r.key)}
+                  aria-pressed={focusLink === r.key}
+                  className={`w-full text-left rounded-md px-1.5 py-1 hover:bg-hover ${focusLink === r.key ? "bg-selected" : ""}`}
+                  title="Ubicar y resaltar en el diagrama"
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="flex-1 min-w-0 truncate font-medium">
+                      {shortName(r.aName, 18)} <span className="text-muted">↔</span> {shortName(r.bName, 18)}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted">{NO_TRAFFIC_SHORT[r.kind]}</span>
+                  </span>
+                  <span className="block text-[11.5px] text-muted [overflow-wrap:anywhere]">{r.text}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-muted">Todos los enlaces físicos tienen lectura de tráfico.</p>
+        )}
+        <p className="text-[11px] text-muted leading-snug">
+          En el mapa van en gris punteado fino; los que tienen tráfico normal, en verde tenue. La tasa sale de dos lecturas seguidas, así que recién activado el tráfico todos esperan la segunda lectura. Solo
+          enlaces CDP/LLDP; los caídos van en "Requieren atención".
+        </p>
+      </div>
+    </Collapsible>
+  );
+}
+
 /** Tráfico en enlaces: activar la lectura, intervalo, consola, vista detallada y estado de las lecturas. */
 export function TrafficSection({
   summary,
@@ -160,7 +219,7 @@ export function TrafficSection({
         <div>
           <Toggle checked={ui.detail} onChange={(d) => setUi((u) => ({ ...u, detail: d }))} label="Vista detallada" />
           <p className="mt-0.5 pl-10 text-[11px] text-muted leading-snug">
-            Para expertos. Por defecto el mapa es por excepción: lo normal (menos de {Math.round(UTIL_HIGH * 100)} %) queda en gris fino y solo se resaltan los enlaces altos, saturados o caídos. La vista detallada
+            Para expertos. Por defecto el mapa es por excepción: lo normal (menos de {Math.round(UTIL_HIGH * 100)} %) queda en verde tenue, lo que no tiene datos en gris punteado y solo se resaltan los enlaces altos, saturados o caídos. La vista detallada
             colorea todos los enlaces por utilización y agrega rótulos, flechas y animación.
           </p>
         </div>
