@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { calc, splitV4 } from "../../lib/subnet";
-import { CopyText, Label, Section } from "./ui";
+import { CopyText, Label, Section, ToolHeader } from "./ui";
 
 export function SubnetTool() {
   const [input, setInput] = useState("192.168.10.77/26");
@@ -36,17 +36,19 @@ export function SubnetTool() {
 
   return (
     <div className="space-y-4">
-      <Section title="Calculadora de subredes" hint="IPv4 con prefijo o máscara (10.0.0.1/24, 10.0.0.1 255.255.255.0) o IPv6 (2001:db8::1/64).">
+      <ToolHeader title="Subredes" description="Red, máscara, wildcard, broadcast y rango de hosts de una dirección IPv4 o IPv6, y división en subredes." />
+      <Section title="Dirección" hint="IPv4 con prefijo o máscara (10.0.0.1/24, 10.0.0.1 255.255.255.0) o IPv6 (2001:db8::1/64).">
         <input
           autoFocus
+          aria-label="Dirección IP con prefijo o máscara"
           className="field font-mono mb-3"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           spellCheck={false}
         />
-        {!r && input.trim() && <p className="text-[12px] text-danger">Dirección o máscara inválida</p>}
+        {!r && input.trim() && <p className="text-body-sm text-danger">Dirección o máscara inválida</p>}
         {r && (
-          <table className="w-full text-[12.5px]">
+          <table className="w-full text-body-sm tabular-nums">
             <tbody>
               {rows.map(([k, v]) => (
                 <tr key={k} className="border-t border-line first:border-0">
@@ -75,7 +77,7 @@ export function SubnetTool() {
           </Label>
           {subnets.length > 0 && (
             <div className="max-h-[300px] overflow-y-auto">
-              <table className="w-full text-[12px] font-mono">
+              <table className="w-full text-body-sm font-mono tabular-nums">
                 <thead className="text-muted text-left font-sans">
                   <tr>
                     <th className="font-medium py-1">Subred</th>
@@ -93,7 +95,7 @@ export function SubnetTool() {
                   ))}
                 </tbody>
               </table>
-              {2 ** (split - r.prefix) > 1024 && <p className="mt-2 text-[11.5px] text-muted">Se muestran las primeras 1.024.</p>}
+              {2 ** (split - r.prefix) > 1024 && <p className="mt-2 text-body-sm text-muted">Se muestran las primeras 1.024.</p>}
             </div>
           )}
         </Section>

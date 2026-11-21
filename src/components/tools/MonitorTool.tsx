@@ -1,8 +1,8 @@
 import { memo, useMemo, useRef, useState } from "react";
 import { BellOff, Pause, Pencil, Play, Plus, RotateCcw, Trash2, Volume2, VolumeX } from "lucide-react";
 import { MonitorStatus, MonitorTarget, Sample, fmtDuration, stats } from "../../lib/monitors";
-import { LineChart, StatTile } from "./LineChart";
-import { Btn, Label, Section, StatusPill, Toggle, fmtMs } from "./ui";
+import { LineChart } from "./LineChart";
+import { Btn, Label, Metric, Section, StatusPill, ToolHeader, Toggle, fmtMs } from "./ui";
 import { Segmented } from "../controls";
 
 interface Props {
@@ -64,23 +64,23 @@ export function MonitorTool({ targets, samples, status, onChange, onClear, onSil
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="flex-1 min-w-[16rem] text-[12px] text-muted">
-          Vigila que un equipo responda (ICMP) o que un acceso esté disponible (TCP: 22, 23, 443…). Suena una alarma al
-          caer y otra al recuperarse, aunque estés en otra pestaña.
-        </p>
-        <div className="flex items-center gap-2 shrink-0">
-          <Segmented size="sm" label="Ventana de los gráficos" value={win} onChange={setWin} options={WINDOWS.map(([label, ms]) => [ms, label] as const)} />
-          <Btn kind="primary" onClick={() => setEditing(blank())}>
-            <Plus size={14} /> Nueva sonda
-          </Btn>
-        </div>
-      </div>
+      <ToolHeader
+        title="Monitoreo"
+        description="Vigila que un equipo responda (ICMP) o que un acceso esté disponible (TCP: 22, 23, 443…). Suena una alarma al caer y otra al recuperarse, aunque estés en otra pestaña."
+        actions={
+          <>
+            <Segmented size="sm" label="Ventana de los gráficos" value={win} onChange={setWin} options={WINDOWS.map(([label, ms]) => [ms, label] as const)} />
+            <Btn kind="primary" onClick={() => setEditing(blank())}>
+              <Plus size={14} /> Nueva sonda
+            </Btn>
+          </>
+        }
+      />
 
       {editing && <MonitorForm initial={editing} onSave={save} onCancel={() => setEditing(null)} />}
 
       {targets.length === 0 && !editing && (
-        <div className="rounded-xl border border-dashed border-line p-8 text-center text-[12.5px] text-muted">
+        <div className="rounded-xl border border-dashed border-line p-8 text-center text-body-sm text-muted">
           Agrega una sonda para monitorear un router, un enlace o un acceso SSH.
         </div>
       )}
@@ -159,12 +159,13 @@ const MonitorCard = memo(function MonitorCard(p: {
         </div>
       }
     >
-      <div className="grid grid-cols-5 gap-2 mb-3">
-        <StatTile label="Actual" value={st.last?.ok ? fmtMs(st.last.rtt) : st.last ? "Sin resp." : "—"} tone={st.last && !st.last.ok ? "danger" : undefined} />
-        <StatTile label="Promedio" value={fmtMs(st.avg)} />
-        <StatTile label="Mín / máx" value={st.min == null ? "—" : `${st.min.toFixed(0)} / ${st.max!.toFixed(0)}`} />
-        <StatTile label="Jitter" value={fmtMs(st.jitter)} />
-        <StatTile
+      {/* Indicadores sin marco propio (la tarjeta ya lo tiene) y sin truncar: si un valor no cabe, pasa a dos líneas. */}
+      <div className="grid grid-cols-5 gap-x-3 gap-y-2 mb-3">
+        <Metric label="Actual" value={st.last?.ok ? fmtMs(st.last.rtt) : st.last ? "Sin resp." : "—"} tone={st.last && !st.last.ok ? "danger" : undefined} />
+        <Metric label="Promedio" value={fmtMs(st.avg)} />
+        <Metric label="Mín / máx" value={st.min == null ? "—" : `${st.min.toFixed(0)} / ${st.max!.toFixed(0)}`} />
+        <Metric label="Jitter" value={fmtMs(st.jitter)} />
+        <Metric
           label={`Pérdida (${st.lost}/${st.sent})`}
           value={`${st.loss.toFixed(1)} %`}
           tone={st.loss >= 5 ? "danger" : st.loss > 0 ? "warn" : st.sent ? "ok" : undefined}
@@ -178,10 +179,10 @@ const MonitorCard = memo(function MonitorCard(p: {
         xLabel={timeLabel}
       />
       {status?.state === "down" && status.lastError && (
-        <p className="mt-2 text-[11.5px] text-danger">✕ {status.lastError}</p>
+        <p className="mt-2 text-body-sm text-danger">✕ {status.lastError}</p>
       )}
       {status && status.downCount > 0 && (
-        <p className="mt-1 text-[11.5px] text-muted">Caídas desde que inició: {status.downCount}</p>
+        <p className="mt-1 text-body-sm text-muted tabular-nums">Caídas desde que inició: {status.downCount}</p>
       )}
     </Section>
   );

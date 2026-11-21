@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderSearch, Gauge, Play, RefreshCw, Square, Trash2 } from "lucide-react";
 import { SpeedResult } from "../../lib/settings";
-import { LineChart, StatTile } from "./LineChart";
-import { Btn, Console, CopyText, Label, Section, Toggle } from "./ui";
+import { LineChart } from "./LineChart";
+import { Btn, Console, CopyText, Label, Metric, Section, ToolHeader, Toggle } from "./ui";
 import { useJob } from "./useJob";
 
 interface IperfResult {
@@ -32,6 +32,8 @@ interface SpeedProps {
 export function PerfTool(p: SpeedProps) {
   return (
     <div className="space-y-4">
+      {/* Sin acción primaria en el encabezado: Speedtest e iperf3 se inician cada uno en su sección. */}
+      <ToolHeader title="Velocidad" description="Speedtest de la conexión a internet de este PC e iperf3 para medir el throughput entre dos puntos de tu red." />
       <SpeedTest {...p} />
       <Iperf />
     </div>
@@ -78,7 +80,7 @@ function SpeedTest({ history, onResult, onHistory }: SpeedProps) {
     >
       {job.running && (
         <div className="mb-3">
-          <div className="flex justify-between text-[11.5px] text-muted mb-1">
+          <div className="flex justify-between text-body-sm text-muted mb-1 tabular-nums">
             <span>{phaseLabel}</span>
             <span>{job.progress ? `${Math.round(job.progress.progress * 100)} %` : ""}</span>
           </div>
@@ -87,15 +89,15 @@ function SpeedTest({ history, onResult, onHistory }: SpeedProps) {
           </div>
         </div>
       )}
-      {job.error && <p className="mb-2 text-[12px] text-danger">{job.error}</p>}
-      <div className="grid grid-cols-2 @[32rem]:grid-cols-4 gap-2">
-        <StatTile label="Bajada" value={mbps(r?.download_mbps)} />
-        <StatTile label="Subida" value={mbps(r?.upload_mbps)} />
-        <StatTile label="Latencia" value={r ? `${r.latency_ms.toFixed(1)} ms` : "—"} />
-        <StatTile label="Jitter" value={r ? `${r.jitter_ms.toFixed(1)} ms` : "—"} />
+      {job.error && <p className="mb-2 text-body-sm text-danger">{job.error}</p>}
+      <div className="grid grid-cols-2 @[32rem]:grid-cols-4 gap-x-3 gap-y-2">
+        <Metric label="Bajada" value={mbps(r?.download_mbps)} />
+        <Metric label="Subida" value={mbps(r?.upload_mbps)} />
+        <Metric label="Latencia" value={r ? `${r.latency_ms.toFixed(1)} ms` : "—"} />
+        <Metric label="Jitter" value={r ? `${r.jitter_ms.toFixed(1)} ms` : "—"} />
       </div>
       {r?.server?.colo && (
-        <p className="mt-2 text-[11.5px] text-muted">
+        <p className="mt-2 text-body-sm text-muted">
           Servidor: {r.server.colo}
           {r.server.city ? ` (${r.server.city})` : ""} · {new Date(r.ts).toLocaleString("es-CL")}
         </p>
@@ -107,8 +109,8 @@ function SpeedTest({ history, onResult, onHistory }: SpeedProps) {
       )}
       {history.length > 0 && (
         <details className="mt-3">
-          <summary className="text-[12px] text-muted cursor-default">Historial ({history.length})</summary>
-          <table className="w-full mt-2 text-[12px]">
+          <summary className="text-body-sm text-muted cursor-default">Historial ({history.length})</summary>
+          <table className="w-full mt-2 text-body-sm">
             <thead className="text-muted text-left">
               <tr>
                 <th className="font-medium py-1">Fecha</th>
@@ -158,7 +160,7 @@ function SpeedTest({ history, onResult, onHistory }: SpeedProps) {
                 onHistory([]);
                 setArmed(null);
               }}
-              className={`text-[11.5px] px-2 h-6 rounded-md hover:bg-hover ${armed === "all" ? "text-danger" : "text-muted hover:text-danger"}`}
+              className={`text-body-sm px-2 h-6 rounded-md hover:bg-hover ${armed === "all" ? "text-danger" : "text-muted hover:text-danger"}`}
             >
               {armed === "all" ? "Clic para borrar todo el historial" : "Borrar historial"}
             </button>
@@ -241,12 +243,12 @@ function Iperf() {
   if (version === null)
     return (
       <Section title="iperf3" hint="Throughput, retransmisiones, jitter y pérdida entre dos puntos.">
-        <p className="text-[12.5px]">
+        <p className="text-body-sm">
           No se encontró iperf3 en el PATH ni en las carpetas habituales (Descargas, Archivos de programa, winget, Chocolatey, Scoop, Homebrew, MacPorts, snap). Si ya lo
           instalaste o descomprimiste en otra carpeta, elige el ejecutable:
         </p>
         {found?.suggested && (
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-body-sm">
             <span className="min-w-0 break-all">
               Se encontró uno en <span className="font-mono">{found.path}</span>. Por seguridad no se ejecuta hasta que lo confirmes.
             </span>
@@ -261,9 +263,9 @@ function Iperf() {
             <RefreshCw size={14} className={searching ? "animate-spin" : ""} /> {searching ? "Buscando…" : "Buscar de nuevo"}
           </Btn>
         </div>
-        {pickError && <p className="mt-1.5 text-[12px] text-danger">{pickError}</p>}
-        <p className="mt-3 text-[12px] text-muted">Para instalarlo:</p>
-        <ul className="mt-2 space-y-1 text-[12px] text-muted">
+        {pickError && <p className="mt-1.5 text-body-sm text-danger">{pickError}</p>}
+        <p className="mt-3 text-body-sm text-muted">Para instalarlo:</p>
+        <ul className="mt-2 space-y-1 text-body-sm text-muted">
           <li>
             macOS: <CopyText text="brew install iperf3" />
           </li>
@@ -289,13 +291,13 @@ function Iperf() {
         hint={found ? `${found.version} · ${found.path}` : "Detectando…"}
         right={
           found && (
-            <Btn kind="ghost" className="!h-7 !px-2 !text-[11.5px]" title="Usar otro ejecutable de iperf3" onClick={() => void pick()}>
+            <Btn kind="ghost" className="!h-7 !px-2" title="Usar otro ejecutable de iperf3" onClick={() => void pick()}>
               <FolderSearch size={13} /> Cambiar
             </Btn>
           )
         }
       >
-        {pickError && <p className="mb-2 text-[12px] text-danger">{pickError}</p>}
+        {pickError && <p className="mb-2 text-body-sm text-danger">{pickError}</p>}
         <form
           className="space-y-3"
           onSubmit={(e) => {
@@ -339,7 +341,7 @@ function Iperf() {
             <span className="ml-auto inline-flex items-center gap-2">
               {/* Motivo visible del botón deshabilitado (no solo el tono atenuado). */}
               {measureWhy && (
-                <span id={whyId} className="text-[11.5px] text-muted">
+                <span id={whyId} className="text-body-sm text-muted">
                   {measureWhy}
                 </span>
               )}
@@ -349,21 +351,21 @@ function Iperf() {
             </span>
           </div>
         </form>
-        {client.error && <p className="mt-2 text-[12px] text-danger">{client.error}</p>}
+        {client.error && <p className="mt-2 text-body-sm text-danger">{client.error}</p>}
         {r && (
           <div className="mt-3 space-y-3">
-            <div className="grid grid-cols-2 @[32rem]:grid-cols-4 gap-2">
-              <StatTile label="Enviado" value={mbps(r.sent_mbps)} />
-              <StatTile label="Recibido" value={mbps(r.received_mbps)} />
+            <div className="grid grid-cols-2 @[32rem]:grid-cols-4 gap-x-3 gap-y-2">
+              <Metric label="Enviado" value={mbps(r.sent_mbps)} />
+              <Metric label="Recibido" value={mbps(r.received_mbps)} />
               {r.protocol === "UDP" ? (
                 <>
-                  <StatTile label="Jitter" value={r.jitter_ms != null ? `${r.jitter_ms.toFixed(2)} ms` : "—"} />
-                  <StatTile label="Pérdida" value={r.lost_percent != null ? `${r.lost_percent.toFixed(2)} %` : "—"} tone={(r.lost_percent ?? 0) > 1 ? "danger" : undefined} />
+                  <Metric label="Jitter" value={r.jitter_ms != null ? `${r.jitter_ms.toFixed(2)} ms` : "—"} />
+                  <Metric label="Pérdida" value={r.lost_percent != null ? `${r.lost_percent.toFixed(2)} %` : "—"} tone={(r.lost_percent ?? 0) > 1 ? "danger" : undefined} />
                 </>
               ) : (
                 <>
-                  <StatTile label="Retransmisiones" value={String(r.retransmits ?? "—")} tone={(r.retransmits ?? 0) > 0 ? "warn" : undefined} />
-                  <StatTile label="CPU local / remota" value={r.cpu_local != null ? `${r.cpu_local.toFixed(0)} / ${(r.cpu_remote ?? 0).toFixed(0)} %` : "—"} />
+                  <Metric label="Retransmisiones" value={String(r.retransmits ?? "—")} tone={(r.retransmits ?? 0) > 0 ? "warn" : undefined} />
+                  <Metric label="CPU local / remota" value={r.cpu_local != null ? `${r.cpu_local.toFixed(0)} / ${(r.cpu_remote ?? 0).toFixed(0)} %` : "—"} />
                 </>
               )}
             </div>
@@ -384,7 +386,7 @@ function Iperf() {
           </Btn>
         }
       >
-        <p className="text-[12px] text-muted mb-2">Desde el otro extremo ejecuta:</p>
+        <p className="text-body-sm text-muted mb-2">Desde el otro extremo ejecuta:</p>
         <div className="flex flex-wrap gap-1.5 mb-3">
           {ips.map((i) => (
             <CopyText key={i.ip} text={`iperf3 -c ${i.ip} -p ${port}`} />

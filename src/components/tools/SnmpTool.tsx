@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -32,7 +32,7 @@ import {
   targetParams,
   trapSummary,
 } from "../../lib/snmp";
-import { Btn, Label, Section, StatusPill, Toggle } from "./ui";
+import { Btn, Label, Section, StatusPill, ToolHeader, Toggle } from "./ui";
 import { useLocalIp } from "./useLocalIp";
 import SnmpConfigGen from "./SnmpConfigGen";
 
@@ -72,26 +72,38 @@ const TABS = [
 
 export default function SnmpTool(props: Props) {
   const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("client");
+  const id = useId();
   return (
     <div className="space-y-4">
-      <div className="inline-flex rounded-md border border-line p-0.5" role="tablist">
+      {/* Sin acción primaria global: cada bloque (consulta, conjuntos, traps) tiene la suya. */}
+      <ToolHeader
+        title="SNMP"
+        description="Cliente de prueba de solo lectura, conjuntos de OIDs por MIB estándar, receptor de traps y generador de configuración del agente."
+      />
+      <div className="inline-flex rounded-md border border-line p-0.5" role="tablist" aria-label="Vista de SNMP">
         {TABS.map((t) => (
           <button
             key={t.id}
+            id={`${id}-tab-${t.id}`}
             role="tab"
             aria-selected={tab === t.id}
+            aria-controls={`${id}-panel-${t.id}`}
             onClick={() => setTab(t.id)}
-            className={`px-2.5 h-7 rounded text-[12px] ${tab === t.id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg"}`}
+            className={`px-2.5 h-7 rounded text-body-sm ${tab === t.id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg"}`}
           >
             {t.label}
           </button>
         ))}
       </div>
       {/* El cliente queda montado al cambiar de pestaña para no cortar consultas ni el receptor de traps. */}
-      <div hidden={tab !== "client"}>
+      <div id={`${id}-panel-client`} role="tabpanel" aria-labelledby={`${id}-tab-client`} hidden={tab !== "client"}>
         <SnmpClient {...props} />
       </div>
-      {tab === "config" && <SnmpConfigGen />}
+      {tab === "config" && (
+        <div id={`${id}-panel-config`} role="tabpanel" aria-labelledby={`${id}-tab-config`}>
+          <SnmpConfigGen />
+        </div>
+      )}
     </div>
   );
 }
@@ -281,7 +293,7 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
           {cur.version === "3" && <Toggle checked={legacy} onChange={setLegacy} label="Mostrar algoritmos heredados (MD5, DES)" />}
           <Toggle checked={saveVault} onChange={setSaveVault} label="Guardar secretos en la bóveda cifrada" />
           {cur.saved && (
-            <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
+            <span className="inline-flex items-center gap-1.5 text-body-sm text-muted">
               <KeyRound size={13} /> Secretos en la bóveda ·
               <button className="underline hover:text-fg" onClick={forgetSecrets}>
                 olvidar
@@ -295,13 +307,13 @@ function SnmpClient({ settings: s, running, onChange, refreshRunning, onConfirm 
         {warnings.length > 0 && (
           <ul className="mt-3 space-y-1">
             {warnings.map((w) => (
-              <li key={w} className="flex items-start gap-1.5 text-[12px] text-warn">
+              <li key={w} className="flex items-start gap-1.5 text-body-sm text-warn">
                 <AlertTriangle size={13} className="mt-0.5 shrink-0" /> {w}
               </li>
             ))}
           </ul>
         )}
-        {msg && <p className="mt-2 text-[12px] text-muted">{msg}</p>}
+        {msg && <p className="mt-2 text-body-sm text-muted">{msg}</p>}
       </Section>
 
       <QuerySection target={target} profile={cur} />
@@ -390,7 +402,7 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
               key={o.id}
               disabled={o.id === "getbulk" && profile.version === "1"}
               onClick={() => setOp(o.id)}
-              className={`px-2.5 h-7 rounded text-[12px] disabled:opacity-40 ${op === o.id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg"}`}
+              className={`px-2.5 h-7 rounded text-body-sm disabled:opacity-40 ${op === o.id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg"}`}
             >
               {o.label}
             </button>
@@ -436,7 +448,7 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
         {QUICK.map((q) => (
           <button
             key={q.label}
-            className="px-2 h-6 rounded-md bg-hover text-[11.5px] text-muted hover:text-fg"
+            className="px-2 h-6 rounded-md bg-hover text-body-sm text-muted hover:text-fg"
             title={`${q.op.toUpperCase()} ${q.oid}`}
             onClick={() => {
               setOid(q.oid);
@@ -447,12 +459,12 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
           </button>
         ))}
       </div>
-      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {error && <p className="mt-2 text-body-sm text-danger">{error}</p>}
 
       {(rows.length > 0 || busy || status) && (
         <div className="mt-3">
           <div className="flex items-center gap-2 mb-2">
-            <span className="text-[12px] text-muted">{busy ? `${plural(rows.length, "fila", "filas")}…` : status}</span>
+            <span className="text-body-sm text-muted">{busy ? `${plural(rows.length, "fila", "filas")}…` : status}</span>
             <input className="field !h-7 !w-56 ml-auto" placeholder="Filtrar OID, nombre o valor" value={filter} onChange={(e) => setFilter(e.target.value)} />
             <Btn kind="ghost" title="Copiar como CSV" disabled={!rows.length} onClick={() => writeText(rowsToCsv(shown))}>
               <ClipboardCopy size={13} />
@@ -461,8 +473,8 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
               <Download size={13} /> CSV
             </Btn>
           </div>
-          <div className="max-h-[420px] overflow-auto rounded-lg border border-line">
-            <table className="w-full text-[12px]">
+          <div className="max-h-[420px] overflow-auto border-y border-line">
+            <table className="w-full text-body-sm tabular-nums">
               <thead className="sticky top-0 bg-panel text-left text-muted">
                 <tr>
                   <th className="px-2 py-1.5 font-medium">OID</th>
@@ -482,7 +494,7 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
                 ))}
               </tbody>
             </table>
-            {shown.length > 5000 && <p className="p-2 text-[11.5px] text-muted">Se muestran 5.000 de {shown.length}; exporta a CSV para verlas todas.</p>}
+            {shown.length > 5000 && <p className="p-2 text-body-sm text-muted">Se muestran 5.000 de {shown.length}; exporta a CSV para verlas todas.</p>}
           </div>
         </div>
       )}
@@ -600,15 +612,15 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
           <Toggle checked={params} onChange={toggleParams} label="Parámetros de procesos (sensible)" />
         </span>
       </div>
-      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {error && <p className="mt-2 text-body-sm text-danger">{error}</p>}
       {res && (
         <div className="mt-3">
           <div className="flex items-center gap-2 mb-2">
-            <span className="text-[12px] text-muted truncate" title={res.preset.hint}>
+            <span className="min-w-0 text-body-sm text-muted line-clamp-2" title={res.preset.hint}>
               {res.preset.hint}
             </span>
             {res.bits32 && (
-              <span className="inline-flex items-center gap-1 text-[12px] text-warn whitespace-nowrap">
+              <span className="inline-flex items-center gap-1 text-body-sm text-warn whitespace-nowrap">
                 <AlertTriangle size={13} /> 32 bits: puede reiniciarse en enlaces de 1 Gbps o más
               </span>
             )}
@@ -622,9 +634,9 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
               <Download size={13} /> CSV
             </Btn>
           </div>
-          {msg && <p className="mb-2 text-[12px] text-muted">{msg}</p>}
+          {msg && <p className="mb-2 text-body-sm text-muted">{msg}</p>}
           {res.scalars && (
-            <table className="w-full text-[12.5px]">
+            <table className="w-full text-body-sm tabular-nums">
               <tbody>
                 {res.scalars.map(({ col, row }) => (
                   <tr key={col.oid} className="border-t border-line first:border-0 align-top">
@@ -636,8 +648,8 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
             </table>
           )}
           {t && (
-            <div className="max-h-[460px] overflow-auto rounded-lg border border-line">
-              <table className="w-full text-[12px]">
+            <div className="max-h-[460px] overflow-auto border-y border-line">
+              <table className="w-full text-body-sm tabular-nums">
                 <thead className="sticky top-0 bg-panel text-left text-muted">
                   <tr>
                     <th className="px-2 py-1.5 font-medium">Índice</th>
@@ -677,11 +689,11 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
                   ))}
                 </tbody>
               </table>
-              {t.rows.length === 0 && <p className="p-3 text-[12px] text-muted">El agente no devolvió filas para esta MIB.</p>}
+              {t.rows.length === 0 && <p className="p-3 text-body-sm text-muted">El agente no devolvió filas para esta MIB.</p>}
             </div>
           )}
           {res.errors.length > 0 && (
-            <ul className="mt-2 text-[11.5px] text-muted">
+            <ul className="mt-2 text-body-sm text-muted">
               {res.errors.map((e) => (
                 <li key={e}>{e}</li>
               ))}
@@ -767,26 +779,26 @@ function TrapSection({
         </Btn>
       </div>
       {bind === "127.0.0.1" && !on && (
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-body-sm text-muted">
           <span>Con 127.0.0.1 solo llegan traps de este PC: los equipos de la red no pueden alcanzarlo.</span>
           {mgmtIp && (
-            <Btn kind="ghost" className="!h-6 !px-2 !text-[11.5px] !text-accent" onClick={() => onChange({ snmpTrapBind: mgmtIp })}>
+            <Btn kind="ghost" className="!h-6 !px-2 !text-accent" onClick={() => onChange({ snmpTrapBind: mgmtIp })}>
               Escuchar en {mgmtIp}
             </Btn>
           )}
         </div>
       )}
       {bind === "0.0.0.0" && !on && (
-        <p className="mt-2 flex items-center gap-1.5 text-[12px] text-warn">
+        <p className="mt-2 flex items-center gap-1.5 text-body-sm text-warn">
           <AlertTriangle size={13} /> Escuchará en todas las interfaces, incluidas Wi-Fi o VPN. Prefiere la IP de la red de gestión.
         </p>
       )}
       {s.snmpTrapPort < 1024 && (
-        <p className="mt-2 text-[11.5px] text-muted">En Linux y macOS el puerto 162 puede requerir privilegios; si no inicia, usa 1162 y configúralo en el equipo.</p>
+        <p className="mt-2 text-body-sm text-muted">En Linux y macOS el puerto 162 puede requerir privilegios; si no inicia, usa 1162 y configúralo en el equipo.</p>
       )}
-      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {error && <p className="mt-2 text-body-sm text-danger">{error}</p>}
       <div className="mt-3 flex items-center justify-between">
-        <span className="text-[12px] text-muted">{traps.length} recibidos</span>
+        <span className="text-body-sm text-muted">{traps.length} recibidos</span>
         <div className="flex gap-1">
           <Btn
             kind="ghost"
@@ -807,11 +819,11 @@ function TrapSection({
         </div>
       </div>
       <div className="mt-2 max-h-[420px] overflow-y-auto">
-        {traps.length === 0 && <p className="text-[12px] text-muted">{on ? "Esperando traps…" : "Inicia el receptor para ver los traps de los equipos."}</p>}
+        {traps.length === 0 && <p className="text-body-sm text-muted">{on ? "Esperando traps…" : "Inicia el receptor para ver los traps de los equipos."}</p>}
         {traps.map((t, i) => {
           const sum = trapSummary(t);
           return (
-            <div key={`${t.ts}-${i}`} className="border-t border-line first:border-0 py-1.5 text-[12px]">
+            <div key={`${t.ts}-${i}`} className="border-t border-line first:border-0 py-1.5 text-body-sm">
               <button className="w-full flex items-center gap-3 text-left" onClick={() => setOpen(open === i ? null : i)}>
                 <span className="text-muted whitespace-nowrap tabular-nums">{new Date(t.ts).toLocaleTimeString("es-CL")}</span>
                 <span className="font-mono whitespace-nowrap">{t.src}</span>
@@ -823,7 +835,7 @@ function TrapSection({
                 <span className="text-muted truncate">{sum.detail || t.note || ""}</span>
               </button>
               {open === i && (
-                <div className="mt-1 ml-4 space-y-0.5 font-mono text-[11.5px] select-text">
+                <div className="mt-1 ml-4 space-y-0.5 font-mono text-body-sm select-text">
                   {t.uptime && <div className="text-muted">sysUpTime {t.uptime}</div>}
                   {t.user && <div className="text-muted">usuario {t.user}</div>}
                   {t.note && <div className="text-muted">{t.note}</div>}

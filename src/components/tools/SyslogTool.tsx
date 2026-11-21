@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FolderOpen, Pause, Play } from "lucide-react";
 import { Settings } from "../../lib/settings";
-import { Btn, CopyText, IpSelect, Label, Section, StatusPill, Toggle } from "./ui";
+import { Btn, CopyText, IpSelect, Label, Section, StatusPill, ToolHeader, Toggle } from "./ui";
 import { useLocalIp } from "./useLocalIp";
 import { ServerGuardPanel, commandIp, useGuardPrefs, useGuardStats } from "./ServerGuard";
 import { loghostCommands } from "../../lib/devicefs";
@@ -75,11 +75,20 @@ export function SyslogTool({
 
   return (
     <div className="space-y-4">
-      <Section
-        title="Servidor Syslog"
-        hint="Recibe los logs que envían los equipos (UDP). Útil durante ventanas de cambio para ver eventos en vivo."
-        right={<StatusPill state={on ? "running" : "stopped"} label={on ? `Activo · UDP ${s.syslogPort}` : "Detenido"} />}
-      >
+      {/* Acción primaria (iniciar o detener el servidor) y su estado en el encabezado común. */}
+      <ToolHeader
+        title="Syslog"
+        description="Recibe los logs que envían los equipos (UDP). Útil durante ventanas de cambio para ver eventos en vivo."
+        actions={
+          <>
+            <StatusPill state={on ? "running" : "stopped"} label={on ? `Activo · UDP ${s.syslogPort}` : "Detenido"} />
+            <Btn kind={on ? "default" : "primary"} onClick={toggle}>
+              {on ? "Detener servidor" : "Iniciar servidor"}
+            </Btn>
+          </>
+        }
+      />
+      <Section title="Servidor" hint="Puerto, archivo diario y control de acceso. El puerto se cambia con el servidor detenido.">
         <div className="flex flex-wrap items-end gap-3">
           <Label text="Puerto" className="w-24">
             <input className="field" type="number" disabled={on} value={s.syslogPort} onChange={(e) => onChange({ syslogPort: Number(e.target.value) || 514 })} />
@@ -87,31 +96,32 @@ export function SyslogTool({
           <div className="pb-1.5">
             <Toggle checked={s.syslogSave} onChange={(v) => onChange({ syslogSave: v })} label="Guardar en archivo diario" />
           </div>
-          <Btn kind="ghost" title="Abrir carpeta de syslog" onClick={() => invoke("open_dir", { which: "syslog" })}>
+          <Btn kind="ghost" title="Abrir carpeta de syslog" aria-label="Abrir carpeta de syslog" onClick={() => invoke("open_dir", { which: "syslog" })}>
             <FolderOpen size={14} />
           </Btn>
-          <Btn kind={on ? "default" : "primary"} className="ml-auto" onClick={toggle}>
-            {on ? "Detener" : "Iniciar"}
-          </Btn>
         </div>
-        {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+        {error && (
+          <p role="alert" className="mt-2 text-body-sm text-danger">
+            {error}
+          </p>
+        )}
         <div className="mt-3">
           <ServerGuardPanel kind="syslog" settings={s} onChange={onChange} ips={ips} running={on} stat={stats.syslog} />
         </div>
         <div className="flex flex-wrap items-end gap-3">
           <IpSelect ips={ips} ip={localIp} onChange={setIp} className="w-72" />
-          <div className="flex flex-wrap items-center gap-1.5 pb-1 text-[11.5px] text-muted">
+          <div className="flex flex-wrap items-center gap-1.5 pb-1 text-body-sm text-muted">
             Configura el equipo: Cisco <CopyText text={cmds.cisco} /> Huawei <CopyText text={cmds.huawei} />
           </div>
         </div>
         {cmds.huaweiPortNote && (
-          <p className="mt-1.5 text-[11.5px] text-muted">
+          <p className="mt-1.5 text-body-sm text-muted">
             Huawei: "port" está documentado en CloudEngine V300, NE y S5700/S6700 V200R024; en AR y versiones antiguas, verificar en tu
             versión (sin "port" solo sirve el 514).
           </p>
         )}
         {s.syslogPort < 1024 && (
-          <p className="mt-1.5 text-[11.5px] text-muted">En Linux y macOS el puerto 514 puede requerir privilegios; si no inicia, usa 1514.</p>
+          <p className="mt-1.5 text-body-sm text-muted">En Linux y macOS el puerto 514 puede requerir privilegios; si no inicia, usa 1514.</p>
         )}
       </Section>
 
@@ -119,8 +129,8 @@ export function SyslogTool({
         title={`Mensajes (${shown.length}${shown.length !== msgs.length ? ` de ${msgs.length}` : ""})`}
         right={
           <div className="flex items-center gap-2">
-            <input className="field !h-7 !w-48" placeholder="Filtrar texto o IP" value={filter} onChange={(e) => setFilter(e.target.value)} />
-            <select className="field !h-7 !w-36" value={minSev} onChange={(e) => setMinSev(Number(e.target.value))}>
+            <input className="field !h-7 !w-48" placeholder="Filtrar texto o IP" aria-label="Filtrar mensajes por texto o IP" value={filter} onChange={(e) => setFilter(e.target.value)} />
+            <select className="field !h-7 !w-36" aria-label="Severidad máxima" value={minSev} onChange={(e) => setMinSev(Number(e.target.value))}>
               {SEV.map((l, i) => (
                 <option key={l} value={i}>
                   Hasta {l}
@@ -137,11 +147,11 @@ export function SyslogTool({
         }
       >
         <div className="max-h-[480px] overflow-y-auto">
-          <table className="w-full text-[12px]">
+          <table className="w-full text-body-sm">
             <tbody className="font-mono">
               {shown.slice(0, 1000).map((m, i) => (
                 <tr key={`${m.ts}-${i}`} className="border-t border-line align-top">
-                  <td className="py-1 pr-3 text-muted whitespace-nowrap">{new Date(m.ts).toLocaleTimeString("es-CL")}</td>
+                  <td className="py-1 pr-3 text-muted whitespace-nowrap tabular-nums">{new Date(m.ts).toLocaleTimeString("es-CL")}</td>
                   <td className="pr-3 whitespace-nowrap">{m.src}</td>
                   <td className={`pr-3 whitespace-nowrap font-sans ${sevColor(m.severity)}`}>
                     {m.severity <= 3 ? "✕ " : m.severity === 4 ? "▲ " : ""}
@@ -152,7 +162,7 @@ export function SyslogTool({
               ))}
             </tbody>
           </table>
-          {msgs.length === 0 && <p className="text-[12px] text-muted">{on ? "Esperando mensajes…" : "Inicia el servidor para recibir logs."}</p>}
+          {msgs.length === 0 && <p className="text-body-sm text-muted">{on ? "Esperando mensajes…" : "Inicia el servidor para recibir logs."}</p>}
         </div>
       </Section>
     </div>
