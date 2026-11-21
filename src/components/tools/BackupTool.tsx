@@ -192,7 +192,7 @@ export default function BackupTool({
           </p>
         ) : (
           <>
-            <div className="flex flex-wrap items-center gap-2 mb-3">
+            <div className="flex flex-wrap items-start gap-2 mb-3">
               <Btn onClick={() => setSelected(new Set(devices.map((d) => d.connId)))} disabled={running}>
                 Todas
               </Btn>
@@ -216,7 +216,15 @@ export default function BackupTool({
                 </select>
               )}
               <span className="flex-1" />
-              <Toggle checked={mask} onChange={setMask} label="Enmascarar secretos" />
+              {/* La nota de enmascarado va como hint bajo el toggle (alineada con su rótulo), no en la fila de acción. */}
+              <div className="max-w-[26rem]">
+                <Toggle checked={mask} onChange={setMask} label="Enmascarar secretos" />
+                <p className="pl-11 text-[11.5px] text-muted">
+                  {mask
+                    ? "Contraseñas, llaves y comunidades SNMP se guardan como ****; la comparación entre fechas del mismo equipo marca \"secreto cambiado\" por una huella, sin guardar el secreto. Revisa antes de compartir."
+                    : "Se guardará la configuración con sus secretos."}
+                </p>
+              </div>
             </div>
             {/* Solo se respaldan sesiones conectadas: se dice cuántas son del total del árbol. */}
             <div className="flex flex-wrap items-baseline gap-x-2 mb-1.5 text-[12px]">
@@ -275,29 +283,26 @@ export default function BackupTool({
                 );
               })}
             </div>
-            <div className="flex items-center gap-2 mt-3">
+            {/* Resultado a la izquierda; el botón y su motivo, alineados a la derecha. */}
+            <div className="flex flex-wrap items-center justify-end gap-2 mt-3">
+              <span className="mr-auto text-[12px] text-muted">{msg || (doneCount && !running ? `${okCount} de ${Object.keys(jobs).length} guardados.` : "")}</span>
               {running ? (
                 <Btn kind="danger" onClick={() => (stopRef.current = true)}>
                   <Square size={12} fill="currentColor" /> Detener ({doneCount}/{Object.keys(jobs).length})
                 </Btn>
               ) : (
                 <>
-                  <Btn kind="primary" onClick={run} disabled={!selected.size} aria-describedby={selected.size ? undefined : whyId}>
-                    <Play size={13} /> Respaldar {selected.size || ""}
-                  </Btn>
                   {/* Motivo del botón deshabilitado, junto a él. */}
                   {!selected.size && (
                     <span id={whyId} className="shrink-0 text-[12px] font-medium">
                       Marca al menos un equipo
                     </span>
                   )}
+                  <Btn kind="primary" onClick={run} disabled={!selected.size} aria-describedby={selected.size ? undefined : whyId}>
+                    <Play size={13} /> Respaldar {selected.size || ""}
+                  </Btn>
                 </>
               )}
-              <span className="text-[12px] text-muted">
-                {msg ||
-                  (doneCount && !running ? `${okCount} de ${Object.keys(jobs).length} guardados.` : "") ||
-                  (mask ? "Contraseñas, llaves y comunidades SNMP se guardan como ****; la comparación entre fechas del mismo equipo marca \"secreto cambiado\" por una huella, sin guardar el secreto. Revisa antes de compartir." : "Se guardará la configuración con sus secretos.")}
-              </span>
             </div>
           </>
         )}
