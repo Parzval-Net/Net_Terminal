@@ -55,3 +55,23 @@ jobs:
         working-directory: src-tauri
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: src-tauri
+
+  # Presupuestos de rendimiento (scripts/perf/perf.mjs): fluidez, tiempo hasta ver el contenido,
+  # reposo y tamaño del arranque sobre un build de producción de la demo. Falla si la app deja de
+  # sentirse instantánea. SLACK da holgura al ruido de las máquinas compartidas de CI.
+  perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      # Playwright solo para esta prueba (no es dependencia de la app), en versión fija.
+      - run: npm i --no-save --ignore-scripts playwright@1.63.0 && npx playwright install --with-deps chromium
+      - run: npm run perf
+        env:
+          SLACK: "1.5"

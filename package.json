@@ -9,7 +9,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node scripts/tests/run-all.mjs"
+    "test": "node scripts/tests/run-all.mjs",
+    "perf": "node scripts/perf/perf.mjs"
   },
   "engines": {
     "node": ">=22.15"

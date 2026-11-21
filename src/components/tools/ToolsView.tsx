@@ -269,7 +269,12 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
   };
 
   return (
-    <div className="@container absolute inset-0 flex flex-col bg-bg" style={{ visibility: active ? "visible" : "hidden" }}>
+    // Oculta: sus animaciones (pulsos de transferencias, giros) se pausan y su contenido no se calcula
+    // ni se pinta (content-visibility), así redimensionar la app o animar otra vista no la recorre.
+    <div
+      className={`@container absolute inset-0 flex flex-col bg-bg${active ? "" : " anims-paused [content-visibility:hidden]"}`}
+      style={{ visibility: active ? "visible" : "hidden" }}
+    >
       {/* Encabezado: dónde estás y cómo salir. "Volver" deja Herramientas viva; la X la cierra. */}
       <div className="h-9 shrink-0 flex items-center gap-1 pl-3 pr-1.5 border-b border-line bg-chrome">
         <Wrench size={14} className="text-muted shrink-0" aria-hidden />

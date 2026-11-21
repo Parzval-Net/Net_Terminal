@@ -129,7 +129,9 @@ const HitRow = memo(function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit
     </div>
   );
   return (
-    <div className="group py-1 border-t border-line first:border-0 font-mono text-[11.5px] leading-[1.45]">
+    // Hasta miles de coincidencias: las que quedan fuera de la vista no se calculan ni se pintan
+    // (content-visibility). El tamaño estimado se reemplaza por el real una vez dibujada.
+    <div className="group py-1 border-t border-line first:border-0 font-mono text-[11.5px] leading-[1.45] [content-visibility:auto] [contain-intrinsic-size:auto_44px]">
       {hit.before.map((t, i) => ctx(t, hit.line - hit.before.length + i, `b${i}`))}
       <div className="flex gap-2">
         <span className="w-12 shrink-0 text-right tabular-nums text-muted select-none">{hit.line}</span>
@@ -150,7 +152,8 @@ const HitRow = memo(function HitRow({ hit, onCopy }: { hit: Hit; onCopy: (h: Hit
           onClick={() => onCopy(hit)}
           title="Copiar línea"
           aria-label={`Copiar la línea ${hit.line}`}
-          className="shrink-0 w-6 h-6 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover"
+          // Anillo de foco por dentro: la fila recorta lo que sale de su borde (content-visibility).
+          className="shrink-0 w-6 h-6 grid place-items-center rounded-md text-muted hover:text-fg hover:bg-hover focus-visible:outline-offset-[-2px]"
         >
           <Copy size={12} />
         </button>

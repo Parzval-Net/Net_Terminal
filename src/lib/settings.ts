@@ -495,6 +495,17 @@ function rememberSeen(keys: string[]) {
   }
 }
 
+/**
+ * Lectura de ajustes pedida al arrancar (main.tsx), en paralelo con la consulta de la carpeta cifrada:
+ * App ya no espera dos viajes al backend en serie. Se usa una sola vez; si falló (carpeta cifrada aún
+ * bloqueada) useSettings la vuelve a pedir.
+ */
+let early: Promise<unknown> | null = null;
+export function prefetchSettings() {
+  early ??= invoke<unknown>("get_settings");
+  early.catch(() => {});
+}
+
 /** Carga los ajustes desde el backend y los guarda (con debounce) en cada cambio. */
 /** Claves que viven en topology.json: se guardan solo cuando cambian (pueden pesar varios MB). */
 type Heavy = Pick<Settings, "topology" | "topoSnapshots">;
@@ -508,7 +519,9 @@ export function useSettings() {
   const savedHeavy = useRef<Heavy | null>(null);
 
   useEffect(() => {
-    invoke<unknown>("get_settings")
+    const pending = early;
+    early = null;
+    (pending ? pending.catch(() => invoke<unknown>("get_settings")) : invoke<unknown>("get_settings"))
       .then((res) => {
         const { settings: loaded, heavy, info } = loadSettings(res);
         savedHeavy.current = heavy;

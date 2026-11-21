@@ -1,0 +1,71 @@
+name: release-tag
+
+# Publicación sin pasos manuales: al llegar a main un cambio de versión (package.json,
+# src-tauri/tauri.conf.json y Cargo.toml coinciden y ese tag aún no existe), crea el tag vX.Y.Z
+# sobre ese commit y lanza el workflow build en el tag, que audita, compila, firma y publica.
+# Un tag creado con GITHUB_TOKEN no dispara workflows por push, por eso build se lanza con
+# workflow_dispatch (la excepción que GitHub permite); para build es lo mismo que un push del tag.
+#
+# Requisito único en GitHub: si una regla del repositorio restringe la creación de tags, agregar
+# "GitHub Actions" a su lista de excepciones (Settings > Rules > la regla de tags > Bypass list).
+# La firma sigue pasando por el environment "release" (con aprobación manual si se configura).
+
+on:
+  push:
+    branches: [main]
+    paths: [package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # crear el tag
+      actions: write # lanzar build en el tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Versión consistente y tag pendiente
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          app=$(python3 -c "import json;print(json.load(open('package.json'))['version'])")
+          tauri=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          if [ "$app" != "$tauri" ] || [ "$app" != "$cargo" ]; then
+            echo "::error::Versiones distintas: package.json $app, tauri.conf.json $tauri, Cargo.toml $cargo"
+            exit 1
+          fi
+          tag="v$app"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "El tag $tag ya existe: nada que publicar."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Crear el tag sobre este commit
+        if: steps.v.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null; then
+            echo "::error::No se pudo crear $TAG. Si una regla del repositorio restringe la creación de tags, agrega 'GitHub Actions' a su lista de excepciones (Settings > Rules)."
+            exit 1
+          fi
+          echo "Tag $TAG creado sobre $GITHUB_SHA"
+      - name: Lanzar build en el tag
+        if: steps.v.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

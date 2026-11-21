@@ -61,7 +61,8 @@ export function DataGate({ children }: { children: ReactNode }) {
   return (
     <>
       {/* Oculta e inerte mientras está bloqueada: sin foco, sin lectores de pantalla y sin verse. */}
-      <div style={{ display: "contents", visibility: hidden ? "hidden" : undefined }} inert={hidden} aria-hidden={hidden || undefined}>
+      {/* anims-paused: las animaciones de la app (pulsos de conexión, CLI Lab) no corren mientras no se ve. */}
+      <div className={hidden ? "anims-paused" : undefined} style={{ display: "contents", visibility: hidden ? "hidden" : undefined }} inert={hidden} aria-hidden={hidden || undefined}>
         {children}
       </div>
       {screen}

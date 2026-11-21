@@ -1,9 +1,9 @@
 import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { SearchAddon } from "@xterm/addon-search";
+import type { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
+import type { WebglAddon } from "@xterm/addon-webgl";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -12,6 +12,7 @@ import type { ITheme } from "@xterm/xterm";
 import { ConnStatus, Session } from "../types";
 import { fontStack } from "../lib/theme";
 import { Settings, logOptions } from "../lib/settings";
+import { setLogging } from "../lib/api";
 import { alertHighlights } from "../lib/alerts";
 import { StreamHighlighter, compile, effectiveRules } from "../lib/highlight";
 import { backspaceMode, backspaceSeq, translateBackspace } from "../lib/backspace";
@@ -21,6 +22,25 @@ import { credStatus, needsUnlock } from "../lib/credentials";
 import { VaultUnlock } from "./VaultUnlock";
 import { SCP_EXIT_EVENT, type ScpExit } from "../lib/scpVerify";
 import { recentRows } from "../lib/termBuffer";
+
+// WebGL (~110 KB) y búsqueda (~30 KB) van en un chunk aparte, fuera del arranque: App los precarga
+// cuando la app queda libre. Si una pestaña se abre antes, parte con el renderizador DOM y se pasa a
+// WebGL apenas llega el chunk (unos ms, es un archivo local).
+let WebglCtor: typeof WebglAddon | null = null;
+let SearchCtor: typeof SearchAddon | null = null;
+let addonsLoading: Promise<void> | null = null;
+export function preloadTermAddons(): Promise<void> {
+  return (addonsLoading ??= Promise.all([import("@xterm/addon-webgl"), import("@xterm/addon-search")]).then(
+    ([w, s]) => {
+      WebglCtor = w.WebglAddon;
+      SearchCtor = s.SearchAddon;
+    },
+    (e) => {
+      addonsLoading = null; // permite reintentar si falló la carga
+      throw e;
+    },
+  ));
+}
 
 /** Avisa al gestor de archivos que terminó (o se cerró) una pestaña de transferencia. */
 const notifyScpExit = (transfer: string, reason: string | null, closed = false) =>
@@ -298,17 +318,24 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       theme,
     });
     const fit = new FitAddon();
-    const search = new SearchAddon({ highlightLimit: FIND_LIMIT });
     term.loadAddon(fit);
-    term.loadAddon(search);
     term.loadAddon(new WebLinksAddon((_e, uri) => openUrl(uri)));
     term.open(hostRef.current!);
     fit.fit();
     publishTermSize(id, term.cols, term.rows);
     termRef.current = term;
     fitRef.current = fit;
-    searchRef.current = search;
-    search.onDidChangeResults((r) => setFound({ index: r.resultIndex, count: r.resultCount }));
+    // Antes de cualquier callback que lo consulte (attachSearch corre en el acto si el chunk ya está).
+    let disposed = false;
+    const attachSearch = () => {
+      if (disposed || !SearchCtor) return;
+      const search = new SearchCtor({ highlightLimit: FIND_LIMIT });
+      term.loadAddon(search);
+      searchRef.current = search;
+      search.onDidChangeResults((r) => setFound({ index: r.resultIndex, count: r.resultCount }));
+    };
+    if (SearchCtor) attachSearch();
+    else preloadTermAddons().then(attachSearch, () => {});
 
     // Resaltado: se decodifica UTF-8 en streaming y se colorea por líneas. En pantallas
     // completas (vim, top, less) no se toca nada.
@@ -329,7 +356,6 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       window.clearTimeout(screenTimer);
       screenTimer = window.setTimeout(() => !disposed && screenHintRef.current?.(id), ms);
     };
-    let disposed = false;
     // Resaltado al vuelo y marcadores (ver lib/termDecor): sin suscripciones hasta que se usan.
     const hlEngine = new HighlightEngine(term, () => {
       if (disposed || dialogRef.current !== "hl") return;
@@ -579,12 +605,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
           // Un log activado a mano (o el automático) continúa en su archivo tras reconectar.
           const resume = logPathRef.current;
           if (resume || settingsRef.current.autoLog) {
-            invoke<string | null>("set_logging", {
-              id: connId,
-              enabled: true,
-              ...logOptions(settingsRef.current),
-              resume,
-            })
+            setLogging(connId, true, logOptions(settingsRef.current), resume)
               .then((path) => onLog(id, path))
               .catch(() => {});
           }
@@ -1345,9 +1366,11 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     const term = termRef.current;
     if (!term) return;
     if (visible) {
-      if (!webglRef.current) {
+      let gone = false;
+      const attach = () => {
+        if (gone || webglRef.current || !WebglCtor) return;
         try {
-          const webgl = new WebglAddon();
+          const webgl = new WebglCtor();
           webgl.onContextLoss(() => {
             webgl.dispose();
             if (webglRef.current === webgl) webglRef.current = null;
@@ -1357,9 +1380,13 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         } catch {
           // Sin WebGL se usa el renderizador DOM.
         }
-      }
+      };
+      if (WebglCtor) attach();
+      else preloadTermAddons().then(attach, () => {});
       fitRef.current?.fit();
-      return;
+      return () => {
+        gone = true;
+      };
     }
     const release = window.setTimeout(() => {
       webglRef.current?.dispose();
