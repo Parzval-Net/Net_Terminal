@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FolderOpen, Pause, Play } from "lucide-react";
@@ -15,6 +15,8 @@ interface Msg {
   severity: number;
   facility: number;
   msg: string;
+  /** Número de llegada (solo en el frontend): key estable de la fila aunque lleguen mensajes nuevos arriba. */
+  seq?: number;
 }
 
 const SEV = ["Emergencia", "Alerta", "Crítico", "Error", "Warning", "Notice", "Info", "Debug"];
@@ -22,6 +24,22 @@ const sevColor = (s: number) => (s <= 3 ? "text-danger" : s === 4 ? "text-warn" 
 const MAX = 5000;
 /** Filas que se dibujan; el resto queda en memoria para filtrar y se avisa al pie. */
 const SHOWN = 1000;
+let seqNext = 0;
+
+/** Fila memorizada: al llegar un mensaje nuevo solo se dibuja esa fila, no las mil anteriores. */
+const SyslogRow = memo(function SyslogRow({ m }: { m: Msg }) {
+  return (
+    <tr className="border-t border-line align-top">
+      <td className="py-1 pr-3 text-muted whitespace-nowrap tabular-nums">{new Date(m.ts).toLocaleTimeString("es-CL")}</td>
+      <td className="pr-3 whitespace-nowrap">{m.src}</td>
+      <td className={`pr-3 whitespace-nowrap font-sans ${sevColor(m.severity)}`}>
+        {m.severity <= 3 ? "✕ " : m.severity === 4 ? "▲ " : ""}
+        {SEV[m.severity]}
+      </td>
+      <td className="break-all select-text">{m.msg}</td>
+    </tr>
+  );
+});
 
 export function SyslogTool({
   settings: s,
@@ -48,6 +66,7 @@ export function SyslogTool({
 
   useEffect(() => {
     const un = listen<Msg[]>("syslog", ({ payload }) => {
+      for (const m of payload) m.seq = seqNext++;
       setMsgs((m) => [...payload.reverse(), ...m].slice(0, MAX));
     });
     return () => {
@@ -186,16 +205,8 @@ export function SyslogTool({
               </tr>
             </thead>
             <tbody className="font-mono">
-              {shown.slice(0, SHOWN).map((m, i) => (
-                <tr key={`${m.ts}-${i}`} className="border-t border-line align-top">
-                  <td className="py-1 pr-3 text-muted whitespace-nowrap tabular-nums">{new Date(m.ts).toLocaleTimeString("es-CL")}</td>
-                  <td className="pr-3 whitespace-nowrap">{m.src}</td>
-                  <td className={`pr-3 whitespace-nowrap font-sans ${sevColor(m.severity)}`}>
-                    {m.severity <= 3 ? "✕ " : m.severity === 4 ? "▲ " : ""}
-                    {SEV[m.severity]}
-                  </td>
-                  <td className="break-all select-text">{m.msg}</td>
-                </tr>
+              {shown.slice(0, SHOWN).map((m) => (
+                <SyslogRow key={m.seq} m={m} />
               ))}
             </tbody>
           </table>

@@ -1631,6 +1631,8 @@ window.__TAURI_INTERNALS__ = {
   },
 };
 window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+// Medición: emite un evento del backend simulado (p. ej. ráfagas de syslog o traps) desde Playwright.
+window.__ntMockEmit = emit;
 
 // ---- Escenas para las capturas: demo.html?scene=<nombre> ----
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
