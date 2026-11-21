@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { X, Zap } from "lucide-react";
 import { SerialPortInfo, Session, SessionType } from "../types";
 import { SerialPortField } from "./SerialPortField";
+import { Segmented } from "./controls";
 import { SessionIcon, typeLabel } from "./SessionIcon";
 import { quickTarget } from "./CommandPalette";
 import { useDragResize } from "../lib/useDragResize";
@@ -110,22 +111,14 @@ export function QuickConnectDialog({ onClose, onOpen }: Props) {
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
-          <div role="group" aria-label="Tipo de conexión" className="grid grid-cols-4 gap-1 p-1 rounded-lg bg-hover">
-            {TYPES.map((t) => (
-              <button
-                key={t}
-                type="button"
-                aria-pressed={s.type === t}
-                onClick={() => changeType(t)}
-                className={`flex items-center justify-center gap-1.5 h-8 rounded-md text-[12.5px] font-medium ${
-                  s.type === t ? "bg-panel shadow-sm text-fg" : "text-muted hover:text-fg"
-                }`}
-              >
-                <SessionIcon type={t} size={14} />
-                {typeLabel[t]}
-              </button>
-            ))}
-          </div>
+          <Segmented
+            fill
+            size="lg"
+            label="Tipo de conexión"
+            value={s.type as QuickType}
+            onChange={changeType}
+            options={TYPES.map((t) => [t, <><SessionIcon type={t} size={14} />{typeLabel[t]}</>] as const)}
+          />
 
           {s.type !== "serial" && (
             <Row cols="3fr 1fr">

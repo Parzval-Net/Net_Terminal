@@ -3,6 +3,7 @@ import { BellOff, Pause, Pencil, Play, Plus, RotateCcw, Trash2, Volume2, VolumeX
 import { MonitorStatus, MonitorTarget, Sample, fmtDuration, stats } from "../../lib/monitors";
 import { LineChart, StatTile } from "./LineChart";
 import { Btn, Label, Section, StatusPill, Toggle, fmtMs } from "./ui";
+import { Segmented } from "../controls";
 
 interface Props {
   targets: MonitorTarget[];
@@ -69,17 +70,7 @@ export function MonitorTool({ targets, samples, status, onChange, onClear, onSil
           caer y otra al recuperarse, aunque estés en otra pestaña.
         </p>
         <div className="flex items-center gap-2 shrink-0">
-          <div className="flex p-0.5 rounded-lg bg-hover">
-            {WINDOWS.map(([label, ms]) => (
-              <button
-                key={label}
-                onClick={() => setWin(ms)}
-                className={`px-2.5 h-6 rounded-md text-[11.5px] ${win === ms ? "bg-panel shadow-sm" : "text-muted"}`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <Segmented size="sm" label="Ventana de los gráficos" value={win} onChange={setWin} options={WINDOWS.map(([label, ms]) => [ms, label] as const)} />
           <Btn kind="primary" onClick={() => setEditing(blank())}>
             <Plus size={14} /> Nueva sonda
           </Btn>

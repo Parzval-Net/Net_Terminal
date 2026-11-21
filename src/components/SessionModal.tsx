@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, KeyRound, Plus, Trash2, X } from "lucide-react";
 import { SerialPortInfo, Session, SessionType, Tunnel, TunnelKind } from "../types";
 import { SerialPortField } from "./SerialPortField";
+import { Segmented } from "./controls";
 import { SessionIcon, typeLabel } from "./SessionIcon";
 import { vendorSchemes } from "../lib/highlight";
 import { backspaceOptions } from "../lib/backspace";
@@ -169,22 +170,14 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
-          <div role="group" aria-label="Tipo de sesión" className="grid grid-cols-5 gap-1 p-1 rounded-lg bg-hover">
-            {(["ssh", "telnet", "serial", "raw", "local"] as SessionType[]).map((t) => (
-              <button
-                key={t}
-                type="button"
-                aria-pressed={s.type === t}
-                onClick={() => changeType(t)}
-                className={`flex items-center justify-center gap-1.5 h-8 rounded-md text-[12.5px] font-medium ${
-                  s.type === t ? "bg-panel shadow-sm text-fg" : "text-muted hover:text-fg"
-                }`}
-              >
-                <SessionIcon type={t} size={14} />
-                {typeLabel[t]}
-              </button>
-            ))}
-          </div>
+          <Segmented
+            fill
+            size="lg"
+            label="Tipo de sesión"
+            value={s.type}
+            onChange={changeType}
+            options={(["ssh", "telnet", "serial", "raw", "local"] as SessionType[]).map((t) => [t, <><SessionIcon type={t} size={14} />{typeLabel[t]}</>] as const)}
+          />
 
           <Row>
             <Field label="Nombre">

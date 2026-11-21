@@ -287,6 +287,8 @@ export function TopoToolbar({
       )}
     </div>
   );
+  // Encendido: fondo de selección, borde de acento (≥5:1 sobre el panel) y texto semibold; el texto queda
+  // en --text porque el acento sobre --selected baja de 4,5:1 en oscuro. Apagado: botón fantasma.
   const trafficBtn = (label: boolean) => (
     <Btn
       kind={trafficOn ? "default" : "ghost"}
@@ -294,27 +296,28 @@ export function TopoToolbar({
       aria-label="Tráfico en enlaces"
       title={trafficOn ? "Dejar de leer el tráfico de los enlaces" : "Mostrar el tráfico de los enlaces (opciones en el panel)"}
       onClick={() => setTrafficOn(!trafficOn)}
-      className={`${trafficOn ? "!text-accent" : ""} ${label ? "" : "!px-2.5"}`}
+      className={`${trafficOn ? "!bg-selected !border-accent font-semibold" : ""} ${label ? "" : "!px-2.5"}`}
     >
-      <Activity size={14} aria-hidden /> {label && "Tráfico"}
+      <Activity size={14} className={trafficOn ? "text-accent" : ""} aria-hidden /> {label && "Tráfico"}
     </Btn>
   );
   const filterBtn = (label: boolean) =>
     filtering && (
       <Btn title="Hay filtros activos: el diagrama muestra una parte" aria-label={`Filtros activos: ${shownCount} de ${viewCount} equipos`} className={label ? "" : "!px-2.5"} onClick={() => openSection("filtros")}>
-        <ListFilter size={14} className="text-accent" aria-hidden /> {label ? `${shownCount} de ${viewCount}` : <CountBadge n={shownCount} />}
+        <ListFilter size={14} className="text-accent" aria-hidden /> {label ? `${shownCount} de ${viewCount}` : <CountBadge n={shownCount} tone="neutral" />}
       </Btn>
     );
   const attentionBtn = (label: boolean) =>
     attentionTotal > 0 && (
       <Btn title="Ver los enlaces que requieren atención en el panel" aria-label={`Ver ${attentionTotal} enlaces que requieren atención`} className={label ? "" : "!px-2.5"} onClick={showAttention}>
-        <TriangleAlert size={14} className={attentionCount.down + attentionCount.load ? "text-danger" : "text-warn"} aria-hidden /> {label && "Atención"} <CountBadge n={attentionTotal} />
+        <TriangleAlert size={14} className={attentionCount.down + attentionCount.load ? "text-danger" : "text-warn"} aria-hidden /> {label && "Atención"}{" "}
+        <CountBadge n={attentionTotal} tone={attentionCount.down + attentionCount.load ? "danger" : "warn"} />
       </Btn>
     );
   const suggestBtn = (label: boolean) =>
     suggestionsCount > 0 && (
       <Btn title="Ver sugerencias en el panel" aria-label={`Ver ${suggestionsCount} sugerencias`} className={label ? "" : "!px-2.5"} onClick={showSuggestions}>
-        <Lightbulb size={14} className="text-warn" aria-hidden /> {label && "Sugerencias"} <CountBadge n={suggestionsCount} />
+        <Lightbulb size={14} className="text-warn" aria-hidden /> {label && "Sugerencias"} <CountBadge n={suggestionsCount} tone="warn" />
       </Btn>
     );
   const panelBtn = (label: boolean) => (
