@@ -20,6 +20,7 @@ import { persist, stored } from "../../lib/prefs";
 import { modLabel } from "../../lib/platform";
 import { idleStopMessage } from "../../lib/serverGuard";
 import { lazyView, whenIdle } from "../../lib/lazyView";
+import { useScrollQuiet } from "../../lib/useScrollQuiet";
 
 // Respaldos, SNMP, búsqueda en logs y auditoría van en chunks propios que se precargan junto con
 // Herramientas (preloadTools): al abrir el módulo ya están y se dibujan al instante.
@@ -105,6 +106,7 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     const last = stored<ModuleId | null>(LAST_KEY, null);
     return enabled.find((n) => n.id === last)?.id ?? enabled[0]?.id ?? "monitor";
   });
+  const scrollRef = useScrollQuiet<HTMLDivElement>();
   const [visited, setVisited] = useState<Set<ModuleId>>(new Set([current]));
   const navRef = useRef<HTMLElement>(null);
   const currentLabel = enabled.find((n) => n.id === current)?.label;
@@ -350,7 +352,7 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         })}
         {enabled.length === 0 && <p className="p-2 text-body-sm text-muted">Activa módulos en Ajustes › Módulos.</p>}
       </nav>
-      <div className="@container flex-1 min-w-0 overflow-y-auto">
+      <div ref={scrollRef} className="@container flex-1 min-w-0 overflow-y-auto">
         {/* Topología ocupa todo el ancho y alto disponibles; el resto mantiene el ancho de lectura. */}
         <div className={current === "topology" ? "h-full p-2 @[40rem]:p-4" : "max-w-[1200px] mx-auto p-5"}>
           {enabled
