@@ -496,7 +496,7 @@ function emitTraps() {
   emit("snmp-trap", list.map((t, i) => ({ ts: Date.now() - (list.length - i) * 4000, uptime: "412345600 (47d 17h 30m 56.00s)", user: null, note: null, ...t })));
 }
 
-let recentTargets = ["ssh admin@192.0.2.50 22", "telnet 203.0.113.9 23"];
+let recentTargets = ["ssh admin@192.0.2.50 22", "telnet 203.0.113.9 23", "ssh noc@198.51.100.7 22", "ssh admin@192.0.2.11 22"];
 const cmdHistory = { s0: [{ cmd: "show ip interface brief", ts: now - 60000 }, { cmd: "show version", ts: now - 3600000 }] };
 
 
@@ -1638,6 +1638,8 @@ function find(label) {
   const all = [...document.querySelectorAll("button, [role=button], [title], div, span, a, li")];
   return (
     all.find((e) => e.title === label || e.title?.startsWith(label + " (")) ||
+    // Botones con tooltip propio (barra de actividad): el nombre va en aria-label, sin title nativo.
+    [...document.querySelectorAll("button[aria-label]")].find((e) => { const a = e.getAttribute("aria-label"); const base = label.split(":")[0]; return a === label || a === base || a.startsWith(base + ",") || a.startsWith(base + " ("); }) ||
     all.find((e) => e.textContent?.trim() === label && e.children.length <= 2)
   );
 }

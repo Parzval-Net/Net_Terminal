@@ -155,7 +155,7 @@ export function HistoryMenu({ historyKey, tabName, isActiveTab, connected, onRes
           }, 0);
         }
       }}
-      className="outline-none fixed bottom-9 right-3 z-40 w-[420px] max-w-[calc(100vw-1.5rem)] bg-panel border border-line rounded-lg shadow-pop text-[12px] text-fg overflow-hidden"
+      className="outline-none fixed top-11 right-3 z-40 w-[420px] max-w-[calc(100vw-1.5rem)] bg-panel border border-line rounded-lg shadow-pop text-[12px] text-fg overflow-hidden"
     >
       <div className="flex items-center justify-between gap-2 px-3 h-8 border-b border-line text-muted">
         <span className="min-w-0 truncate" title="Últimos comandos enviados desde Notas, el catálogo y los botones">

@@ -30,6 +30,7 @@ import { type CatalogVendor, riskLabel } from "../lib/packs";
 import { HighlightEngine, MarkEngine, type MarkInfo } from "../lib/termDecor";
 import { type PasteAnalysis, type PasteDecision, analyzePaste, pasteChunks, pasteDecision, sanitizePaste } from "../lib/pasteGuard";
 import { type TermHl, validateHl } from "../lib/termHl";
+import { forgetTermSize, publishTermSize } from "./StatusBar";
 import { HighlightDialog, LineSendBar, type LineSendOpts, type LineSendState, MarksDialog, PasteDialog, useAnnounce } from "./TermTools";
 import {
   CREDENTIALS,
@@ -298,6 +299,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     term.loadAddon(new WebLinksAddon((_e, uri) => openUrl(uri)));
     term.open(hostRef.current!);
     fit.fit();
+    publishTermSize(id, term.cols, term.rows);
     termRef.current = term;
     fitRef.current = fit;
     searchRef.current = search;
@@ -998,6 +1000,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
     // Al equipo solo le llega el tamaño final de un arrastre (un window-change por columna redibuja su prompt).
     let resizeTimer: number | undefined;
     term.onResize(({ cols, rows }) => {
+      publishTermSize(id, cols, rows);
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => invoke("resize", { id: connIdRef.current, cols, rows }).catch(() => {}), 120);
     });
@@ -1295,6 +1298,7 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
       host.removeEventListener("contextmenu", onContextMenu);
       host.removeEventListener("paste", onNativePaste, true);
       invoke("disconnect", { id: connIdRef.current }).catch(() => {});
+      forgetTermSize(id);
       term.dispose();
     };
     // El terminal vive mientras exista la pestaña; tema y fuente se actualizan aparte.

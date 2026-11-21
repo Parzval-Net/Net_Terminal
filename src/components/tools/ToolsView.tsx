@@ -192,13 +192,13 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
       case "backup":
         return (
           <Suspense fallback={null}>
-            <BackupTool terminals={terminals} />
+            <BackupTool terminals={terminals} totalSessions={sessions.length} />
           </Suspense>
         );
       case "logsearch":
         return (
           <Suspense fallback={null}>
-            <LogSearchTool visible={active && current === "logsearch"} />
+            <LogSearchTool visible={active && current === "logsearch"} autoLog={settings.autoLog} onEnableAutoLog={() => update({ autoLog: true })} />
           </Suspense>
         );
     }

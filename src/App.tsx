@@ -65,6 +65,7 @@ import { useShortcuts } from "./lib/useShortcuts";
 import { useAppLayout } from "./lib/useAppLayout";
 import { useTabPlatform } from "./lib/useTabPlatform";
 import { BroadcastBar, BroadcastDialog } from "./components/BroadcastDialog";
+import { BroadcastBanner } from "./components/BroadcastTarget";
 import { Resolved, getBroadcastRun, isBroadcastRunning, publishWorkspace, stopBroadcast, resolveTargets, runBroadcast, targetLabel, useBroadcastTarget, useWorkspace } from "./lib/broadcast";
 import { closeLab, isLabRunning, labOwns, openLab, useLabOpen } from "./lib/cliLab";
 import { persist, stored } from "./lib/prefs";
@@ -1426,6 +1427,7 @@ function Workspace({
         )}
         <BroadcastBar />
         <TabBar {...tabBarProps} />
+        {activeId !== "tools" && <BroadcastBanner />}
 
         <div ref={rowRef} className="relative flex-1 min-h-0 flex">
         {settings.tabLayout === "vertical" && <VerticalTabs {...tabBarProps} />}
@@ -1567,15 +1569,10 @@ function Workspace({
           state={activeId ? states[activeId] : undefined}
           onToggleLog={h.toggleLog}
           onReconnect={h.reconnect}
-          onDisconnect={h.disconnect}
           aiEnabled={settings.mcpEnabled}
           aiWindows={mcp.windows.length}
           onAi={h.openAi}
           onSaveAs={activeTab ? () => h.saveTabAs(activeTab.id) : undefined}
-          findOpen={!!activeId && !!findOpenIds[activeId]}
-          onFind={toggleFind}
-          onHistory={toggleHistory}
-          historyOpen={!!historyFor}
           onToggleReadOnly={activeTab ? () => h.toggleReadOnly(activeTab.id) : undefined}
         />}
       </main>
