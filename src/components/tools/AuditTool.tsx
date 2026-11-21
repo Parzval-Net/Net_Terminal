@@ -22,12 +22,13 @@ import { runOnDeviceResult } from "../../lib/deviceRun";
 import { backupLabel, prepareBackup } from "../../lib/backup";
 import { openLab } from "../../lib/cliLab";
 import { persist, stored } from "../../lib/prefs";
+import { inOrder } from "../../lib/inOrder";
 import { plural } from "../../lib/plural";
 import type { Risk } from "../../lib/packs";
 import { AUDIT_VENDORS, MAX_CONFIG_BYTES, VENDOR_LABEL, detectVendor, type AuditVendor } from "../../lib/auditParse";
 import { ISO_TITLES, LAYER_LABEL, SEVERITY_LABEL, SEVERITY_WEIGHT, STATUS_LABEL, isIsoFramework, resolveRules, validateRulePack, type Layer, type ParamSpec, type RulePack, type Severity } from "../../lib/auditRules";
 import { BUILTIN_RULE_PACKS } from "../../lib/auditBuiltin";
-import { AUDIT_DISCLAIMER, RISK_LABEL, auditToCsv, auditToHtml, auditToJson, buildPlan, fmtPct, paramValueError, runAudit, type AuditResult, type Finding, type RiskLevel } from "../../lib/audit";
+import { AUDIT_DISCLAIMER, RISK_LABEL, auditToCsv, auditToHtml, auditToJson, buildPlan, filterParams, fmtPct, paramValueError, runAudit, type AuditResult, type Finding, type RiskLevel } from "../../lib/audit";
 import {
   READ_COMMAND,
   USER_PACK_ID,
@@ -64,6 +65,22 @@ interface Loaded {
 }
 
 const VIEW_KEY = "audit.view";
+/** Parámetros de los filtros de las reglas por equipo: { "<equipo>": { wan_interfaces: "port1" } }. */
+const FILTER_PARAMS_KEY = "audit.filterParams";
+const AUDITRULES_LANE = "auditrules";
+const USER_PACK_FILE = `user-${USER_PACK_ID}.json`;
+
+/** Mis reglas y, si su archivo existe pero no se pudo cargar, el motivo (bloquea los guardados). */
+function userPackOf(list: LoadedPack[]): { pack: RulePack; error: string | null } {
+  const entry = list.find((p) => p.layer === "user" && (p.file === USER_PACK_FILE || p.pack?.id === USER_PACK_ID));
+  if (entry?.pack && entry.pack.id === USER_PACK_ID) return { pack: entry.pack, error: null };
+  if (entry)
+    return {
+      pack: emptyUserPack(),
+      error: `El archivo de Mis reglas (${entry.file}) no se pudo cargar: ${entry.errors.join("; ") || "contenido inválido"}. No se guardan cambios para no reemplazarlo; corrígelo o elimínalo desde la carpeta de datos (audit-rules).`,
+    };
+  return { pack: emptyUserPack(), error: null };
+}
 const SOURCE_KEY = "audit.source";
 /** Plazo para leer la configuración desde una pestaña (como Respaldos). */
 const READ_TIMEOUT = 300;
@@ -74,6 +91,11 @@ const LINE_RISK: Record<Risk, { mark: string; cls: string; label: string }> = {
   change: { mark: "▲", cls: "text-warn", label: "cambio" },
   disruptive: { mark: "✕", cls: "text-danger", label: "puede cortar servicio" },
 };
+
+function storedFilterVals(device: string): Record<string, string> {
+  const v = stored<Record<string, Record<string, string>>>(FILTER_PARAMS_KEY, {})[device.trim()];
+  return v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([, x]) => typeof x === "string")) : {};
+}
 
 const isoChips = (f: Finding) => f.controls.filter((c) => isIsoFramework(c.framework)).map((c) => c.control);
 
@@ -96,17 +118,22 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
 
   // ---------- Packs de reglas ----------
   const [packs, setPacks] = useState<LoadedPack[]>([]);
+  /** Último "Mis reglas" leído o guardado: cada cambio parte de aquí, no de un render anterior. */
+  const userRef = useRef<{ pack: RulePack; error: string | null; loaded: boolean }>({ pack: emptyUserPack(), error: null, loaded: false });
+  // Lee la lista sin pasar por la cola: solo se llama desde dentro de ella.
+  const fetchPacks = useCallback(async () => {
+    const list = loadStored((await invoke<StoredPack[]>("auditrules_list")) ?? []);
+    userRef.current = { ...userPackOf(list), loaded: true };
+    setPacks(list);
+  }, []);
   const reload = useCallback(
-    () =>
-      invoke<StoredPack[]>("auditrules_list")
-        .then((l) => setPacks(loadStored(l ?? [])))
-        .catch((e) => setMsgState({ text: `No se pudieron leer los packs guardados: ${e}`, error: true })),
-    [],
+    () => inOrder(AUDITRULES_LANE, fetchPacks).catch((e) => setMsgState({ text: `No se pudieron leer los packs guardados: ${e}`, error: true })),
+    [fetchPacks],
   );
   useEffect(() => {
     reload();
   }, [reload]);
-  const userPack: RulePack = useMemo(() => packs.find((p) => p.layer === "user" && p.pack?.id === USER_PACK_ID)?.pack ?? emptyUserPack(), [packs]);
+  const { pack: userPack, error: userPackError } = useMemo(() => userPackOf(packs), [packs]);
   const packInputs = useMemo(
     () => [
       ...BUILTIN_RULE_PACKS.map((pack) => ({ pack, layer: "builtin" as Layer })),
@@ -117,12 +144,20 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
     [packs, userPack],
   );
   const resolved = useMemo(() => resolveRules(packInputs), [packInputs]);
-  const saveUserPack = async (p: RulePack) => {
-    const v = validateRulePack(p);
-    if (!v.pack) throw new Error(v.errors.join("; "));
-    await invoke("auditrules_save", { layer: "user", pack: v.pack });
-    await reload();
-  };
+  // Los guardados van de a uno y cada uno aplica su cambio sobre el último pack guardado: dos cambios
+  // seguidos no se pisan. Si el archivo de Mis reglas existe pero no se pudo cargar, no se guarda nada
+  // (se perderían sus reglas y excepciones al reemplazarlo por uno vacío).
+  const saveUserPack = (update: (p: RulePack) => RulePack) =>
+    inOrder(AUDITRULES_LANE, async () => {
+      if (!userRef.current.loaded) await fetchPacks();
+      const cur = userRef.current;
+      if (cur.error) throw new Error(cur.error);
+      const v = validateRulePack(update(cur.pack));
+      if (!v.pack) throw new Error(v.errors.join("; "));
+      await invoke("auditrules_save", { layer: "user", pack: v.pack });
+      userRef.current = { pack: v.pack, error: null, loaded: true };
+      await fetchPacks();
+    });
 
   // ---------- Paso 1: fuente ----------
   const [kind, setKindState] = useState<SourceKind>(() => {
@@ -148,16 +183,20 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
   }, []);
   useEffect(refreshBackups, [refreshBackups]);
   const bFiles = backups.find((d) => d.device === bDevice)?.files ?? [];
+  // Cada lectura lleva un número: si el usuario cambia de respaldo antes de que termine, la respuesta vieja se descarta.
+  const backupSeq = useRef(0);
   const loadBackup = async (device: string, file: string) => {
+    const seq = ++backupSeq.current;
     if (!device || !file) return;
     setBusy("Leyendo respaldo…");
     try {
       const text = await invoke<string>("backup_read", { device, file });
+      if (seq !== backupSeq.current) return;
       takeText({ text, source: `Respaldo ${device} ${backupLabel(file)}`, device });
     } catch (e) {
-      fail(e);
+      if (seq === backupSeq.current) fail(e);
     } finally {
-      setBusy(null);
+      if (seq === backupSeq.current) setBusy(null);
     }
   };
 
@@ -219,7 +258,9 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
   /** Nueva configuración: se descarta el resultado anterior (no corresponde a este texto). */
   function takeText(l: Loaded) {
     setLoaded(l);
-    setDevice(hostnameOf(l.text) ?? l.device);
+    const dev = hostnameOf(l.text) ?? l.device;
+    setDevice(dev);
+    setFilterVals(storedFilterVals(dev));
     setVendorChoice("auto");
     setResult(null);
     setAuditError("");
@@ -227,10 +268,43 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
   const detection = useMemo(() => (loaded ? detectVendor(loaded.text) : null), [loaded]);
   const vendor = vendorChoice === "auto" ? (detection?.vendor ?? null) : vendorChoice;
 
+  // Parámetros de los filtros (interfaces WAN o externas): cambian qué bloques se evalúan, así que se
+  // piden antes de auditar y se recuerdan por equipo. Solo los valores válidos llegan al motor.
+  const [filterVals, setFilterVals] = useState<Record<string, string>>({});
+  const filterSpecs = useMemo(() => (vendor ? filterParams(resolved, vendor) : []), [resolved, vendor]);
+  const filterErrors = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of filterSpecs) {
+      const v = (filterVals[f.name] ?? "").trim();
+      const bad = v && vendor ? paramValueError(f.spec, v, vendor) : null;
+      if (bad) out[f.name] = bad;
+    }
+    return out;
+  }, [filterSpecs, filterVals, vendor]);
+  const auditParams = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of filterSpecs) {
+      const v = (filterVals[f.name] ?? "").trim();
+      if (v && !filterErrors[f.name]) out[f.name] = v;
+    }
+    return out;
+  }, [filterSpecs, filterVals, filterErrors]);
+  const setFilterVal = (name: string, value: string) => {
+    const next = { ...filterVals, [name]: value };
+    setFilterVals(next);
+    const key = device.trim();
+    if (!key) return;
+    const all = stored<Record<string, Record<string, string>>>(FILTER_PARAMS_KEY, {});
+    const kept = Object.fromEntries(Object.entries(next).filter(([, v]) => v.trim()));
+    if (Object.keys(kept).length) all[key] = kept;
+    else delete all[key];
+    persist(FILTER_PARAMS_KEY, all);
+  };
+
   const audit = useCallback(
     (l: Loaded, v: "auto" | AuditVendor, dev: string, quiet = false) => {
       try {
-        const r = runAudit({ text: l.text, vendor: v === "auto" ? undefined : v, device: dev.trim() || undefined, source: l.source }, resolved);
+        const r = runAudit({ text: l.text, vendor: v === "auto" ? undefined : v, device: dev.trim() || undefined, source: l.source }, resolved, { params: auditParams });
         setResult(r);
         setAuditError("");
         if (!quiet) setMsg("");
@@ -241,7 +315,7 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
         return null;
       }
     },
-    [resolved],
+    [resolved, auditParams],
   );
   const [running, setRunning] = useState(false);
   const runNow = async () => {
@@ -256,17 +330,17 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
       requestAnimationFrame(() => resultRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
     }
   };
-  // La biblioteca cambió (activar, severidad, regla nueva o excepción): se vuelve a auditar el mismo texto.
-  const lastResolved = useRef(resolved);
+  // La biblioteca o los parámetros de los filtros cambiaron: se vuelve a auditar el mismo texto.
+  const lastAudit = useRef(audit);
   useEffect(() => {
-    if (lastResolved.current === resolved) return;
-    lastResolved.current = resolved;
+    if (lastAudit.current === audit) return;
+    lastAudit.current = audit;
     if (loaded && result) {
       const r = audit(loaded, vendorChoice, device, true);
       if (r) setSelection((s) => new Set([...s].filter((id) => plannable(r).some((f) => f.ruleId === id))));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolved]);
+  }, [audit]);
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("attention");
   const [sevFilter, setSevFilter] = useState<Severity | "all">("all");
@@ -323,9 +397,11 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
 
   // ---------- Excepción desde un hallazgo ----------
   const [waiverDraft, setWaiverDraft] = useState<WaiverDraft | null>(null);
+  // La excepción se ata a la etiqueta completa del bloque (con su VDOM y su ruta), nunca queda vacía por
+  // falta de " › " (Cisco): una excepción sin bloque cubriría toda la regla.
   const askWaiver = (ruleId: string, unitLabel?: string) => {
-    const match = unitLabel && unitLabel.includes(" › ") ? unitLabel.split(" › ").pop() : undefined;
-    setWaiverDraft({ rule: ruleId, match: match ?? "", n: Date.now() });
+    const match = unitLabel && !unitLabel.startsWith("(") && unitLabel !== "Configuración global" ? unitLabel.replace(/\s+\(\+\d+\)$/, "") : "";
+    setWaiverDraft({ rule: ruleId, match, n: Date.now() });
     setView("library");
   };
 
@@ -361,6 +437,7 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
           resolved={resolved}
           userPack={userPack}
           onSaveUserPack={saveUserPack}
+          userPackError={userPackError}
           onReload={reload}
           sample={loaded && vendor ? { text: loaded.text, vendor, platform: vendorChoice === "auto" ? detection?.platform : undefined, source: loaded.source } : null}
           waiverDraft={waiverDraft}
@@ -528,10 +605,33 @@ export default function AuditTool({ terminals, onConfirm }: { terminals: Termina
                 <Label text="Equipo (para el informe)" className="w-52">
                   <input className="field" value={device} onChange={(e) => setDevice(e.target.value)} placeholder="Nombre del equipo" />
                 </Label>
+                {filterSpecs.map((f) => (
+                  <Label key={f.name} text={f.spec.prompt} className="w-72">
+                    <input
+                      className="field font-mono"
+                      value={filterVals[f.name] ?? ""}
+                      onChange={(e) => setFilterVal(f.name, e.target.value)}
+                      placeholder={f.spec.example ? `Ej.: ${f.spec.example}` : "Opcional"}
+                      spellCheck={false}
+                      aria-invalid={!!filterErrors[f.name]}
+                      aria-describedby={`${hintId}-f`}
+                      title={`Lo usan ${f.rules.join(", ")}`}
+                    />
+                  </Label>
+                ))}
                 <span className="flex-1" />
                 <Btn kind="primary" disabled={!vendor || running || tooBig} onClick={runNow}>
                   <Play size={13} aria-hidden /> {running ? "Auditando…" : result ? "Volver a auditar" : "Auditar"}
                 </Btn>
+                {filterSpecs.length > 0 && (
+                  <p id={`${hintId}-f`} className={`basis-full text-caption ${Object.keys(filterErrors).length ? "text-danger font-medium" : "text-muted"}`}>
+                    {Object.keys(filterErrors).length
+                      ? Object.entries(filterErrors)
+                          .map(([k, e]) => `${filterSpecs.find((f) => f.name === k)?.spec.prompt ?? k}: ${e}`)
+                          .join(" · ")
+                      : `Datos que usan los filtros de ${filterSpecs.flatMap((f) => f.rules).join(", ")}: por ejemplo, interfaces WAN o externas que no lo indican en su rol ni en su descripción. Sin ellos esas interfaces no se revisan.${device.trim() ? " Se recuerdan para este equipo." : ""}`}
+                  </p>
+                )}
                 <p className="basis-full text-caption text-muted">
                   {detection?.reason}
                   {vendor && !resolved.rules.some((r) => r.rule.vendor === vendor) ? ` · No hay reglas activas para ${VENDOR_LABEL[vendor]}: los packs integrados cubren Cisco IOS/IOS-XE y FortiOS.` : ""}
@@ -823,7 +923,7 @@ function FindingRow({ f, open, onToggle, onWaiver }: { f: Finding; open: boolean
               {u.lineNo > 0 && <span className="text-caption text-muted">línea {u.lineNo}</span>}
               <span className="flex-1" />
               {(u.status === "fail" || u.status === "review") && (
-                <button type="button" onClick={() => onWaiver(f.ruleId, u.label)} className="text-caption text-accent hover:underline px-1 h-6">
+                <button type="button" onClick={() => onWaiver(f.ruleId, u.label)} aria-label={`Crear excepción de ${f.ruleId} para ${u.label}`} className="text-caption text-accent hover:underline px-1 h-6">
                   Crear excepción…
                 </button>
               )}

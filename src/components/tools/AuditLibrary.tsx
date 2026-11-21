@@ -5,12 +5,14 @@ import { Download, FlaskConical, Pencil, Plus, Trash2, Upload } from "lucide-rea
 import { Segmented, Switch } from "../controls";
 import { Btn, CountBadge, Label, Section } from "./ui";
 import { StatusTag } from "./AuditTags";
+import { inOrder } from "../../lib/inOrder";
 import { plural } from "../../lib/plural";
 import { AUDIT_VENDORS, VENDOR_LABEL, parseConfig, type AuditVendor } from "../../lib/auditParse";
 import {
   LAYER_LABEL,
   SEVERITIES,
   SEVERITY_LABEL,
+  SEVERITY_WEIGHT,
   isIsoFramework,
   resolveRules,
   validateRulePack,
@@ -20,7 +22,7 @@ import {
   type ResolvedRules,
   type Severity,
 } from "../../lib/auditRules";
-import { evaluateRule, testRule, type RuleTestFailure } from "../../lib/audit";
+import { evaluateRule, localDay, testRule, type RuleTestFailure } from "../../lib/audit";
 import {
   USER_PACK_ID,
   addWaiver,
@@ -49,7 +51,10 @@ interface Props {
   packInputs: { pack: RulePack; layer: Layer }[];
   resolved: ResolvedRules;
   userPack: RulePack;
-  onSaveUserPack: (p: RulePack) => Promise<void>;
+  /** Guarda Mis reglas aplicando `update` sobre la última versión guardada (en cola, sin pisar cambios). */
+  onSaveUserPack: (update: (p: RulePack) => RulePack) => Promise<void>;
+  /** El archivo de Mis reglas existe pero no se pudo cargar: no se guarda nada hasta corregirlo. */
+  userPackError?: string | null;
   onReload: () => Promise<unknown> | void;
   /** Configuración cargada en Auditar, para la prueba en vivo del editor. */
   sample: { text: string; vendor: AuditVendor; platform?: string; source: string } | null;
@@ -65,9 +70,13 @@ interface Preview {
   warnings: string[];
   tests: RuleTestFailure[];
   replaces?: string;
+  /** Reglas activas que el pack desactiva o a las que baja la severidad. */
+  weakens: string[];
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => localDay(new Date());
+/** Días que faltan para el vencimiento, en la hora local del equipo. */
+const daysLeft = (expires: string) => Math.max(0, Math.ceil((new Date(`${expires}T00:00:00`).getTime() - Date.now()) / 86_400_000));
 
 /**
  * Biblioteca de reglas: packs por capa (integrada < importada < usuario), activar y desactivar,
@@ -75,10 +84,10 @@ const today = () => new Date().toISOString().slice(0, 10);
  * registrar excepciones con motivo, aprobador y vencimiento. Todo lo que cambia el usuario va a su
  * pack "Mis reglas" (capa usuario): los packs integrados e importados no se modifican.
  */
-export default function AuditLibrary({ packs, packInputs, resolved, userPack, onSaveUserPack, onReload, sample, waiverDraft, onMsg, onConfirm }: Props) {
+export default function AuditLibrary({ packs, packInputs, resolved, userPack, onSaveUserPack, userPackError, onReload, sample, waiverDraft, onMsg, onConfirm }: Props) {
   const fail = (e: unknown) => onMsg(String(e instanceof Error ? e.message : e), true);
-  const saveUser = (p: RulePack, ok?: string) =>
-    onSaveUserPack(p)
+  const saveUser = (update: (p: RulePack) => RulePack, ok?: string) =>
+    onSaveUserPack(update)
       .then(() => ok && onMsg(ok))
       .catch(fail);
 
@@ -104,7 +113,16 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
       if (v.pack && (v.pack.id === USER_PACK_ID || builtinIds.includes(v.pack.id))) errors.push(`El id "${v.pack.id}" es de ${v.pack.id === USER_PACK_ID ? "Mis reglas" : "un pack integrado"}: cambia el id del pack`);
       const tests = v.pack && !errors.length ? (v.pack.rules ?? []).flatMap((r) => testRule(r)) : [];
       const prev = v.pack ? packs.find((p) => p.layer === "imported" && p.pack?.id === v.pack!.id)?.pack : undefined;
-      setPreview({ path, pack: errors.length ? null : v.pack, errors, warnings: v.warnings, tests, replaces: prev ? `${prev.name} ${prev.version}` : undefined });
+      // Lo que el pack debilita en las reglas que hoy están activas (se avisa antes de instalar).
+      const active = new Map(resolved.rules.map((er) => [er.rule.id, er]));
+      const weakens = (v.pack?.overrides ?? []).flatMap((o) => {
+        const er = active.get(o.rule);
+        if (!er) return [];
+        if (o.enabled === false) return [`${o.rule} (${er.rule.title}): la desactiva`];
+        if (o.severity && SEVERITY_WEIGHT[o.severity] < SEVERITY_WEIGHT[er.severity]) return [`${o.rule} (${er.rule.title}): baja la severidad de ${SEVERITY_LABEL[er.severity].toLowerCase()} a ${SEVERITY_LABEL[o.severity].toLowerCase()}`];
+        return [];
+      });
+      setPreview({ path, pack: errors.length ? null : v.pack, errors, warnings: v.warnings, tests, replaces: prev ? `${prev.name} ${prev.version}` : undefined, weakens });
     } catch (e) {
       fail(e);
     }
@@ -113,7 +131,8 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
     if (!preview?.pack) return;
     try {
       // Se guarda el pack ya validado, nunca el archivo tal cual.
-      await invoke("auditrules_save", { layer: "imported", pack: preview.pack });
+      const pack = preview.pack;
+      await inOrder("auditrules", () => invoke("auditrules_save", { layer: "imported", pack }));
       onMsg(`Pack instalado: ${preview.pack.name} ${preview.pack.version}`);
       setPreview(null);
       await onReload();
@@ -138,7 +157,7 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
       label: "Eliminar",
       danger: true,
       action: () => {
-        invoke("auditrules_delete", { layer, id })
+        inOrder("auditrules", () => invoke("auditrules_delete", { layer, id }))
           .then(() => onReload())
           .then(() => onMsg(`Pack eliminado: ${name}`))
           .catch(fail);
@@ -182,8 +201,9 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
     const rule = { ...built.rule, ...(example.trim() && saveTest && live && live.status !== "n/a" ? { tests: [{ name: "Ejemplo del editor", config: example.slice(0, 20_000), expect: live.status }] } : {}) };
     const exists = ownIds.has(rule.id);
     if (editing && editing !== rule.id) {
-      void saveUser(upsertRule(removeRule(userPack, editing), rule), `Regla ${rule.id} guardada en Mis reglas`);
-    } else void saveUser(upsertRule(userPack, rule), `Regla ${rule.id} ${exists ? "actualizada" : "guardada"} en Mis reglas`);
+      const old = editing;
+      void saveUser((u) => upsertRule(removeRule(u, old), rule), `Regla ${rule.id} guardada en Mis reglas`);
+    } else void saveUser((u) => upsertRule(u, rule), `Regla ${rule.id} ${exists ? "actualizada" : "guardada"} en Mis reglas`);
     setEditing(null);
     setForm(emptyForm(form.vendor));
     setExample("");
@@ -216,17 +236,23 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
   const addW = () => {
     setWTried(true);
     if (wErrors.length) return;
-    void saveUser(addWaiver(userPack, w), `Excepción registrada para ${w.rule} (vence ${w.expires})`);
+    const draft = w;
+    void saveUser((u) => addWaiver(u, draft), `Excepción registrada para ${draft.rule} (vence ${draft.expires})`);
     setW({ rule: "", match: "", reason: "", approvedBy: "", expires: "", ticket: "" });
     setWTried(false);
   };
   const otherWaivers = packInputs.filter((p) => p.pack.id !== USER_PACK_ID).reduce((n, p) => n + (p.pack.waivers?.length ?? 0) + (p.pack.rules ?? []).reduce((m, r) => m + (r.waivers?.length ?? 0), 0), 0);
 
-  const ids = { q: useId(), test: useId(), werr: useId() };
+  const ids = { q: useId(), test: useId(), werr: useId(), wmatch: useId() };
   const layerOrder: Layer[] = ["builtin", "imported", "user"];
 
   return (
     <div className="space-y-4">
+      {userPackError && (
+        <p role="alert" className="rounded-lg border border-line px-3 py-2 text-body-sm text-danger font-medium">
+          {userPackError}
+        </p>
+      )}
       {/* ---------- Packs ---------- */}
       <Section
         title="Packs de reglas"
@@ -255,6 +281,16 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
                   {plural(preview.pack.waivers?.length ?? 0, "excepción", "excepciones")}. Es solo JSON: no se ejecuta nada al importarlo y cada regex pasó la validación anti-ReDoS.
                 </p>
                 {preview.replaces && <p className="text-warn">Reemplaza el pack importado {preview.replaces}.</p>}
+                {preview.weakens.length > 0 && (
+                  <div className="text-warn">
+                    <p>{plural(preview.weakens.length, "regla activa queda más débil", "reglas activas quedan más débiles")} (Mis reglas puede revertirlo):</p>
+                    <ul className="list-disc pl-5 text-fg max-h-40 overflow-y-auto">
+                      {preview.weakens.map((x) => (
+                        <li key={x}>{x}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {preview.tests.length > 0 && (
                   <div className="text-warn">
                     <p>{plural(preview.tests.length, "prueba embebida falla", "pruebas embebidas fallan")} (revisa la regla antes de confiar en su resultado):</p>
@@ -358,7 +394,7 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
               return (
                 <li key={r.id} className={`flex items-start gap-3 px-3 py-2 text-body-sm ${enabled ? "" : "bg-hover"}`}>
                   <span className="pt-0.5">
-                    <Switch checked={enabled} onChange={(on) => void saveUser(setRuleEnabled(userPack, r.id, on), `${r.id} ${on ? "activada" : "desactivada"}`)} label={`${enabled ? "Desactivar" : "Activar"} ${r.id}`} />
+                    <Switch checked={enabled} onChange={(on) => void saveUser((u) => setRuleEnabled(u, r.id, on), `${r.id} ${on ? "activada" : "desactivada"}`)} label={`${enabled ? "Desactivar" : "Activar"} ${r.id}`} />
                   </span>
                   <span className="flex-1 min-w-0">
                     <span className="flex flex-wrap items-center gap-x-2">
@@ -379,7 +415,7 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
                     aria-label={`Severidad de ${r.id}`}
                     onChange={(e) => {
                       const sev = e.target.value as Severity;
-                      void saveUser(setRuleSeverity(userPack, r.id, sev === r.severity && !own ? null : sev), `Severidad de ${r.id}: ${SEVERITY_LABEL[sev].toLowerCase()}`);
+                      void saveUser((u) => setRuleSeverity(u, r.id, sev === r.severity && !own ? null : sev), `Severidad de ${r.id}: ${SEVERITY_LABEL[sev].toLowerCase()}`);
                     }}
                   >
                     {SEVERITIES.map((s) => (
@@ -400,7 +436,7 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
                         title="Eliminar"
                         aria-label={`Eliminar ${r.id}`}
                         onClick={() =>
-                          onConfirm({ title: "Eliminar regla propia", message: `Se elimina ${r.id} (${r.title}) de Mis reglas, con sus excepciones.`, label: "Eliminar", danger: true, action: () => void saveUser(removeRule(userPack, r.id), `Regla ${r.id} eliminada`) })
+                          onConfirm({ title: "Eliminar regla propia", message: `Se elimina ${r.id} (${r.title}) de Mis reglas, con sus excepciones.`, label: "Eliminar", danger: true, action: () => void saveUser((u) => removeRule(u, r.id), `Regla ${r.id} eliminada`) })
                         }
                       >
                         <Trash2 size={13} aria-hidden />
@@ -585,8 +621,8 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
                     <span className="flex-1 min-w-0">
                       <span className="flex flex-wrap items-center gap-x-2">
                         <code className="font-medium">{x.rule}</code>
-                        {x.match && <span className="text-muted [overflow-wrap:anywhere]">en «{x.match}»</span>}
-                        {expired ? <span className="text-danger font-medium">Vencida</span> : <CountBadge n={Math.max(0, Math.ceil((Date.parse(`${x.expires}T00:00:00Z`) - Date.now()) / 86_400_000))} tone="neutral" />}
+                        <span className="text-muted [overflow-wrap:anywhere]">{x.match ? `en «${x.match}»` : "aplica a toda la regla"}</span>
+                        {expired ? <span className="text-danger font-medium">Vencida</span> : <CountBadge n={daysLeft(x.expires)} tone="neutral" />}
                         {!expired && <span className="text-caption text-muted">días</span>}
                       </span>
                       <span className="block text-caption text-muted">
@@ -594,7 +630,7 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
                         {x.ticket ? ` · ${x.ticket}` : ""}
                       </span>
                     </span>
-                    <Btn kind="ghost" className="!h-7 !px-2" title="Eliminar" aria-label={`Eliminar la excepción de ${x.rule}`} onClick={() => void saveUser(removeWaiver(userPack, i), `Excepción de ${x.rule} eliminada`)}>
+                    <Btn kind="ghost" className="!h-7 !px-2" title="Eliminar" aria-label={`Eliminar la excepción de ${x.rule}`} onClick={() => void saveUser((u) => removeWaiver(u, (u.waivers ?? []).findIndex((y) => JSON.stringify(y) === JSON.stringify(x))), `Excepción de ${x.rule} eliminada`)}>
                       <Trash2 size={13} aria-hidden />
                     </Btn>
                   </li>
@@ -613,8 +649,11 @@ export default function AuditLibrary({ packs, packInputs, resolved, userPack, on
                 ))}
               </select>
             </Label>
-            <Label text="Bloque (texto literal, opcional)">
-              <input className="field font-mono" value={w.match} onChange={(e) => setW({ ...w, match: e.target.value })} placeholder='edit "breakglass"' spellCheck={false} />
+            <Label text="Bloque (opcional)">
+              <input className="field font-mono" value={w.match} onChange={(e) => setW({ ...w, match: e.target.value })} placeholder='edit "breakglass"' spellCheck={false} aria-describedby={ids.wmatch} />
+              <span id={ids.wmatch} className={`block mt-1 text-caption ${w.match.trim() ? "text-muted" : "text-warn"}`}>
+                {w.match.trim() ? "Palabras completas del bloque; con › es la ruta exacta" : "Vacío: aplica a toda la regla, en todos los bloques"}
+              </span>
             </Label>
             <Label text="Vence">
               <input className="field" type="date" min={today()} value={w.expires} onChange={(e) => setW({ ...w, expires: e.target.value })} />

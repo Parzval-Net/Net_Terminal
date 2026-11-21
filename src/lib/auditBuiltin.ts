@@ -20,6 +20,9 @@ const iso = (...ids: string[]): Control[] => ids.map((control) => ({ framework: 
 
 const VTY: Scope = { block: "^line vty ", each: true };
 const IOS = ["ios", "ios-xe"];
+/** Destino syslog: "logging host X", "logging <IP>" o "logging <nombre>" (una sola palabra que no es una opción de logging que va sola). */
+const LOG_HOST =
+  "^logging (host |\\d|(?!(buffered|console|monitor|trap|on|count|userinfo|persistent|enable|synchronous|history|reload|alarm|discriminator|rate-limit|origin-id|esm|cns-events|message-counter|snmp-trap|ip|smartlog|validate|queue-limit|sequence|size|facility|filter|file)$)[a-z][\\w.-]*$)";
 const ADDR = "^[A-Za-z0-9.:-]{1,64}$";
 /** Creación opcional de SNMPv3 (solo si se indica el usuario): va antes de quitar comunidades. */
 const IOS_SNMPV3 = [
@@ -282,6 +285,8 @@ const ciscoRules: Rule[] = [
       ],
     },
     fix: "guided",
+    // Una llave existente no se sobrescribe ni se borra en el rollback: se reutiliza su número.
+    capture: { keyid: "^ntp authentication-key (\\d+) " },
     params: {
       ntp_id: { prompt: "Número de llave NTP", default: "1", pattern: "^\\d{1,5}$" },
       ntp_hash: { prompt: "Algoritmo de la llave", default: "md5", pattern: "^(md5|sha1|hmac-sha2-256)$" },
@@ -289,17 +294,28 @@ const ciscoRules: Rule[] = [
     },
     remediation: {
       cisco: [
-        "ntp authentication-key {{ntp_id}} {{ntp_hash}} {{ntp_auth_key}}",
-        "?fail:trusted:ntp trusted-key {{ntp_id}}",
-        "@each:keyed:{{line}} key {{ntp_id}}",
+        "?!current.keyid:ntp authentication-key {{ntp_id}} {{ntp_hash}} {{ntp_auth_key}}",
+        "?fail:trusted:?!current.keyid:ntp trusted-key {{ntp_id}}",
+        "?fail:trusted:?current.keyid:ntp trusted-key {{current.keyid}}",
+        "@each:keyed:?!current.keyid:{{line}} key {{ntp_id}}",
+        "@each:keyed:?current.keyid:{{line}} key {{current.keyid}}",
         "?fail:auth:ntp authenticate",
       ],
     },
-    rollback: { cisco: ["?fail:auth:no ntp authenticate", "@each:keyed:{{line}}", "?fail:trusted:no ntp trusted-key {{ntp_id}}", "no ntp authentication-key {{ntp_id}}"] },
+    rollback: {
+      cisco: [
+        "?fail:auth:no ntp authenticate",
+        "@each:keyed:{{line}}",
+        "?fail:trusted:?!current.keyid:no ntp trusted-key {{ntp_id}}",
+        "?fail:trusted:?current.keyid:no ntp trusted-key {{current.keyid}}",
+        "?!current.keyid:no ntp authentication-key {{ntp_id}}",
+      ],
+    },
     tests: [
       { config: "ntp server 192.0.2.123\n", expect: "fail", planIncludes: ["ntp server 192.0.2.123 key 1", "ntp authenticate", "ntp authentication-key 1 md5 {{ntp_auth_key}}"] },
       { config: "ntp authentication-key 1 md5 ****\nntp authenticate\nntp trusted-key 1\nntp server 192.0.2.123 key 1\n", expect: "pass" },
       { config: "hostname R1\n", expect: "n/a" },
+      { name: "llave existente", config: "ntp authentication-key 7 md5 ****\nntp server 192.0.2.123\n", expect: "fail", planIncludes: ["ntp server 192.0.2.123 key 7", "ntp trusted-key 7", "no ntp trusted-key 7"] },
     ],
   },
   {
@@ -313,7 +329,7 @@ const ciscoRules: Rule[] = [
     check: {
       type: "all",
       conditions: [
-        { id: "host", type: "present", match: "^logging (host |\\d)" },
+        { id: "host", type: "present", match: LOG_HOST },
         { id: "ts", type: "present", match: "^service timestamps log datetime( |$)" },
       ],
     },
@@ -327,6 +343,10 @@ const ciscoRules: Rule[] = [
       { config: "service timestamps log uptime\n", expect: "fail", params: { syslog_server: "192.0.2.50" }, planIncludes: ["logging host 192.0.2.50", "service timestamps log uptime"] },
       { config: "service timestamps log datetime msec\nlogging host 192.0.2.50\n", expect: "pass" },
       { config: "service timestamps log datetime msec\nlogging 192.0.2.50\n", expect: "pass" },
+      { name: "por nombre", config: "service timestamps log datetime msec\nlogging syslog.example.net\n", expect: "pass" },
+      { name: "por nombre corto", config: "service timestamps log datetime msec\nlogging syslog01\n", expect: "pass" },
+      { name: "host ipv6", config: "service timestamps log datetime msec\nlogging host ipv6 2001:db8::50\n", expect: "pass" },
+      { name: "solo buffer", config: "service timestamps log datetime msec\nlogging buffered 16384\nlogging trap informational\n", expect: "fail" },
     ],
   },
   {
@@ -451,7 +471,7 @@ const ciscoRules: Rule[] = [
       where: {
         type: "all",
         conditions: [
-          { type: "present", match: "^ip address \\d" },
+          { type: "present", match: "^ip address (\\d|dhcp)" },
           { type: "absent", match: "^shutdown$" },
           { type: "absent", match: "^interface (loopback|null|tunnel)" },
         ],
@@ -464,6 +484,7 @@ const ciscoRules: Rule[] = [
       { config: "interface Gi0/1\n ip address 192.0.2.1 255.255.255.0\n", expect: "fail", planIncludes: ["interface GigabitEthernet0/1", "no ip proxy-arp"] },
       { config: "interface GigabitEthernet0/1\n ip address 192.0.2.1 255.255.255.0\n no ip proxy-arp\n", expect: "pass" },
       { config: "interface Loopback0\n ip address 198.51.100.1 255.255.255.255\ninterface Gi0/2\n shutdown\n", expect: "n/a" },
+      { name: "dhcp", config: "interface GigabitEthernet0/0\n ip address dhcp\n", expect: "fail" },
     ],
   },
   {
@@ -482,7 +503,7 @@ const ciscoRules: Rule[] = [
       where: {
         type: "any",
         conditions: [
-          { type: "present", match: "^description .*(internet|isp|wan|extern|proveedor)" },
+          { type: "present", match: "^description .*(\\b(internet|isp|wan)\\d*\\b|\\bextern|\\bproveedor)" },
           { type: "value", key: "^interface (\\S+)$", op: "in", value: ["{{external_ifaces}}"] },
         ],
       },
@@ -496,6 +517,8 @@ const ciscoRules: Rule[] = [
       { config: "interface GigabitEthernet0/0\n description Enlace Internet\n no cdp enable\ninterface GigabitEthernet0/1\n description LAN\n", expect: "pass" },
       { config: "no cdp run\ninterface GigabitEthernet0/0\n description Internet\n", expect: "n/a" },
       { config: "interface GigabitEthernet0/3\n ip address 203.0.113.6 255.255.255.252\n", expect: "fail", params: { external_ifaces: "GigabitEthernet0/3" } },
+      { name: "palabras que contienen isp o wan", config: "interface GigabitEthernet0/4\n description Display Swanson\n", expect: "n/a" },
+      { name: "wan con número", config: "interface GigabitEthernet0/5\n description Enlace WAN2\n", expect: "fail" },
     ],
   },
   {
@@ -538,13 +561,14 @@ const ciscoRules: Rule[] = [
         { id: "clear", type: "absent", match: "^path (tftp|ftp|http):" },
       ],
     },
-    capture: { current: "^path (.+)$" },
+    capture: { current: "^path (.+)$", wm: "^write-memory$" },
     params: { archive_path: { prompt: "Destino del respaldo (SCP o SFTP)", required: true, example: "scp://respaldo@192.0.2.20/cfg/$h", pattern: "^(scp|sftp|https|flash\\d?|bootflash|disk\\d?):\\S{1,180}$" } },
     remediation: { cisco: ["archive", " path {{archive_path}}", " write-memory"] },
-    rollback: { cisco: ["archive", "?current: path {{current}}", "?!current: no path", " no write-memory"] },
+    rollback: { cisco: ["archive", "?current: path {{current}}", "?!current: no path", "?!current.wm: no write-memory"] },
     tests: [
       { config: "hostname R1\n", expect: "fail", params: { archive_path: "scp://respaldo@192.0.2.20/cfg/$h" }, planIncludes: ["archive", "path scp://respaldo@192.0.2.20/cfg/$h"] },
       { config: "archive\n path tftp://192.0.2.20/$h\n write-memory\n", expect: "fail" },
+      { name: "write-memory existente", config: "archive\n path tftp://192.0.2.20/$h\n write-memory\n", expect: "fail", params: { archive_path: "scp://respaldo@192.0.2.20/cfg/$h" }, planIncludes: ["path tftp://192.0.2.20/$h"] },
       { config: "archive\n path scp://respaldo@192.0.2.20/cfg/$h\n write-memory\n", expect: "pass" },
     ],
   },
@@ -717,6 +741,17 @@ const fortiRules: Rule[] = [
     scope: { block: "^config system password-policy$" },
     missingScope: "fail",
     check: { type: "value", key: "^set status (\\S+)$", op: "eq", value: "enable", default: "disable" },
+    // Valores previos, para que el rollback los deje como estaban (no solo desactive la política).
+    capture: {
+      minlen: "^set minimum-length (\\d+)$",
+      lower: "^set min-lower-case-letter (\\d+)$",
+      upper: "^set min-upper-case-letter (\\d+)$",
+      digits: "^set min-number (\\d+)$",
+      symbols: "^set min-non-alphanumeric (\\d+)$",
+      reuse: "^set reuse-password (\\S+)$",
+      expstatus: "^set expire-status (\\S+)$",
+      expday: "^set expire-day (\\d+)$",
+    },
     params: {
       admin_min_length: { prompt: "Largo mínimo", default: "12", pattern: "^(1[2-9]|[2-9]\\d)$" },
       expire_days: { prompt: "Caducidad en días (vacío: sin caducidad)", example: "90", pattern: "^\\d{1,3}$" },
@@ -736,11 +771,34 @@ const fortiRules: Rule[] = [
         "end",
       ],
     },
-    rollback: { fortinet: ["config system password-policy", "set status disable", "end"] },
+    rollback: {
+      fortinet: [
+        "config system password-policy",
+        "set status disable",
+        "?current.minlen:set minimum-length {{current.minlen}}",
+        "?!current.minlen:unset minimum-length",
+        "?current.lower:set min-lower-case-letter {{current.lower}}",
+        "?!current.lower:unset min-lower-case-letter",
+        "?current.upper:set min-upper-case-letter {{current.upper}}",
+        "?!current.upper:unset min-upper-case-letter",
+        "?current.digits:set min-number {{current.digits}}",
+        "?!current.digits:unset min-number",
+        "?current.symbols:set min-non-alphanumeric {{current.symbols}}",
+        "?!current.symbols:unset min-non-alphanumeric",
+        "?current.reuse:set reuse-password {{current.reuse}}",
+        "?!current.reuse:unset reuse-password",
+        "?param:expire_days:?current.expstatus:set expire-status {{current.expstatus}}",
+        "?param:expire_days:?!current.expstatus:unset expire-status",
+        "?param:expire_days:?current.expday:set expire-day {{current.expday}}",
+        "?param:expire_days:?!current.expday:unset expire-day",
+        "end",
+      ],
+    },
     tests: [
       { name: "bloque ausente", config: fgFlat("system global", ['set hostname "FW-LAB"']), expect: "fail", planIncludes: ["set status enable", "set minimum-length 12"] },
       { name: "con caducidad opcional", config: fgFlat("system password-policy", ["set status disable"]), params: { expire_days: "180" }, expect: "fail", planIncludes: ["set expire-day 180"] },
       { config: fgFlat("system password-policy", ["set status enable", "set minimum-length 14"]), expect: "pass" },
+      { name: "rollback restaura lo previo", config: fgFlat("system password-policy", ["set status disable", "set minimum-length 10", "set min-number 2"]), expect: "fail", planIncludes: ["set minimum-length 10", "set min-number 2", "unset min-lower-case-letter"] },
     ],
   },
   {
@@ -1132,19 +1190,31 @@ const fortiRules: Rule[] = [
       fortinet: [
         "config system ntp",
         "?fail:sync:set ntpsync enable",
-        "set type custom",
-        "config ntpserver",
-        "edit 1",
-        'set server "{{ntp_server}}"',
-        "next",
-        "end",
+        // Solo sin servidores (tipo custom vacío): así "edit 1" nunca sobrescribe un servidor existente.
+        "?fail:src:set type custom",
+        "?fail:src:config ntpserver",
+        "?fail:src:edit 1",
+        '?fail:src:set server "{{ntp_server}}"',
+        "?fail:src:next",
+        "?fail:src:end",
         "end",
       ],
     },
-    rollback: { fortinet: ["config system ntp", "?fail:sync:set ntpsync disable", "?current:set type {{current}}", "?!current:unset type", "config ntpserver", "delete 1", "end", "end"] },
+    rollback: {
+      fortinet: [
+        "config system ntp",
+        "?fail:sync:set ntpsync disable",
+        "?fail:src:?current:set type {{current}}",
+        "?fail:src:?!current:unset type",
+        "?fail:src:config ntpserver",
+        "?fail:src:delete 1",
+        "?fail:src:end",
+        "end",
+      ],
+    },
     tests: [
-      { config: fgFlat("system ntp", ["set ntpsync disable"]), expect: "fail", params: { ntp_server: "192.0.2.123" }, planIncludes: ["set ntpsync enable", 'set server "192.0.2.123"'] },
-      { config: fgFlat("system ntp", ["set type custom"]), expect: "fail" },
+      { config: fgFlat("system ntp", ["set ntpsync disable"]), expect: "fail", params: { ntp_server: "192.0.2.123" }, planIncludes: ["set ntpsync enable", "set ntpsync disable"] },
+      { config: fgFlat("system ntp", ["set type custom"]), expect: "fail", params: { ntp_server: "192.0.2.123" }, planIncludes: ['set server "192.0.2.123"', "delete 1"] },
       { config: 'config system ntp\n    set ntpsync enable\n    set type custom\n    config ntpserver\n        edit 1\n            set server "192.0.2.123"\n        next\n    end\nend\n', expect: "pass" },
       { config: fgFlat("system ntp", ["set syncinterval 60"]), expect: "pass" },
     ],

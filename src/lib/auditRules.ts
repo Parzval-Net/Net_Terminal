@@ -108,7 +108,11 @@ export interface ParamSpec {
 }
 
 export interface Waiver {
-  /** Texto (literal, no regex) que debe aparecer en la cabecera de la unidad; sin él aplica a toda la regla. */
+  /**
+   * Bloque (literal, no regex): palabras completas de la cabecera, del nombre o de la etiqueta de la unidad,
+   * o una ruta "bloque › subbloque" igual tramo a tramo (ver waiverMatches en audit.ts). Sin él aplica a
+   * toda la regla.
+   */
   match?: string;
   reason: string;
   approvedBy: string;
@@ -374,7 +378,8 @@ function checkTemplates(r: Record<string, unknown>, key: string, where: string, 
       continue;
     }
     for (const raw of lines as string[]) {
-      if (/[\r\n\0]/.test(raw)) errs.push(`${where}.${key}.${vendor}: una línea no puede tener saltos`);
+      // Sin saltos ni caracteres de control (tabulador, escape, retroceso): llegarían tal cual al equipo.
+      if (/[\u0000-\u001f\u007f]/.test(raw)) errs.push(`${where}.${key}.${vendor}: una línea no puede tener saltos ni caracteres de control`);
       let line = raw;
       for (;;) {
         const m = /^\?fail:([^:]+):|^\?!?current(?:\.([\w-]+))?:|^\?param:([^:]+):|^@each:([^:]+):/.exec(line);
