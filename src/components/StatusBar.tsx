@@ -64,15 +64,6 @@ interface Props {
   device?: DeviceInfo;
   /** Desactiva el modo solo lectura de la pestaña (el candado de la barra es el atajo del menú de la pestaña). */
   onToggleReadOnly?: () => void;
-  /**
-   * Ya no se usan: Desconectar vive en el menú de la pestaña y en la paleta; Buscar e Historial, en la
-   * barra de pestañas. Se aceptan para no romper a quien todavía los pase.
-   */
-  onDisconnect?: () => void;
-  onFind?: () => void;
-  onHistory?: () => void;
-  historyOpen?: boolean;
-  findOpen?: boolean;
 }
 
 /**

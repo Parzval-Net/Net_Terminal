@@ -1,6 +1,9 @@
 import { Expand, Maximize2, ZoomIn, ZoomOut } from "lucide-react";
 import { Btn } from "../ui";
 
+/** Estado presionado: el mismo del botón Tráfico (fondo seleccionado y borde de acento), no solo el color. */
+const PRESSED = "!bg-selected border !border-accent !text-accent";
+
 /** Controles de zoom del mapa: acercar, alejar, ajustar a la vista y ver todo. */
 export function ZoomControls({
   inset,
@@ -26,7 +29,7 @@ export function ZoomControls({
       </Btn>
       <Btn
         kind="ghost"
-        className={`!h-7 !w-7 !px-0 ${fit === "floor" ? "!text-accent" : ""}`}
+        className={`!h-7 !w-7 !px-0 ${fit === "floor" ? PRESSED : ""}`}
         aria-label="Ajustar a la vista"
         aria-pressed={fit === "floor"}
         title="Ajustar a la vista: tamaño legible, centrado en el equipo elegido o en el primero"
@@ -36,7 +39,7 @@ export function ZoomControls({
       </Btn>
       <Btn
         kind="ghost"
-        className={`!h-7 !w-7 !px-0 ${fit === "all" ? "!text-accent" : ""}`}
+        className={`!h-7 !w-7 !px-0 ${fit === "all" ? PRESSED : ""}`}
         aria-label="Ver todo"
         aria-pressed={fit === "all"}
         title="Ver todo: el diagrama completo, aunque los textos queden chicos"

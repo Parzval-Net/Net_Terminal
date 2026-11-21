@@ -91,6 +91,13 @@ export function TransferTool({
 
   return (
     <div className="space-y-3">
+      {/* Encabezado de la herramienta: título, propósito y acción a la derecha. TODO: usar ToolHeader de ui.tsx cuando exista. */}
+      <header className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-[15px] font-semibold leading-tight">Transferencias</h2>
+          <p className="mt-0.5 text-[12px] text-muted line-clamp-2">Mueve firmware, imágenes y configuraciones entre este PC y los equipos por TFTP, HTTP, FTP o SFTP.</p>
+        </div>
+      </header>
       <div role="tablist" aria-label="Transferencias" className="flex flex-wrap gap-1 border-b border-line">
         {TABS.map((t) => (
           <button

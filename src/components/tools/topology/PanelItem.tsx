@@ -450,6 +450,7 @@ export function SnapshotsSection({
     <Collapsible
       title="Snapshots y cambios"
       badge={diffCount || undefined}
+      badgeTone="neutral"
       summary={snapshot ? `Comparando con "${snapshot.name}"` : snapshots.length ? `${snapshots.length} guardados` : "Guarda una copia para comparar después"}
       open={open}
       onToggle={onToggle}

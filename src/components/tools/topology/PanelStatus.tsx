@@ -36,6 +36,8 @@ export function AttentionSection({
     <Collapsible
       title="Requieren atención"
       badge={attention.length || undefined}
+      // Rojo si hay equipos caídos; ámbar si solo hay carga alta o problemas.
+      badgeTone={attentionCount.down ? "danger" : "warn"}
       summary={
         attention.length
           ? [attentionCount.down && `${attentionCount.down} caído${attentionCount.down === 1 ? "" : "s"}`, attentionCount.load && `${attentionCount.load} por carga`, attentionCount.issues && plural(attentionCount.issues, "problema", "problemas")]
@@ -238,6 +240,8 @@ export function SuggestionsSection({
       <Collapsible
         title="Sugerencias"
         badge={suggestions.length}
+        // Neutro: son propuestas por confirmar, no fallas.
+        badgeTone="neutral"
         summary={suggestions.length ? "Confirma cada una antes de dibujarla" : "Sin sugerencias por ahora"}
         open={open}
         onToggle={onToggle}

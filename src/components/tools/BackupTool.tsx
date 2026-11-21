@@ -173,14 +173,19 @@ export default function BackupTool({
 
   return (
     <div className="space-y-4">
+      {/* Encabezado de la herramienta: título, propósito y acción a la derecha. TODO: usar ToolHeader de ui.tsx cuando exista. */}
+      <header className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-[15px] font-semibold leading-tight">Respaldos</h2>
+          <p className="mt-0.5 text-[12px] text-muted line-clamp-2">Guarda la configuración de los equipos conectados y compara versiones en el tiempo o entre equipos.</p>
+        </div>
+        <Btn kind="ghost" onClick={() => invoke("open_dir", { which: "backups" })} title="Abrir carpeta de respaldos">
+          <FolderOpen size={14} aria-hidden /> Abrir carpeta
+        </Btn>
+      </header>
       <Section
         title="Respaldar configuración"
         hint={`Ejecuta solo comandos de consulta, hasta ${CONCURRENCY} equipos a la vez`}
-        right={
-          <Btn kind="ghost" onClick={() => invoke("open_dir", { which: "backups" })} title="Abrir carpeta de respaldos">
-            <FolderOpen size={14} /> Carpeta
-          </Btn>
-        }
       >
         {devices.length === 0 ? (
           <p className="text-[12.5px] text-muted">
