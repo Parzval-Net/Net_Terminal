@@ -85,26 +85,35 @@ fn data_ready(state: &AppState) -> Result<(), String> {
     }
 }
 
+/// Trabajo bloqueante de un comando (red, disco, derivación de llaves) en el pool de bloqueo de
+/// tokio, como `connect` o `tool_ports`: no ocupa el hilo principal ni un worker asíncrono, que
+/// comparten las teclas (`write`) y las demás llamadas de la interfaz.
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String> {
     data_ready(&state)?;
     Ok(state.store.list())
 }
 
-#[tauri::command]
+// async: el guardado (fsync del archivo y de la carpeta) no detiene el hilo principal. El orden de
+// guardados sucesivos lo mantiene la interfaz (cola "sessions" de src/lib/api.ts).
+#[tauri::command(async)]
 fn save_session(session: Session, state: State<'_, AppState>) -> Result<Session, String> {
     data_ready(&state)?;
     state.store.save(session)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn update_sessions(sessions: Vec<Session>, state: State<'_, AppState>) -> Result<Vec<Session>, String> {
     data_ready(&state)?;
     state.store.update_many(sessions)
 }
 
 /// Agrega sesiones importadas en una sola escritura.
-#[tauri::command]
+#[tauri::command(async)]
 fn add_sessions(sessions: Vec<Session>, state: State<'_, AppState>) -> Result<Vec<Session>, String> {
     data_ready(&state)?;
     state.store.add_many(sessions)
@@ -280,24 +289,31 @@ fn vault_autolock_set(minutes: u32, on_sleep: bool, app: tauri::AppHandle, state
     Ok(())
 }
 
-#[tauri::command(async)]
-fn vault_create(master: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+// Los comandos de la bóveda derivan la llave (KDF de cientos de ms): van al pool de bloqueo.
+#[tauri::command]
+async fn vault_create(master: String, app: tauri::AppHandle) -> Result<(), String> {
     let master = zeroize::Zeroizing::new(master);
-    let r = creds_changed(&app, state.creds.create(&master));
-    arm_autolock(&app);
-    r
+    blocking(move || {
+        let r = creds_changed(&app, app.state::<AppState>().creds.create(&master));
+        arm_autolock(&app);
+        r
+    })
+    .await
 }
 
-#[tauri::command(async)]
-fn vault_unlock(master: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+#[tauri::command]
+async fn vault_unlock(master: String, app: tauri::AppHandle) -> Result<(), String> {
     let master = zeroize::Zeroizing::new(master);
-    let r = creds_changed(&app, state.creds.unlock(&master));
-    if r.is_ok() {
-        // Con la carpeta cifrada, la misma contraseña abrió también los datos.
-        datamode::after_unlock(&app);
-    }
-    arm_autolock(&app);
-    r
+    blocking(move || {
+        let r = creds_changed(&app, app.state::<AppState>().creds.unlock(&master));
+        if r.is_ok() {
+            // Con la carpeta cifrada, la misma contraseña abrió también los datos.
+            datamode::after_unlock(&app);
+        }
+        arm_autolock(&app);
+        r
+    })
+    .await
 }
 
 #[tauri::command]
@@ -308,18 +324,25 @@ fn vault_lock(app: tauri::AppHandle, state: State<'_, AppState>) {
     let _ = creds_changed(&app, Ok(()));
 }
 
-#[tauri::command(async)]
-fn vault_change(old: String, new: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+#[tauri::command]
+async fn vault_change(old: String, new: String, app: tauri::AppHandle) -> Result<(), String> {
     let (old, new) = (zeroize::Zeroizing::new(old), zeroize::Zeroizing::new(new));
-    let r = creds_changed(&app, state.creds.change(&old, &new));
-    arm_autolock(&app);
-    r
+    blocking(move || {
+        let r = creds_changed(&app, app.state::<AppState>().creds.change(&old, &new));
+        arm_autolock(&app);
+        r
+    })
+    .await
 }
 
-#[tauri::command(async)]
-fn vault_reset(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.bundle.clear();
-    creds_changed(&app, state.creds.reset())
+#[tauri::command]
+async fn vault_reset(app: tauri::AppHandle) -> Result<(), String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        state.bundle.clear();
+        creds_changed(&app, state.creds.reset())
+    })
+    .await
 }
 
 /// La conexión va al mismo destino que la sesión guardada: un frontend comprometido no puede
@@ -469,7 +492,8 @@ fn resize(id: String, cols: u16, rows: u16, state: State<'_, AppState>) -> Resul
     state.conns.resize(&id, cols, rows)
 }
 
-#[tauri::command]
+// async: cerrar la conexión (matar el proceso, cerrar el socket) no pasa por el hilo principal.
+#[tauri::command(async)]
 fn disconnect(id: String, state: State<'_, AppState>) {
     state.conns.disconnect(&id)
 }
@@ -482,9 +506,10 @@ fn set_read_only(id: String, on: bool, state: State<'_, AppState>) {
     state.conns.set_read_only(&id, on)
 }
 
+/// El Break serial dura 300 ms: se espera en el pool de bloqueo, no en el hilo principal.
 #[tauri::command]
-fn send_break(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.conns.send_break(&id)
+async fn send_break(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    blocking(move || app.state::<AppState>().conns.send_break(&id)).await
 }
 
 #[tauri::command]
@@ -595,13 +620,15 @@ fn read_note(name: String, state: State<'_, AppState>) -> Result<String, String>
     notes::read(&state.notes_dir(), &name)
 }
 
-#[tauri::command]
+// Guardar, renombrar y borrar notas: async (fsync fuera del hilo principal). El orden lo mantiene la
+// interfaz (cola "notes" de src/lib/api.ts), igual que con las sesiones.
+#[tauri::command(async)]
 fn save_note(name: String, content: String, state: State<'_, AppState>) -> Result<(), String> {
     data_ready(&state)?;
     notes::save(&state.notes_dir(), &name, &content)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_note(from: String, to: String, state: State<'_, AppState>) -> Result<String, String> {
     data_ready(&state)?;
     let name = notes::rename(&state.notes_dir(), &from, &to)?;
@@ -609,7 +636,7 @@ fn rename_note(from: String, to: String, state: State<'_, AppState>) -> Result<S
     Ok(name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_note(name: String, state: State<'_, AppState>) -> Result<(), String> {
     data_ready(&state)?;
     state.secure_notes.forget(&name);
@@ -990,19 +1017,21 @@ fn md5_hex(mut r: impl std::io::Read) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn tftp_delete(name: String, state: State<'_, AppState>) -> Result<(), String> {
     let root = state.data_dir.join("tftp");
     let path = servers::safe_path(&root, &name).ok_or("Nombre inválido")?;
     std::fs::remove_file(path).map_err(|e| e.to_string())
 }
 
+/// `lines = false`: no emite los eventos "line" (quien llama solo usa el resultado, como
+/// src/lib/deviceRun.ts). Sin indicarlo se emiten, como siempre.
 #[tauri::command]
-fn device_run(conn: String, command: String, timeout_secs: u64, answer: Option<bool>, app: tauri::AppHandle) -> Result<String, String> {
+fn device_run(conn: String, command: String, timeout_secs: u64, answer: Option<bool>, lines: Option<bool>, app: tauri::AppHandle) -> Result<String, String> {
     if app.state::<AppState>().scripts.owner(&conn).is_some() {
         return Err(scripts::BUSY.into());
     }
-    filexfer::run(app, conn, command, timeout_secs, answer.unwrap_or(true))
+    filexfer::run(app, conn, command, timeout_secs, answer.unwrap_or(true), lines.unwrap_or(true))
 }
 
 #[tauri::command(async)]
@@ -1090,17 +1119,18 @@ fn cmdpack_read(path: String) -> Result<serde_json::Value, String> {
     cmdpacks::read_external(&path)
 }
 
-#[tauri::command]
+// Packs: async; la interfaz los encola en "packs" (src/lib/api.ts) para conservar el orden.
+#[tauri::command(async)]
 fn cmdpack_save(pack: serde_json::Value, state: State<'_, AppState>) -> Result<String, String> {
     cmdpacks::save(&state.data_dir, &pack)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmdpack_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
     cmdpacks::delete(&state.data_dir, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cmdpack_export(id: String, dest: String, state: State<'_, AppState>) -> Result<(), String> {
     cmdpacks::export(&state.data_dir, &id, &dest)
 }
@@ -1132,7 +1162,7 @@ fn plugin_set_enabled(id: String, enabled: bool, state: State<'_, AppState>) -> 
     plugins::set_enabled(&state.data_dir, &id, enabled)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn plugin_uninstall(id: String, state: State<'_, AppState>) -> Result<(), String> {
     plugins::uninstall(&state.data_dir, &id)
 }

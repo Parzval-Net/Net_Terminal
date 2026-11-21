@@ -1164,14 +1164,20 @@ pub fn confirm_text(p: &PasswordCounts, path: &Path, master: bool) -> String {
 /// primero, el que toma Enter) con cuántas contraseñas de cada tipo y la ruta. Una llamada directa
 /// por IPC no puede escribirlas en otra parte ni sin que el usuario lo vea. `password`: la del
 /// archivo; `master`: la maestra, solo si se incluyen contraseñas con una bóveda de contraseña maestra.
-#[tauri::command(async)]
-pub fn bundle_export(
+/// KDF, diálogos y escritura corren en el pool de bloqueo (no en un worker asíncrono).
+#[tauri::command]
+pub async fn bundle_export(dest: Option<String>, password: String, master: Option<String>, opts: ExportOpts, app: tauri::AppHandle) -> Result<Summary, String> {
+    use tauri::Manager;
+    crate::blocking(move || export_blocking(dest, password, master, opts, &app, &app.state::<crate::AppState>())).await
+}
+
+fn export_blocking(
     dest: Option<String>,
     password: String,
     master: Option<String>,
     opts: ExportOpts,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, crate::AppState>,
+    app: &tauri::AppHandle,
+    state: &crate::AppState,
 ) -> Result<Summary, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
     // Carpeta cifrada bloqueada: no se exporta lo que haya en memoria.
@@ -1233,9 +1239,15 @@ pub fn bundle_export(
     Ok(sum)
 }
 
-/// Abre un `.ntx` y devuelve la vista previa (sin contraseñas). No escribe nada.
-#[tauri::command(async)]
-pub fn bundle_inspect(path: String, password: String, app: tauri::AppHandle, state: tauri::State<'_, crate::AppState>) -> Result<Preview, String> {
+/// Abre un `.ntx` y devuelve la vista previa (sin contraseñas). No escribe nada. Lectura y KDF en el
+/// pool de bloqueo.
+#[tauri::command]
+pub async fn bundle_inspect(path: String, password: String, app: tauri::AppHandle) -> Result<Preview, String> {
+    use tauri::Manager;
+    crate::blocking(move || inspect_blocking(path, password, app.clone(), &app.state::<crate::AppState>())).await
+}
+
+fn inspect_blocking(path: String, password: String, app: tauri::AppHandle, state: &crate::AppState) -> Result<Preview, String> {
     use tauri::Manager;
     if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {
         return Err(why.into());
@@ -1265,14 +1277,20 @@ pub fn bundle_inspect(path: String, password: String, app: tauri::AppHandle, sta
 }
 
 /// Aplica la importación confirmada en la vista previa. Avisa `creds-changed` si guardó contraseñas.
-#[tauri::command(async)]
-pub fn bundle_import_apply(
+/// Escrituras (y cifrado de contraseñas) en el pool de bloqueo.
+#[tauri::command]
+pub async fn bundle_import_apply(token: String, fresh: Vec<FreshItem>, updates: Vec<UpdateItem>, opts: ApplyOpts, app: tauri::AppHandle) -> Result<ApplyResult, String> {
+    use tauri::Manager;
+    crate::blocking(move || import_apply_blocking(token, fresh, updates, opts, &app, &app.state::<crate::AppState>())).await
+}
+
+fn import_apply_blocking(
     token: String,
     fresh: Vec<FreshItem>,
     updates: Vec<UpdateItem>,
     opts: ApplyOpts,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, crate::AppState>,
+    app: &tauri::AppHandle,
+    state: &crate::AppState,
 ) -> Result<ApplyResult, String> {
     use tauri::Emitter;
     if let Some(why) = crate::datacrypt::unavailable(&state.data_dir) {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { notesCall } from "../../lib/api";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ClipboardCopy, Download, Eye, FileText, FolderOpen, GitCompare, Play, RefreshCw, Square } from "lucide-react";
@@ -172,7 +173,7 @@ export default function BackupTool({
     try {
       const content = await invoke<string>("backup_read", { device, file });
       const name = `Respaldo ${device} ${file.replace(/\.txt$/, "")}`;
-      await invoke("save_note", { name, content });
+      await notesCall("save_note", { name, content });
       setMsg(`Copiado a Notas como "${name}"`);
     } catch (e) {
       fail(e);

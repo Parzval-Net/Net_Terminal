@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
+import { packsCall } from "../lib/api";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, Download, FileJson, Lock, Search, Upload, X } from "lucide-react";
 import { OS_VENDORS, Pack, Risk, Validation, buildCatalog, riskLabel, validatePack } from "../lib/packs";
@@ -53,7 +54,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
     if (packs.some((p) => p.builtin && p.id === pack.id)) return setError("Ese id corresponde a un pack incluido; cambia el id del pack");
     try {
       // Se guarda la versión ya validada y normalizada, nunca el archivo original.
-      await invoke("cmdpack_save", { pack: { ...pack, builtin: undefined } });
+      await packsCall("cmdpack_save", { pack: { ...pack, builtin: undefined } });
       setPreview(null);
       onChanged();
     } catch (e) {
@@ -64,7 +65,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
   const exportPack = async (id: string) => {
     const dest = await save({ defaultPath: `${id}.json`, filters: [{ name: "Pack de comandos", extensions: ["json"] }] });
     if (!dest) return;
-    await invoke("cmdpack_export", { id, dest }).catch((e) => setError(String(e)));
+    await packsCall("cmdpack_export", { id, dest }).catch((e) => setError(String(e)));
   };
 
   // Memorizado: mover o redimensionar la ventana vuelve a dibujar el modal.
@@ -216,7 +217,7 @@ export function PacksModal({ packs, disabled, onToggle, onChanged, onClose }: Pr
                             onCancel={() => setConfirmDelete((c) => (c === p.id ? null : c))}
                             onConfirm={async () => {
                               setConfirmDelete(null);
-                              await invoke("cmdpack_delete", { id: p.id }).catch((e) => setError(String(e)));
+                              await packsCall("cmdpack_delete", { id: p.id }).catch((e) => setError(String(e)));
                               onChanged();
                             }}
                           />

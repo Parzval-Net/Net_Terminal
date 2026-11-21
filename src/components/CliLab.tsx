@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ITheme } from "@xterm/xterm";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, CircleAlert, CircleCheck, Copy, Play, Plus, Save, Square, Terminal, X } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { notesCall } from "../lib/api";
 import { CodeEditor, RISK_MARK, RISK_TEXT, renderHighlighted, riskCount } from "./CodeEditor";
 import { cssColor } from "../lib/highlight";
 import { TargetOptions } from "./BroadcastTarget";
@@ -76,7 +76,7 @@ export function CliLab(p: Props) {
   /** Nota abierta en el Lab y su texto guardado (para saber si hay cambios). */
   const [note, setNote] = useState<{ name: string; saved: string } | null>(null);
   const [notes, setNotes] = useState<NoteInfo[]>([]);
-  const loadNotes = () => invoke<NoteInfo[]>("list_notes").then(setNotes, () => {});
+  const loadNotes = () => notesCall<NoteInfo[]>("list_notes").then(setNotes, () => {});
   useEffect(() => {
     loadNotes();
   }, []);
@@ -171,7 +171,7 @@ export function CliLab(p: Props) {
 
   const writeNote = async (name: string) => {
     try {
-      await invoke("save_note", { name, content: text });
+      await notesCall("save_note", { name, content: text });
     } catch (e) {
       setMsg(`No se pudo guardar: ${e}`);
       return false;
@@ -202,7 +202,7 @@ export function CliLab(p: Props) {
     // Abrir una nota reemplaza el texto: con cambios sin guardar se pregunta antes.
     if (dirty && !discard) return setReplacing(name);
     try {
-      const content = await invoke<string>("read_note", { name });
+      const content = await notesCall<string>("read_note", { name });
       setText(content);
       setNote({ name, saved: content });
       setValues({});
