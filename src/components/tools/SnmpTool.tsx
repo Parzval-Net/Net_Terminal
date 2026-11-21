@@ -34,6 +34,8 @@ import {
 } from "../../lib/snmp";
 import { Btn, Label, Section, StatusPill, ToolHeader, Toggle } from "./ui";
 import { useLocalIp } from "./useLocalIp";
+import { Segmented } from "../controls";
+import { stepIndex } from "../../lib/kbNav";
 import SnmpConfigGen from "./SnmpConfigGen";
 
 import { plural } from "../../lib/plural";
@@ -80,16 +82,18 @@ export default function SnmpTool(props: Props) {
         title="SNMP"
         description="Cliente de prueba de solo lectura, conjuntos de OIDs por MIB estándar, receptor de traps y generador de configuración del agente."
       />
-      <div className="inline-flex rounded-md border border-line p-0.5" role="tablist" aria-label="Vista de SNMP">
+      {/* Mismo estilo de pestañas que Transferencias: subrayado de acento bajo la activa. */}
+      <div className="flex flex-wrap gap-1 border-b border-line" role="tablist" aria-label="Vista de SNMP">
         {TABS.map((t) => (
           <button
             key={t.id}
             id={`${id}-tab-${t.id}`}
             role="tab"
             aria-selected={tab === t.id}
+            type="button"
             aria-controls={`${id}-panel-${t.id}`}
             onClick={() => setTab(t.id)}
-            className={`px-2.5 h-7 rounded text-body-sm ${tab === t.id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg"}`}
+            className={`h-8 px-3 -mb-px border-b-2 text-[12.5px] ${tab === t.id ? "border-[var(--accent)] text-fg font-medium" : "border-transparent text-muted hover:text-fg"}`}
           >
             {t.label}
           </button>
@@ -396,18 +400,13 @@ function QuerySection({ target, profile }: { target: TargetFn; profile: SnmpProf
       hint={profile.version === "1" ? "SNMPv1 no tiene GETBULK: WALK usa GETNEXT." : "WALK usa GETBULK con las repeticiones indicadas."}
     >
       <div className="flex flex-wrap items-end gap-3">
-        <div className="inline-flex rounded-md border border-line p-0.5">
-          {OPS.map((o) => (
-            <button
-              key={o.id}
-              disabled={o.id === "getbulk" && profile.version === "1"}
-              onClick={() => setOp(o.id)}
-              className={`px-2.5 h-7 rounded text-body-sm disabled:opacity-40 ${op === o.id ? "bg-selected text-fg font-medium" : "text-muted hover:text-fg"}`}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
+        {/* SNMPv1 no tiene GETBULK: la opción no se ofrece (el hint de la sección lo explica). */}
+        <Segmented
+          label="Operación SNMP"
+          value={op}
+          onChange={setOp}
+          options={OPS.filter((o) => o.id !== "getbulk" || profile.version !== "1").map((o) => [o.id, o.label] as const)}
+        />
         <Label text={op === "walk" ? "OID raíz" : "OID (varios separados por espacio)"} className="flex-1 min-w-[260px]">
           <input
             className="field font-mono"
@@ -597,24 +596,57 @@ function PresetsSection({ target, profile, onConfirm }: { target: TargetFn; prof
     });
   };
 
+  // Tab entra por el conjunto elegido (o el primero) y las flechas recorren los demás.
+  const panelId = useId();
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const tabStop = Math.max(0, PRESETS.findIndex((p) => p.id === res?.preset.id));
+  const onTabsKey = (e: React.KeyboardEvent) => {
+    const tabs = [...(tabsRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [])];
+    const to = stepIndex(e.key, tabs.indexOf(document.activeElement as HTMLButtonElement), tabs.length, { orientation: "horizontal" });
+    if (to < 0) return;
+    e.preventDefault();
+    tabs[to].focus();
+  };
+
   const t = res?.table;
   const csv = () => (t ? tableToCsv(t) : (res?.scalars ?? []).map((x) => [x.col.label, formatCell(x.col, x.row)].map(csvCell).join(",")).join("\n"));
 
   return (
     <Section title="Conjuntos de OIDs" hint="Telemetría por MIB estándar, en tablas. Solo lectura.">
-      <div className="flex flex-wrap items-center gap-2">
-        {PRESETS.map((p) => (
-          <Btn key={p.id} kind={res?.preset.id === p.id ? "primary" : "default"} disabled={!!busy || !profile.host.trim()} title={p.hint} onClick={() => load(p)}>
-            {busy === p.id ? "Leyendo…" : p.label}
-          </Btn>
-        ))}
-        <span className="ml-auto">
+      {/*
+        Conjuntos como pestañas (mismo estilo que Transferencias): la tabla de abajo es el panel del
+        conjunto elegido. Activación manual (WAI-ARIA Tabs): las flechas solo mueven el foco y Enter o
+        Espacio leen el conjunto, para no lanzar una consulta SNMP por cada flecha.
+      */}
+      <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+        <div ref={tabsRef} role="tablist" aria-label="Conjuntos de OIDs" onKeyDown={onTabsKey} className="flex flex-wrap gap-1 flex-1 min-w-0 border-b border-line">
+          {PRESETS.map((p, i) => {
+            const on = res?.preset.id === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                role="tab"
+                aria-selected={on}
+                aria-controls={res ? panelId : undefined}
+                tabIndex={i === tabStop ? 0 : -1}
+                disabled={!!busy || !profile.host.trim()}
+                title={p.hint}
+                onClick={() => load(p)}
+                className={`h-8 px-3 -mb-px border-b-2 text-[12.5px] whitespace-nowrap disabled:opacity-40 ${on ? "border-[var(--accent)] text-fg font-medium" : "border-transparent text-muted hover:text-fg"}`}
+              >
+                {busy === p.id ? "Leyendo…" : p.label}
+              </button>
+            );
+          })}
+        </div>
+        <span className="shrink-0 pb-1">
           <Toggle checked={params} onChange={toggleParams} label="Parámetros de procesos (sensible)" />
         </span>
       </div>
       {error && <p className="mt-2 text-body-sm text-danger">{error}</p>}
       {res && (
-        <div className="mt-3">
+        <div id={panelId} role="tabpanel" aria-label={res.preset.label} className="mt-3">
           <div className="flex items-center gap-2 mb-2">
             <span className="min-w-0 text-body-sm text-muted line-clamp-2" title={res.preset.hint}>
               {res.preset.hint}
