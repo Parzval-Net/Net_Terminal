@@ -19,6 +19,7 @@ Detalle técnico de NetTerminal: funciones completas, seguridad, formatos, API d
 - [Packs de comandos](#packs-de-comandos)
 - [Topología CDP / LLDP, ruteo y manual](#topología-cdp--lldp-ruteo-y-manual)
 - [CLI Lab](#cli-lab)
+- [Auditoría de seguridad](#auditoría-de-seguridad)
 - [API local para otras aplicaciones](#api-local-para-otras-aplicaciones)
 - [Diagramas en notas (Mermaid)](#diagramas-en-notas-mermaid)
 - [Ciclo de vida del equipo (EoL)](#ciclo-de-vida-del-equipo-eol)
@@ -78,6 +79,7 @@ Construido con [Tauri 2](https://tauri.app) (backend en Rust) y xterm.js. Usa el
 | Enviar a varias sesiones | Desde Notas, catálogo o botones: pestaña actual, pestañas elegidas, una carpeta o los paneles visibles. Confirma con la lista de equipos y el riesgo de cada línea (los cambios exigen escribir la cantidad de equipos), envía en secuencia y se puede detener. |
 | Alertas | Reglas por texto o expresión (globales o por carpeta) que avisan en pantalla, con sonido y marca en la pestaña. Máximo un aviso cada 10 s por regla y sesión; nunca envían comandos. Sin reglas no consumen nada. |
 | Respaldos | Respaldo de configuración (solo comandos de consulta, hasta 3 equipos a la vez) en `data/backups`, con secretos enmascarados, y comparación entre fechas o entre equipos. Entre fechas del mismo equipo marca "secreto cambiado" cuando cambia un valor enmascarado: guarda una huella HMAC-SHA256 por secreto con una llave aleatoria del equipo, nunca el secreto. Una lectura cortada (plazo de 300 s, sesión cerrada, tope de salida o de páginas) no se guarda: el equipo queda en error «Respaldo incompleto» (`prepareBackup` en `src/lib/backup.ts`). La limpieza quita la cabecera variable (bytes de IOS, `! NVRAM config last updated`, `!Command:`, `!Time:` y `!Running configuration last done at:` de NX-OS) y el estado del nodo de Junos en cluster o VC (`{primary:node0}`), para que dos respaldos sin cambios salgan iguales. «Detener» no inicia más equipos, muestra «Deteniendo…» mientras terminan los que están en curso, y los que no alcanzaron a iniciar quedan como «Omitido». |
+| Auditoría de seguridad | Herramientas › Seguridad › Auditoría. Revisa la configuración de Cisco IOS/IOS-XE y FortiOS (de un respaldo, de una pestaña conectada con un comando de consulta, pegada o de un archivo) contra reglas de hardening editables, con puntaje ponderado, riesgo, cobertura declarada y evidencia enmascarada, y arma un plan de corrección con rollback que se abre en CLI Lab sin ejecutarse. Todo local, sin red ni IA. Ver [Auditoría de seguridad](#auditoría-de-seguridad). |
 | CLI Lab | Editor de scripts multilínea (botón "CLI Lab" de la barra de actividad, ⌘I / Ctrl+Shift+I o la paleta), inspirado en el CLI Code Lab de FortiOS 8.0. Ejecuta línea a línea en el destino elegido leyendo cada respuesta, se detiene al primer error de CLI y muestra la salida por equipo. Ver [CLI Lab](#cli-lab). |
 | Exportar | Sesiones elegidas (por carpeta, filtro o una a una) a XML con el esquema de SecureCRT, que se abre en SecureCRT y se reimporta en NetTerminal, o a JSON en el portapapeles (nunca con contraseñas ni comandos al conectar). También a **archivo cifrado (.ntx)** con sesiones, carpetas, ajustes y extras, y opcionalmente las contraseñas de la bóveda ([detalle](#archivo-cifrado-de-netterminal-ntx)). Desde Ajustes › Sesiones, el menú de una carpeta o la paleta. |
 | Importar | Sesiones desde `~/.ssh/config`, PuTTY (.reg), SecureCRT (XML), MobaXterm (.mobaconf/.mxtsessions) y CSV (hasta 64 MB), con vista previa. Al reimportar, las sesiones que ya existen en la misma carpeta con el mismo nombre se marcan "Cambia" y se puede elegir sobrescribir sus datos de conexión (se conservan contraseña guardada, comandos al conectar, túneles y resaltado) u omitirlas. De otros clientes nunca importa contraseñas, comandos al conectar, proxies ni túneles. El archivo cifrado (.ntx) de NetTerminal pide su contraseña y usa la misma vista previa ([detalle](#archivo-cifrado-de-netterminal-ntx)). |
@@ -394,7 +396,7 @@ Suspensión, sin dependencias nuevas: (a) al usar la bóveda, si la hora del sis
 
 ### Modo portable cifrado
 
-Opcional, apagado por defecto y solo en la edición portable (Ajustes › Credenciales › Cifrado de la carpeta portable). Cifra en reposo, con la contraseña maestra de la bóveda: sesiones, ajustes, topología, notas (las no protegidas), historial de comandos y destinos recientes, respaldos de configuración (con su llave y huellas de secretos), logs de sesión (también en una carpeta de logs elegida por el usuario) y auditoría MCP, más todas sus copias (`.bak`, `.bak2`, `.v<N>.bak.json`, `*.corrupt-<fecha>.json`). Código: `src-tauri/src/datacrypt.rs` (formato, llave de datos, capa de archivos, conversión), `datamode.rs` (comandos), `credentials.rs` (desbloqueo y bloqueo junto con la bóveda), `src/lib/dataCrypt.ts`, `components/DataGate.tsx`, `DataCryptSettings.tsx` y `FileViewer.tsx`.
+Opcional, apagado por defecto y solo en la edición portable (Ajustes › Credenciales › Cifrado de la carpeta portable). Cifra en reposo, con la contraseña maestra de la bóveda: sesiones, ajustes, topología, notas (las no protegidas), historial de comandos y destinos recientes, respaldos de configuración (con su llave y huellas de secretos), packs de reglas de auditoría (`audit-rules/`), logs de sesión (también en una carpeta de logs elegida por el usuario) y auditoría MCP, más todas sus copias (`.bak`, `.bak2`, `.v<N>.bak.json`, `*.corrupt-<fecha>.json`). Código: `src-tauri/src/datacrypt.rs` (formato, llave de datos, capa de archivos, conversión), `datamode.rs` (comandos), `credentials.rs` (desbloqueo y bloqueo junto con la bóveda), `src/lib/dataCrypt.ts`, `components/DataGate.tsx`, `DataCryptSettings.tsx` y `FileViewer.tsx`.
 
 **Llaves.** Una llave de datos aleatoria de 256 bits (DEK) cifra todo. `datakey.ntk` la guarda envuelta con XChaCha20-Poly1305 por una llave derivada de la maestra con Argon2id (los mismos parámetros que la bóveda: 64 MiB, t = 3, p = 1; al leer se aceptan hasta 256 MiB, t = 10, p = 8). Es independiente de `credentials.vault`: borrar o dañar la bóveda no deja los datos sin llave. Al desbloquear corren en paralelo las dos derivaciones (bóveda y datos). Cambiar la maestra reenvuelve la DEK sin recifrar nada, con dos ranuras y en este orden: (1) se agrega la ranura de la nueva y se conserva solo la ranura que abrió la contraseña actual (con dos ranuras de un cambio anterior cortado, nunca se descarta la que sigue abriendo la bóveda), (2) se reescribe la bóveda, (3) se quita la vieja. Un corte en cualquier punto deja una contraseña que abre todo (probado en cada punto, también con dos ranuras previas); al desbloquear con dos ranuras se poda la que no abrió la bóveda. Restablecer la bóveda se rechaza con la carpeta cifrada. Las llaves en memoria son `Zeroizing` y se borran al bloquear.
 
@@ -587,6 +589,93 @@ Script de varios comandos para una o varias sesiones sin crear botones. La idea 
 - **Sin mezclar envíos**: mientras el CLI Lab ejecuta, no se puede iniciar un envío a varias sesiones, y un botón, Notas o el catálogo no envían a las pestañas que el Lab está usando (se avisa). Tampoco se inicia el Lab durante un envío a varias sesiones.
 - **Resultado**: estado por equipo (OK, error, detenido, omitido si se desconectó), la salida de cada comando con el que falló marcado, y "Copiar informe" con todo en texto plano. El resultado sigue disponible al cerrar la ventana.
 - Pruebas: `node scripts/tests/cliLab.test.mjs` y `node scripts/tests/assistants.test.mjs` (Detener, secretos cortos en el eco, Enter en la confirmación).
+
+## Auditoría de seguridad
+
+Herramientas › Seguridad › Auditoría (se puede ocultar en Ajustes › Módulos). Revisa el texto de la configuración de un equipo contra reglas declarativas y propone cómo corregir lo que falla. La prioridad es Cisco IOS/IOS-XE y FortiOS: son los únicos fabricantes con pack integrado. El parser también entiende Huawei VRP, Junos (`display set`) y Arista para reglas propias o importadas.
+
+- **Todo local.** No hay red ni IA. La herramienta nunca envía cambios al equipo: solo lee la configuración con un comando que el motor de riesgo clasifica como consulta (`computeRisk`), y el plan se ejecuta, si el usuario quiere, desde CLI Lab con su confirmación de equipos y riesgo por línea.
+- **Secretos enmascarados.** Toda evidencia, el plan, el rollback y las exportaciones pasan por `maskLine` (la misma lógica que `mask_line` de `backups.rs`). Una línea del plan que dependería de un valor enmascarado queda como comentario con aviso. Los parámetros secretos nunca se escriben: quedan como `{{x}}` y CLI Lab los pide en un campo oculto.
+- **Sin eval.** Las reglas son datos. Cada regex pasa por el validador anti-ReDoS de la app (`riskyRegex` de `highlight.ts`, que usa `redosRisk` de `regexSafety.ts`) antes de compilarse: al importar, al guardar y en el editor.
+
+### Flujo en 3 pasos
+
+1. **Fuente.** Respaldo guardado (`backup_list`/`backup_read`), pestaña conectada (comando de lectura editable y validado como consulta; la salida pasa por `cleanConfig` y `configProblem`, una lectura cortada no se audita y se puede guardar también como respaldo enmascarado), o pegar/abrir archivo (`audit_read_config`, hasta 20 MB). El fabricante se detecta por heurística (`#config-version` o bloques `config`/`edit`/`set` para FortiOS; `version`, `hostname` o `line vty` para Cisco) y se puede corregir a mano. En FortiOS conviene `show full-configuration`: `show` omite los valores por defecto y produce falsos positivos.
+2. **Resultado.** Puntaje ponderado (anillo y texto), nivel de riesgo con sus motivos, conteos por estado, cobertura declarada y el aviso de que el mapeo ISO es interpretación propia. Hallazgos agrupados por severidad, con filtros por estado, severidad y texto. Cada hallazgo muestra controles, capa y pack que lo definió, notas, cambios de capa y, por bloque, la evidencia enmascarada con número de línea. "Crear excepción…" lleva a la Biblioteca con la regla y el bloque ya elegidos. Exporta HTML autocontenido (con el plan si hay uno), CSV (UTF-8 con BOM, una fila por bloque) y JSON (con hash SHA-256 del input y versión y hash de cada pack).
+3. **Plan.** Casillas para elegir qué corregir (por defecto, lo que no cumple y tiene corrección automática), parámetros con validación (`paramValueError`: sin saltos, sin `{{ }}`, sin comillas en FortiOS y con el patrón de la regla), plan con el riesgo de cada línea (▲ cambio, ✕ puede cortar servicio) y rollback aparte. Copiar, Exportar .txt y "Abrir en CLI Lab", que precarga el script en el editor del Lab sin ejecutarlo (`openLab(script)`; reemplaza el borrador). Las correcciones manuales quedan como comentario y las guiadas llevan el aviso de revisar valores.
+
+### Puntaje y alcance honesto
+
+- Pesos visibles: crítica 10, alta 5, media 3, baja 1, informativa 0. `puntaje = Σ peso(cumple) / Σ peso(cumple + no cumple)`. "Revisar", "no aplica" y "excepción" quedan fuera del denominador y se informan aparte. Se muestra con un decimal (2 de 29 es 6,9 %, no 6 %).
+- Riesgo: crítico con algún incumplimiento crítico; alto con algún incumplimiento alto o con el puntaje bajo el umbral (70 % por defecto, propuesta sin validar con datos); medio con incumplimientos medios; bajo en el resto.
+- Cobertura declarada: "N reglas evaluadas, que tocan X de 93 controles del Anexo A de ISO/IEC 27001:2022". El mapeo a ISO es una interpretación propia de NetTerminal: el puntaje no es un porcentaje de cumplimiento de la norma ni una certificación.
+- La auditoría ve solo el texto de la configuración: no ve rutas, ACL efectivas, topología ni el estado del equipo.
+- Los valores por defecto de FortiOS que asumen las reglas integradas (por ejemplo `strong-crypto`, `admintimeout`, `admin-sport`, `pre-login-banner`, NTP) no están verificados en equipos por versión. Donde la versión no se puede determinar, la regla cae a "revisar" o muestra el supuesto en la evidencia.
+- CIS y STIG se citan solo por ID en `refs`; ninguna regla copia su texto. Hoy los packs integrados no traen referencias CIS ni STIG. Antes de distribuir fuera de la organización conviene una revisión legal.
+- La evaluación corre en el hilo de la interfaz: una configuración de varios MB puede tardar unos segundos.
+
+### Biblioteca de reglas y capas
+
+- **Capas:** integrada (`src/lib/auditBuiltin.ts`) < importada < usuario. Una regla con el mismo id en una capa posterior reemplaza a la anterior; los `overrides` (activar o desactivar, severidad, valores por defecto de parámetros no secretos) y las excepciones se aplican sobre lo que haya en ese momento. El resultado informa la capa, el pack y los cambios de cada regla.
+- **Mis reglas** (`mis-reglas`, capa usuario): activar o desactivar y cambiar severidad desde la lista (se guardan como `overrides`), reglas propias desde el formulario y excepciones. Cada cambio sube la versión del pack (1.0.3 → 1.0.4) para que el informe distinga versiones. La auditoría cargada se recalcula sola.
+- **Regla propia:** id, título, severidad, fabricante, bloque e hijo opcionales (regex de la línea que abre el bloque, sin indentación), condición "debe existir" o "no debe existir" sobre una línea (regex sin indentación, sin distinguir mayúsculas), controles ISO (se valida que existan en el Anexo A de 2022) y del estándar interno, corrección y rollback por líneas y una nota. La prueba en vivo evalúa la regla mientras se escribe contra la configuración cargada en Auditar o contra un ejemplo propio, que se puede guardar como prueba embebida. Las reglas con opciones avanzadas (capturas, parámetros, `compute`) se editan en el JSON.
+- **Excepciones:** regla, bloque opcional (texto literal de la cabecera, p. ej. `edit "breakglass"`), motivo, aprobador y vencimiento obligatorios, y ticket opcional. Vencida, deja de aplicar y el informe la muestra como vencida.
+- **Importar:** el archivo se lee como texto (hasta 512 KB) y se valida con `validateRulePack`: esquema, ids únicos, severidad, fabricante, controles ISO, plantillas y ReDoS. Con errores no se carga nada y se listan los motivos. Antes de instalar se corren las pruebas embebidas (`testRule`) y se avisa si alguna falla. No se acepta el id de un pack integrado ni el de Mis reglas.
+- **Guardado:** `<datos>/audit-rules/<capa>-<id>.json` (`src-tauri/src/auditrules.rs`), con escritura atómica (`seal::write_atomic`) a través de la capa de archivos de `datacrypt`: en el modo portable cifrado quedan cifrados y se convierten junto con el resto. Al leerlos se revalidan; un archivo dañado o alterado aparece como "No se carga" con su motivo, en vez de ocultarse.
+
+### Formato de regla
+
+Pack JSON (`netterminal-rules`, `formatVersion` 1). Una regla mínima y otra con bloque, parámetro, corrección y rollback:
+
+```json
+{
+  "format": "netterminal-rules",
+  "formatVersion": 1,
+  "id": "hardening-campus",
+  "name": "Hardening campus",
+  "version": "1.0.0",
+  "owner": "equipo-redes",
+  "rules": [
+    {
+      "id": "USR-IOS-DOM-001",
+      "title": "Dominio DNS configurado",
+      "severity": "low",
+      "vendor": "cisco",
+      "platforms": ["ios", "ios-xe"],
+      "controls": [{ "framework": "ISO/IEC 27001:2022", "control": "A.8.9" }],
+      "check": { "type": "present", "match": "^ip domain[ -]name \\S+" },
+      "tests": [{ "config": "ip domain name ejemplo.test\n", "expect": "pass" }]
+    },
+    {
+      "id": "USR-FGT-ADM-001",
+      "title": "Todo admin con trusthost",
+      "severity": "high",
+      "vendor": "fortinet",
+      "controls": [
+        { "framework": "ISO/IEC 27001:2022", "control": "A.8.5" },
+        { "framework": "Estándar interno", "control": "HRD-ADM-03" }
+      ],
+      "scope": { "block": "^config system admin$", "child": "^edit ", "each": true },
+      "check": { "type": "present", "match": "^set trusthost1 " },
+      "fix": "guided",
+      "params": { "mgmt_net": { "prompt": "Red de gestión", "example": "192.0.2.0 255.255.255.0", "required": true, "pattern": "^[0-9./ ]{7,40}$" } },
+      "remediation": { "fortinet": ["{{block}}", "{{child}}", "set trusthost1 {{mgmt_net}}", "next", "end"] },
+      "rollback": { "fortinet": ["{{block}}", "{{child}}", "unset trusthost1", "next", "end"] }
+    }
+  ],
+  "overrides": [{ "rule": "NT-FOS-IF-001", "enabled": false, "reason": "Interfaces documentadas en la CMDB" }],
+  "waivers": [{ "rule": "USR-FGT-ADM-001", "match": "edit \"breakglass\"", "reason": "Cuenta de emergencia", "approvedBy": "CISO", "expires": "2027-03-31" }]
+}
+```
+
+- **Condiciones** (`check`, `applicable`, `scope.where`): `present` (alguna línea calza) y `absent` (ninguna calza; las que calzan son la evidencia); `regex` (toda línea elegida por `select` debe calzar con `match`); `value` (captura el primer grupo de `key` y lo compara con `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `notIn`, `contains`, `containsAny`, `containsNone`, `noneMatch` o `allMatch`; `default` es el valor supuesto si la línea no aparece); `all` y `any` para componer (hasta 5 niveles). `deep` busca en todo el subárbol y `matchCase` distingue mayúsculas. Un `id` en la condición sirve para las plantillas.
+- **Ámbito:** `scope.block` (regex de la línea de la raíz que abre el bloque), `child` (hijos que son la unidad, p. ej. `^edit `), `each` (cada bloque por separado) y `where` (filtro). `missingScope` decide el estado si el bloque no existe (por defecto "no aplica"), `defaultState` si falta el dato (por defecto "revisar"), `onFail: "review"` convierte un incumplimiento en "revisar" y `reviewIf` pasa a revisar cuando una línea calza (p. ej. una comunidad enmascarada).
+- **Estados:** cumple, no cumple, revisar (la regla no puede decidir), no aplica (plataforma o función ausente) y excepción (vigente).
+- **Plantillas** de `remediation`, `rollback`, `prepare` y `rollbackPrepare` (una línea por comando, por fabricante). Variables: `{{block}}` (cabecera del bloque), `{{child}}` (cabecera del hijo), `{{name}}`, `{{current}}` y `{{current.x}}` (valores capturados con `capture`, ya enmascarados), `{{computed}}` (resultado de `compute`), `{{line}}` (dentro de `@each`) y `{{<parámetro>}}`. Prefijos encadenables: `?fail:<id>:` (solo si falló la condición `<id>`), `?current:` y `?!current:` (o `?current.x:`; si hay o no valor capturado), `?param:<nombre>:` (si el parámetro tiene valor) y `@each:<id>:` (repite la línea por cada línea que hizo fallar la condición `<id>`). En Cisco una línea que empieza con espacio va dentro del bloque anterior; en FortiOS el anidamiento sale de `config`/`edit`/`next`/`end`. Las líneas con `!` (Cisco) o `#` (FortiOS) son comentarios.
+- **Plan:** `prepare` va antes de todo, `after` ordena reglas que dependen de otras (p. ej. la llave SSH antes de restringir VTY), no se repiten aperturas de bloque y el rollback se arma en orden inverso. Un parámetro `secret` debe llamarse con pass, pwd, secret, key o similar, nunca tiene valor por defecto y siempre queda como variable.
+- **Pruebas embebidas** (`tests`): `config`, `expect` y, opcionalmente, `params` y `planIncludes` (líneas que deben aparecer en el plan). Las corre `testRule` al importar y la suite de pruebas para el pack integrado.
+
+Código: `src/lib/auditParse.ts` (parser por familia, detección y enmascarado), `auditRules.ts` (formato, validación y capas), `audit.ts` (evaluación, puntaje, plan y exportaciones), `auditBuiltin.ts` (packs integrados), `auditLib.ts` (Mis reglas, formulario y filtros), `components/tools/AuditTool.tsx` y `AuditLibrary.tsx`, `src-tauri/src/auditrules.rs`. Pruebas: `node scripts/tests/audit.test.mjs` (motor, packs integrados, plan y exportaciones) y `node scripts/tests/auditLib.test.mjs` (Mis reglas, formulario, filtros y `openLab(script)`); en Rust, `cargo test auditrules`. Demo: `demo.html?scene=audit`, `audit-cisco`, `audit-plan` y `audit-library`.
 
 ## API local para otras aplicaciones
 

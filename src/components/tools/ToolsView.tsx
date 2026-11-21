@@ -1,7 +1,7 @@
 import { Suspense, lazy, memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Activity, ArrowDownUp, Calculator, DatabaseBackup, FileSearch, Gauge, Network, Puzzle, Radar, ScrollText, SquareTerminal, Waypoints, Wrench, X } from "lucide-react";
+import { Activity, ArrowDownUp, Calculator, DatabaseBackup, FileSearch, Gauge, Network, Puzzle, Radar, ScrollText, ShieldCheck, SquareTerminal, Waypoints, Wrench, X } from "lucide-react";
 import { TopologyTool } from "./TopologyTool";
 import type { Session } from "../../types";
 import { ModuleId, Settings, SpeedResult } from "../../lib/settings";
@@ -24,6 +24,8 @@ const BackupTool = lazy(() => import("./BackupTool"));
 const SnmpTool = lazy(() => import("./SnmpTool"));
 // Búsqueda en logs y respaldos: solo se descarga al abrir el módulo.
 const LogSearchTool = lazy(() => import("./LogSearchTool"));
+// Auditoría de seguridad: motor de reglas y packs integrados, solo al abrir el módulo.
+const AuditTool = lazy(() => import("./AuditTool"));
 
 const NAV: { id: ModuleId; label: string; Icon: typeof Activity }[] = [
   { id: "monitor", label: "Monitoreo", Icon: Activity },
@@ -37,13 +39,15 @@ const NAV: { id: ModuleId; label: string; Icon: typeof Activity }[] = [
   { id: "backup", label: "Respaldos", Icon: DatabaseBackup },
   { id: "logsearch", label: "Buscar en logs", Icon: FileSearch },
   { id: "plugins", label: "Plugins", Icon: Puzzle },
+  { id: "audit", label: "Auditoría", Icon: ShieldCheck },
 ];
 
-/** Encabezados del menú: qué se mira (Monitorear), el mapa y los cálculos (Red) y lo que se ejecuta (Operar). */
+/** Encabezados del menú: qué se mira (Monitorear), el mapa y los cálculos (Red), lo que se ejecuta (Operar) y la revisión de hardening (Seguridad). */
 const GROUPS: { label: string; ids: ModuleId[] }[] = [
   { label: "Monitorear", ids: ["monitor", "diag", "syslog", "snmp"] },
   { label: "Red", ids: ["topology", "subnet", "perf"] },
   { label: "Operar", ids: ["transfer", "backup", "logsearch", "plugins"] },
+  { label: "Seguridad", ids: ["audit"] },
 ];
 
 /** Último módulo usado, para volver donde se estaba al reabrir Herramientas. */
@@ -198,6 +202,12 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         return (
           <Suspense fallback={null}>
             <BackupTool terminals={terminals} totalSessions={sessions.length} />
+          </Suspense>
+        );
+      case "audit":
+        return (
+          <Suspense fallback={null}>
+            <AuditTool terminals={terminals} onConfirm={onConfirm} />
           </Suspense>
         );
       case "logsearch":

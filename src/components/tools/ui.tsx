@@ -279,3 +279,57 @@ export const fmtBytes = (n: number) =>
   n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : n >= 1e3 ? `${(n / 1e3).toFixed(0)} KB` : `${n} B`;
 
 export const fmtMs = (v: number | null | undefined) => (v == null ? "—" : `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} ms`);
+
+/**
+ * Paso numerado de un flujo (Transferencias, Auditoría). El número (o un check cuando está listo) va
+ * junto al título y el estado se anuncia también en texto, no solo con color. Va dentro de un <ol>.
+ */
+export function Step({
+  n,
+  total = 3,
+  title,
+  hint,
+  done,
+  right,
+  className = "",
+  children,
+}: {
+  n: number;
+  total?: number;
+  title: string;
+  hint?: string;
+  done?: boolean;
+  right?: React.ReactNode;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const id = useId();
+  return (
+    <li aria-labelledby={id} className={`min-w-0 rounded-xl border border-line bg-panel ${className}`}>
+      <header className="flex items-start gap-2.5 px-4 pt-3 pb-2">
+        <span
+          aria-hidden
+          className={`mt-px shrink-0 w-6 h-6 grid place-items-center rounded-full text-[12px] font-semibold tabular-nums ${done ? "bg-ok text-white" : "border-2 border-[var(--accent)] text-[var(--accent)]"}`}
+        >
+          {done ? <Check size={13} strokeWidth={3} /> : n}
+        </span>
+        <div className="flex-1 min-w-0">
+          <h3 id={id} className="text-[13px] font-semibold truncate">
+            <span className="sr-only">
+              Paso {n} de {total}:{" "}
+            </span>
+            {title}
+            <span className="sr-only">{done ? " (listo)" : " (pendiente)"}</span>
+          </h3>
+          {hint && (
+            <p className="text-[11.5px] text-muted line-clamp-2" title={hint}>
+              {hint}
+            </p>
+          )}
+        </div>
+        {right}
+      </header>
+      <div className="px-4 pb-4">{children}</div>
+    </li>
+  );
+}

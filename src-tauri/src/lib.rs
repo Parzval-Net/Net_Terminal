@@ -1,3 +1,4 @@
+mod auditrules;
 mod autofill;
 mod backups;
 mod bundle;
@@ -1036,7 +1037,7 @@ fn app_version() -> &'static str {
 /// Guarda un texto (exportaciones de diagramas, tablas) en la ruta elegida por el usuario.
 #[tauri::command(async)]
 fn save_text(dest: String, content: String) -> Result<(), String> {
-    let ok_ext = ["svg", "csv", "md", "mmd", "txt", "json", "drawio", "xml"];
+    let ok_ext = ["svg", "csv", "md", "mmd", "txt", "json", "drawio", "xml", "html"];
     let ext = std::path::Path::new(&dest)
         .extension()
         .and_then(|e| e.to_str())
@@ -1103,6 +1104,38 @@ fn cmdpack_delete(id: String, state: State<'_, AppState>) -> Result<(), String> 
 #[tauri::command]
 fn cmdpack_export(id: String, dest: String, state: State<'_, AppState>) -> Result<(), String> {
     cmdpacks::export(&state.data_dir, &id, &dest)
+}
+
+// ---------- Auditoría de configuración ----------
+
+#[tauri::command(async)]
+fn auditrules_list(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    data_ready(&state)?;
+    auditrules::list(&state.data_dir)
+}
+
+#[tauri::command(async)]
+fn auditrules_save(layer: String, pack: serde_json::Value, state: State<'_, AppState>) -> Result<String, String> {
+    data_ready(&state)?;
+    auditrules::save(&state.data_dir, &layer, &pack)
+}
+
+#[tauri::command(async)]
+fn auditrules_delete(layer: String, id: String, state: State<'_, AppState>) -> Result<(), String> {
+    data_ready(&state)?;
+    auditrules::delete(&state.data_dir, &layer, &id)
+}
+
+/// Pack elegido en el diálogo para importar: solo se lee como texto (lo valida el frontend).
+#[tauri::command(async)]
+fn auditrules_read(path: String) -> Result<String, String> {
+    auditrules::read_external(&path)
+}
+
+/// Configuración elegida en el diálogo para auditar (solo lectura, hasta 20 MB).
+#[tauri::command(async)]
+fn audit_read_config(path: String) -> Result<String, String> {
+    auditrules::read_config(&path)
 }
 
 // ---------- Plugins ----------
@@ -1512,6 +1545,11 @@ pub fn run() {
             cmdpack_save,
             cmdpack_delete,
             cmdpack_export,
+            auditrules_list,
+            auditrules_save,
+            auditrules_delete,
+            auditrules_read,
+            audit_read_config,
             device_run,
             source_ip,
             app_version,

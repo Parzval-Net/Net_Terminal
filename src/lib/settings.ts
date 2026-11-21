@@ -8,7 +8,7 @@ import type { TopoSnapshot, TopoSources, Topology } from "./topology";
 import type { SnmpProfile } from "./snmp";
 import { type GhostColor, type GhostStyle, type ListKey, SUGGEST_DEFAULT, migrateSuggest } from "./suggest";
 
-export type ModuleId = "monitor" | "diag" | "topology" | "subnet" | "perf" | "transfer" | "syslog" | "plugins" | "backup" | "snmp" | "logsearch";
+export type ModuleId = "monitor" | "diag" | "topology" | "subnet" | "perf" | "transfer" | "syslog" | "plugins" | "backup" | "snmp" | "logsearch" | "audit";
 
 export interface SpeedResult {
   ts: string;
@@ -203,7 +203,7 @@ export const defaultSettings: Settings = {
   mcpScopes: { logs: true, backups: true, notes: true },
   mcpAudit: false,
   mcpWindowMin: 15,
-  modules: { monitor: true, diag: true, topology: true, subnet: true, perf: true, transfer: true, syslog: true, plugins: true, backup: true, snmp: true, logsearch: true },
+  modules: { monitor: true, diag: true, topology: true, subnet: true, perf: true, transfer: true, syslog: true, plugins: true, backup: true, snmp: true, logsearch: true, audit: true },
   monitors: [],
   tftpPort: 69,
   httpPort: 8080,

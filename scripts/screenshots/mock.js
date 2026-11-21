@@ -2111,4 +2111,191 @@ Object.assign(scenes, {
   },
 });
 const scene = new URLSearchParams(location.search).get("scene");
+// ---- Auditoría de seguridad (?scene=audit*): respaldos ficticios ya enmascarados de un FortiGate y un
+// router Cisco (IPs de documentación RFC 5737, nombres y hashes inventados) y un pack "Mis reglas" con un
+// cambio, una regla propia y una excepción. Las reglas se guardan solo en memoria.
+const AUDIT_FORTI = `#config-version=FG200F-7.2.5-FW-build1517:opmode=0:vdom=0
+config system global
+    set admin-sport 443
+    set admintimeout 480
+    set hostname "fw-perimetro"
+    set strong-crypto disable
+    set timezone "America/Santiago"
+end
+config system admin
+    edit "admin"
+        set accprofile "super_admin"
+        set password ENC ****
+    next
+    edit "breakglass"
+        set accprofile "super_admin"
+        set password ENC ****
+    next
+    edit "ops-redes"
+        set accprofile "super_admin"
+        set trusthost1 192.0.2.0 255.255.255.0
+        set two-factor fortitoken
+        set fortitoken "FTKMOB0000000001"
+        set password ENC ****
+    next
+end
+config system interface
+    edit "wan1"
+        set ip 203.0.113.2 255.255.255.252
+        set allowaccess ping https ssh http
+        set role wan
+        set description "Internet ISP-A"
+    next
+    edit "internal"
+        set ip 192.0.2.1 255.255.255.0
+        set allowaccess ping https ssh telnet
+        set role lan
+    next
+    edit "dmz"
+        set ip 198.51.100.1 255.255.255.0
+        set allowaccess ping
+        set role dmz
+    next
+end
+config system snmp community
+    edit 1
+        set name "****"
+    next
+end
+config firewall policy
+    edit 1
+        set name "LAN a Internet"
+        set srcintf "internal"
+        set dstintf "wan1"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic disable
+        set nat enable
+    next
+    edit 2
+        set name "Web DMZ"
+        set srcintf "wan1"
+        set dstintf "dmz"
+        set srcaddr "all"
+        set dstaddr "srv-web"
+        set action accept
+        set schedule "always"
+        set service "HTTPS"
+        set utm-status enable
+        set ssl-ssh-profile "certificate-inspection"
+        set logtraffic all
+    next
+end
+`;
+const AUDIT_CISCO = `!
+version 15.4
+service timestamps log datetime msec
+hostname rt-borde01
+!
+enable secret 5 ****
+username ops privilege 15 password 7 ****
+!
+ip domain name ejemplo.test
+ip http server
+service tcp-small-servers
+snmp-server community **** RW
+ntp server 192.0.2.123
+logging host 192.0.2.50
+!
+interface GigabitEthernet0/0
+ description Internet ISP-A
+ ip address 203.0.113.6 255.255.255.252
+!
+interface GigabitEthernet0/1
+ description LAN core
+ ip address 192.0.2.40 255.255.255.0
+ no ip proxy-arp
+!
+line con 0
+ exec-timeout 0 0
+line vty 0 4
+ exec-timeout 30 0
+ transport input telnet ssh
+line vty 5 15
+ transport input ssh
+!
+end
+`;
+const auditPacks = new Map();
+if (scene?.startsWith("audit")) {
+  backups["fw-perimetro"] = { "2026-11-18_101500.txt": AUDIT_FORTI.replace("set admintimeout 480", "set admintimeout 480\n    set admin-https-ssl-versions tlsv1-1 tlsv1-2"), "2026-11-20_184500.txt": AUDIT_FORTI };
+  backups["rt-borde01"] = { "2026-11-20_090000.txt": AUDIT_CISCO };
+  auditPacks.set("user-mis-reglas.json", {
+    layer: "user",
+    file: "user-mis-reglas.json",
+    pack: {
+      format: "netterminal-rules",
+      formatVersion: 1,
+      id: "mis-reglas",
+      name: "Mis reglas",
+      version: "1.0.4",
+      rules: [
+        {
+          id: "USR-IOS-DOM-001",
+          title: "Dominio DNS configurado (requisito de llaves SSH)",
+          severity: "low",
+          vendor: "cisco",
+          controls: [{ framework: "ISO/IEC 27001:2022", control: "A.8.9" }, { framework: "Estándar interno", control: "HRD-NET-07" }],
+          check: { type: "present", match: "^ip domain[ -]name \\S+" },
+          fix: "manual",
+          tests: [{ name: "Ejemplo del editor", config: "ip domain name ejemplo.test\n", expect: "pass" }],
+        },
+      ],
+      overrides: [{ rule: "NT-FOS-IF-001", enabled: false, reason: "Las interfaces se documentan en la CMDB" }],
+      waivers: [{ rule: "NT-FOS-ADM-002", match: 'edit "breakglass"', reason: "Cuenta de emergencia con control compensatorio (bóveda física)", approvedBy: "CISO", expires: "2027-03-31", ticket: "CHG-1042" }],
+    },
+  });
+}
+Object.assign(handlers, {
+  auditrules_list: () => [...auditPacks.values()],
+  auditrules_save: ({ layer, pack }) => (auditPacks.set(`${layer}-${pack.id}.json`, { layer, file: `${layer}-${pack.id}.json`, pack }), pack.id),
+  auditrules_delete: ({ layer, id }) => (auditPacks.delete(`${layer}-${id}.json`), null),
+  auditrules_read: () => JSON.stringify({ format: "netterminal-rules", formatVersion: 1, id: "hardening-campus", name: "Hardening campus", version: "2.1.0", owner: "equipo-redes", rules: [] }),
+  audit_read_config: () => AUDIT_CISCO,
+});
+const auditPick = async (device) => {
+  await tool("Auditoría")();
+  await wait(500);
+  const sel = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.value === device));
+  if (sel) setVal(sel, device);
+  await wait(500);
+  [...document.querySelectorAll("button:not([role=radio])")].find((b) => /^(Auditar|Volver a auditar)$/.test(b.textContent.trim()))?.click();
+  await wait(700);
+};
+Object.assign(scenes, {
+  audit: async () => {
+    await auditPick("fw-perimetro");
+    document.querySelector("ol[aria-label^='Auditar'] li:nth-child(2) ul button[aria-expanded]")?.click();
+    await wait(300);
+  },
+  "audit-cisco": async () => {
+    await auditPick("rt-borde01");
+    document.querySelector("ol[aria-label^='Auditar'] li:nth-child(2) ul button[aria-expanded]")?.click();
+    await wait(300);
+  },
+  "audit-plan": async () => {
+    await auditPick("fw-perimetro");
+    // Agrega "Administradores sin restricción de origen" y completa su parámetro (red de gestión).
+    [...document.querySelectorAll("label")].find((l) => l.textContent.includes("NT-FOS-ADM-002"))?.querySelector("input[type=checkbox]")?.click();
+    await wait(300);
+    const inp = [...document.querySelectorAll("input")].find((x) => x.placeholder === "192.0.2.0 255.255.255.0");
+    if (inp) setVal(inp, "192.0.2.0 255.255.255.0");
+    await wait(300);
+    [...document.querySelectorAll("h3")].find((h) => h.textContent.includes("Plan de corrección"))?.scrollIntoView();
+  },
+  "audit-library": async () => {
+    await tool("Auditoría")();
+    await wait(400);
+    [...document.querySelectorAll("[role=radio]")].find((b) => b.textContent.startsWith("Biblioteca de reglas"))?.click();
+    await wait(400);
+  },
+});
 if (scene && scenes[scene]) window.addEventListener("load", () => wait(600).then(scenes[scene]));
