@@ -21,7 +21,8 @@
  *
  * Límites conocidos (por eso el resaltado además mide el tiempo de cada regla y apaga la que se pone
  * lenta, ver highlight.ts): las referencias (\1) se tratan como vacías salvo dentro de una repetición
- * (ahí se rechazan); las cuentas grandes ({0,80}) se modelan como repetición sin tope; un estado al que
+ * (ahí se rechazan); las cuentas grandes ({0,80}) se modelan como repetición sin tope (si el mínimo pasa del tope, sin
+ * tratar sus estados como coincidencia segura); un estado al que
  * llegar ya es coincidencia segura (fin del patrón, o `.*`/`.+` seguido solo de `$`) no cuenta como
  * trampa, porque el motor termina ahí en vez de seguir probando.
  */
@@ -274,6 +275,9 @@ class Automaton {
   bits: Bits[] = [];
   follow: Cnt[] = [];
   looks = new Set<Node>();
+  /** Posiciones dentro de una cuenta grande colapsada: llegar a ellas no es coincidencia segura (faltan vueltas). */
+  noFree = new Set<number>();
+  private collapsed = 0;
   private member: (n: Extract<Node, { k: "chr" }>) => Bits;
   constructor(member: (n: Extract<Node, { k: "chr" }>) => Bits) {
     this.member = member;
@@ -293,6 +297,7 @@ class Automaton {
         if (p >= MAX_POSITIONS) throw new TooComplex();
         this.bits.push(this.member(node));
         this.follow.push(new Map());
+        if (this.collapsed) this.noFree.add(p);
         return { n: 0, nA: false, nB: false, first: new Map([[p, 1]]), last: new Map([[p, 1]]), lastA: new Set([p]), lastB: new Set([p]) };
       }
       case "asr":
@@ -344,7 +349,17 @@ class Automaton {
 
   private rep(x: Node, min: number, max: number): Info {
     if (max === 0) return EMPTY();
-    if (min > MAX_EXPAND || (max !== Infinity && max > MAX_EXPAND)) return this.rep(x, min ? 1 : 0, Infinity);
+    if (max !== Infinity && max > MAX_EXPAND && min <= MAX_EXPAND) return this.rep(x, min, Infinity);
+    if (min > MAX_EXPAND) {
+      // x{40} se modela como x+, pero el motor no termina en la primera vuelta: exige las 40. Por eso sus
+      // posiciones no cuentan como "libres", o (.*a){40} pasaría por seguro.
+      this.collapsed++;
+      try {
+        return this.rep(x, 1, Infinity);
+      } finally {
+        this.collapsed--;
+      }
+    }
     if (min === 0 && max === 1) {
       const i = this.build(x);
       return { ...i, n: cap2(1 + i.n), nA: true, nB: true };
@@ -427,7 +442,7 @@ function analyze(root: Node, member: (n: Extract<Node, { k: "chr" }>) => Bits, d
   const nonEmpty = (p: number) => a.bits[p].some((w) => w !== 0);
   const isDot = (p: number) => a.bits[p].every((w, i) => ((w & dot[i]) >>> 0) === dot[i]);
   // Llegar a un estado "libre" ya es coincidencia: el motor termina ahí, no hay retroceso que explotar.
-  const free = (p: number) => top.lastA.has(p) || (top.lastB.has(p) && isDot(p) && (a.follow[p].get(p) ?? 0) > 0);
+  const free = (p: number) => !a.noFree.has(p) && (top.lastA.has(p) || (top.lastB.has(p) && isDot(p) && (a.follow[p].get(p) ?? 0) > 0));
   const alive: boolean[] = [];
   for (let p = 0; p < N; p++) alive.push(nonEmpty(p) && !free(p));
   const succ: number[][] = [];

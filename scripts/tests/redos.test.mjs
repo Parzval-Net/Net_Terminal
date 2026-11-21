@@ -46,6 +46,11 @@ const BAD = [
   "(x+y?){2,}z",
   "(.*a)+b",
   "(?=(a+)+b)x",
+  // Cuentas grandes sobre una repetición sin tope: el tiempo se duplica con cada carácter.
+  "(.*a){40}",
+  "(\\S*a){30}",
+  "(.*a){11}",
+  "(.*a){5,40}",
   // Referencias dentro de una repetición.
   "(a)\\1*",
   "((a)\\2)+",
@@ -61,6 +66,9 @@ assert.match(S.redosRisk("(a)\\1*"), /referencia/);
 
 // ---------- Patrones legítimos comunes: ninguno rechazado ----------
 const GOOD = [
+  "(\\S+\\s){20}",
+  "[a-z]{0,80}",
+  "(?:\\d{1,3}\\.){20}",
   "down",
   "\\b(?:up|down)\\b",
   "line protocol is (up|down)",

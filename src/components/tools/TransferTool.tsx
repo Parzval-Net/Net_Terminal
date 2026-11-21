@@ -729,6 +729,13 @@ function Assistant({
   // Sin IP el comando lleva IP_DE_ESTE_PC: no se da por listo.
   checks.push({ ok: !!pcIp, text: pcIp ? `IP de este PC: ${pcIp}` : "Elige la IP de este PC en la barra del servidor" });
   if (p) checks.push({ ok: serverOn, text: serverOn ? `Servidor ${p.toUpperCase()} activo` : `El servidor ${p.toUpperCase()} está detenido`, fix: serverOn ? undefined : { label: `Iniciar ${p.toUpperCase()}`, run: () => startServer(p) } });
+  // Los comandos TFTP del equipo no llevan puerto: el equipo siempre llama al 69.
+  if (p === "tftp" && tftpPort !== 69)
+    checks.push({
+      ok: false,
+      text: `TFTP escucha en el puerto ${tftpPort}, pero el equipo usa el 69 (el comando no lleva puerto)${OS === "linux" ? ". En Linux, si no inicia en el 69, permítelo con sudo sysctl -w net.ipv4.ip_unprivileged_port_start=69 o redirige UDP 69 a este puerto" : ""}`,
+      fix: { label: "Usar 69", run: usePort69 },
+    });
   if (r?.needsWrite) checks.push({ ok: tftpWrite, text: tftpWrite ? "El equipo puede enviar archivos a este PC" : "Falta permitir que el equipo envíe archivos", fix: tftpWrite ? undefined : { label: "Permitir", run: allowWrite } });
   if (needsFile)
     checks.push(

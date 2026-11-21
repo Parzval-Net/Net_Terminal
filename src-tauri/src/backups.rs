@@ -155,6 +155,13 @@ fn snmp_secret_words(toks: &[String]) -> Vec<usize> {
     }
 }
 
+/// Valor de " key <valor>" en una línea de dos palabras: descarta números (" key 1" de key chain) y
+/// palabras de comandos que no llevan secreto.
+fn is_bare_key_value(tok: &str) -> bool {
+    let t = tok.to_ascii_lowercase();
+    !t.chars().all(|c| c.is_ascii_digit()) && !matches!(t.as_str(), "chain" | "config-key" | "generate" | "zeroize" | "import" | "export" | "pubkey-chain")
+}
+
 fn forti_set_secret(tok: &str) -> bool {
     let t = tok.to_ascii_lowercase();
     ["password", "passwd", "pwd", "secret", "key", "passphrase"].iter().any(|s| t.ends_with(s))
@@ -208,22 +215,42 @@ pub fn mask_line_secrets(line: &str, found: &mut Vec<String>) -> String {
         let tok = tok.trim_end_matches(';');
         let prev = if k > 0 { parts[words[k - 1]].1.to_ascii_lowercase() } else { String::new() };
         let trigger = SECRET_WORDS.contains(&tok)
+            || tok == "wpa-psk"
             || (tok == "key"
                 && (prev == "isakmp"
+                    || first == "pre-shared-key"
                     || first.starts_with("tacacs")
                     || first.starts_with("radius")
+                    || first.starts_with("aaa-server")
                     || first == "server"
                     // " key 7 <valor>" dentro de un bloque tacacs/radius; " key 1" (key chain) no.
                     || (k == 0
                         && words.len() >= 3
-                        && parts[words[1]].1.chars().all(|c| c.is_ascii_digit()))))
-            || (k == 1 && first == "set" && forti_set_secret(tok));
+                        && parts[words[1]].1.chars().all(|c| c.is_ascii_digit()))
+                    // " key <valor>" (bloque tacacs/radius server o aaa-server de ASA, sin tipo).
+                    || (k == 0 && words.len() == 2 && is_bare_key_value(&parts[words[1]].1))));
+        let trigger = trigger || (k == 1 && first == "set" && forti_set_secret(tok));
         if !trigger {
             k += 1;
             continue;
         }
         // Salta los indicadores de tipo; si no queda valor, el último "tipo" era el secreto.
         let mut j = k + 1;
+        if tok == "pre-shared-key" {
+            // IOS: "pre-shared-key local|remote [0|6] <valor>"; keyring: "pre-shared-key address <ip> key <valor>".
+            let w = |i: usize| parts[words[i]].1.to_ascii_lowercase();
+            if j < words.len() && matches!(w(j).as_str(), "address" | "hostname") {
+                k = j;
+                continue;
+            }
+            while j < words.len() && matches!(w(j).as_str(), "local" | "remote") {
+                j += 1;
+            }
+        } else if tok == "wpa-psk" {
+            while j < words.len() && matches!(parts[words[j]].1.to_ascii_lowercase().as_str(), "ascii" | "hex") {
+                j += 1;
+            }
+        }
         if tok == "community" {
             // Huawei: "community read cipher <valor>"; el valor Cisco va enseguida.
             while j < words.len()
@@ -558,6 +585,23 @@ mod tests {
             "",
         ] {
             assert_eq!(mask_line(keep), keep);
+        }
+    }
+
+    /// Mismos casos que scripts/tests/maskParity.test.mjs (maskLine de auditParse.ts): ambos lados
+    /// enmascaran igual.
+    #[test]
+    fn mask_fixture_parity() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../scripts/tests/fixtures/mask-cases.json")).unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() > 40);
+        for c in cases {
+            let (input, want) = (c[0].as_str().unwrap(), c[1].as_str().unwrap());
+            assert_eq!(mask_line(input), want, "entrada: {input}");
+        }
+        for keep in fixture["keep"].as_array().unwrap() {
+            let keep = keep.as_str().unwrap();
+            assert_eq!(mask_line(keep), keep, "debe quedar intacta: {keep}");
         }
     }
 
