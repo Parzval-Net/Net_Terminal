@@ -129,6 +129,8 @@ export function normalizeIos(line: string): string {
 
 const CISCO_NOISE = /^(building configuration|current configuration\s*:|last configuration change|nvram config last updated|end$)/i;
 const BANNER = /^banner\s+(\S+)\s+(\^C|\S)(.*)$/;
+/** Líneas máximas de un banner: más que eso sin delimitador de cierre se considera mal cerrado. */
+const MAX_BANNER_LINES = 200;
 
 const indentOf = (s: string) => s.length - s.trimStart().length;
 
@@ -165,14 +167,19 @@ function parseIndented(text: string, sep: RegExp, cisco: boolean, opts: ParseOpt
         body.push(rest.slice(0, rest.indexOf(delim)));
       } else {
         body.push(rest);
-        for (i++; i < lines.length; i++) {
-          const l = lines[i];
-          const at = l.indexOf(delim);
-          if (at >= 0) {
-            body.push(l.slice(0, at));
+        // Sin delimitador de cierre en MAX_BANNER_LINES líneas, el banner queda en su propia línea y el
+        // resto se interpreta como config (si no, un banner mal cerrado se tragaría todo lo que sigue).
+        const limit = Math.min(lines.length, i + 1 + MAX_BANNER_LINES);
+        let close = -1;
+        for (let m = i + 1; m < limit; m++) {
+          if (lines[m].includes(delim)) {
+            close = m;
             break;
           }
-          body.push(l);
+        }
+        if (close >= 0) {
+          for (i++; i < close; i++) body.push(lines[i]);
+          body.push(lines[close].slice(0, lines[close].indexOf(delim)));
         }
       }
       node.text = body.join("\n").trim();
@@ -303,12 +310,27 @@ export function walk(nodes: ConfigNode[], out: ConfigNode[] = []): ConfigNode[] 
 
 export interface VendorGuess {
   vendor: AuditVendor | null;
-  /** Plataforma sugerida (ios, ios-xe, fortios). */
+  /** Plataforma sugerida (ios, ios-xe, nx-os, ios-xr, asa, fortios, vrp, junos). */
   platform?: string;
   /** Versión leída de la config, si aparece. */
   version?: string;
   /** Por qué se eligió (para mostrar al usuario). */
   reason: string;
+}
+
+/** Plataformas Cisco que no son IOS ni IOS-XE (las reglas integradas no las cubren). */
+function ciscoFamily(sample: string): Omit<VendorGuess, "vendor"> | null {
+  const NOTE = ": las reglas de IOS no aplican, revisa a mano o usa reglas propias";
+  const xr = /^!! IOS XR Configuration (\S+)/m.exec(sample);
+  if (xr || /^!! IOS XR/m.test(sample)) return { platform: "ios-xr", version: xr?.[1], reason: `Cabecera "!! IOS XR"${NOTE}` };
+  const asa = /^(?::\s*)?ASA Version (\S+)/m.exec(sample);
+  if (asa) return { platform: "asa", version: asa[1], reason: `Línea "ASA Version ${asa[1]}"${NOTE}` };
+  const nx = /^version (\d+\.\d+\(\d+\)\S*)\s+Bios:/m.exec(sample);
+  if (nx || /Bios:\s*version/i.test(sample) || /^feature \S+/m.test(sample) || /^!Command: show running-config/m.test(sample)) {
+    const v = nx?.[1] ?? /^version (\d+\.\d+\(\d+\)\S*)/m.exec(sample)?.[1];
+    return { platform: "nx-os", version: v, reason: `${nx ? `Línea "version ${nx[1]} Bios:" de NX-OS` : "Líneas \"feature\" de NX-OS"}${NOTE}` };
+  }
+  return null;
 }
 
 /** Fabricante por heurística: cuenta señales típicas de cada sintaxis. El usuario puede corregirlo. */
@@ -335,6 +357,9 @@ export function detectVendor(text: string): VendorGuess {
     return { vendor: best, platform: "fortios", version: v?.[2], reason: v ? `Cabecera #config-version (${v[1]})` : "Bloques config/edit/set de FortiOS" };
   }
   if (best === "cisco") {
+    // Otras familias Cisco con sintaxis parecida: sus reglas IOS quedan "No aplica" por plataforma.
+    const other = ciscoFamily(sample);
+    if (other) return { vendor: best, ...other };
     const v = /^version (\d+)\.(\d+)/m.exec(sample);
     // IOS-XE numera desde 16.x; IOS clásico llega hasta 15.x.
     const platform = v ? (Number(v[1]) >= 16 ? "ios-xe" : "ios") : undefined;
@@ -365,9 +390,58 @@ const SECRET_WORDS = new Set([
   "hexadecimal",
   "cipher",
   "irreversible-cipher",
+  // Check Point Gaia: "set user admin password-hash $6$..." y "set expert-password-hash $1$...".
+  "password-hash",
+  "expert-password-hash",
 ]);
-const TYPE_TOKENS = new Set(["enc", "cipher", "irreversible-cipher", "simple", "plain", "encrypted", "ascii-text", "hexadecimal", "md5", "sha", "sha1", "sha256", "hidden"]);
-const isTypeToken = (t: string) => (t.length <= 3 && /^\d+$/.test(t)) || TYPE_TOKENS.has(t.toLowerCase());
+const TYPE_TOKENS = new Set(["enc", "cipher", "irreversible-cipher", "simple", "plain", "encrypted", "ascii-text", "hexadecimal", "md5", "scrypt", "hidden"]);
+/** "sha", "sha1", "sha256", "sha512"... (Arista: "secret sha512 $6$..."). */
+const isSha = (t: string) => /^sha\d*$/.test(t);
+const isTypeToken = (t: string) => {
+  const l = t.toLowerCase();
+  return (l.length <= 3 && /^\d+$/.test(l)) || isSha(l) || TYPE_TOKENS.has(l);
+};
+const SNMP_ALGS = new Set(["des", "3des", "des56", "aes", "aes128", "aes192", "aes256", "aes-128", "aes-192", "aes-256", "aes-cfb-128"]);
+const isSnmpAlg = (t: string) => isTypeToken(t) || SNMP_ALGS.has(t.toLowerCase());
+
+/**
+ * Posiciones (en las palabras) de secretos SNMP que no siguen a una palabra clave: la comunidad de
+ * "snmp-server host <ip> [informs|traps] [vrf X] [version 1|2c] <comunidad> ..." y las claves de
+ * "snmp-server user ... auth <alg> <clave> priv <alg> <clave>". Con "version 3" el token es el usuario.
+ */
+function snmpSecretWords(toks: string[]): number[] {
+  const l = toks.map((t) => t.toLowerCase());
+  if (l.length < 3 || l[0] !== "snmp-server") return [];
+  if (l[1] === "host") {
+    let j = 3;
+    while (j < l.length) {
+      const t = l[j];
+      if (t === "informs" || t === "traps") j += 1;
+      else if (["vrf", "use-vrf", "filter-vrf", "source-interface", "udp-port"].includes(t)) j += 2;
+      else if (t === "version") {
+        if (l[j + 1] === "3") return [];
+        j += 2;
+      } else return [j];
+    }
+    return [];
+  }
+  if (l[1] === "user") {
+    const out: number[] = [];
+    for (let j = 2; j < l.length; j++) {
+      if (l[j] !== "auth" && l[j] !== "priv") continue;
+      let v = j + 1;
+      while (v < l.length && isSnmpAlg(l[v])) v++;
+      if (v < l.length && l[v] !== "priv" && l[v] !== "localizedkey") out.push(v);
+      j = v;
+    }
+    return out;
+  }
+  return [];
+}
+
+/** Valor de " key <valor>" en una línea de dos palabras: descarta números (" key 1" de key chain) y comandos sin secreto. */
+const BARE_KEY_SKIP = new Set(["chain", "config-key", "generate", "zeroize", "import", "export", "pubkey-chain"]);
+const isBareKeyValue = (t: string) => !/^\d+$/.test(t) && !BARE_KEY_SKIP.has(t.toLowerCase());
 const fortiSetSecret = (t: string) => ["password", "passwd", "pwd", "secret", "key", "passphrase"].some((s) => t.endsWith(s));
 const URL_CRED = /\b((?:s?ftp|scp|https?|tftp):\/\/)([^\s/:@[\]]+):([^\s/]+)@/gi;
 /** Un valor que ya está enmascarado o que es una variable de plantilla ({{x}}) no se toca. */
@@ -389,25 +463,41 @@ export function maskLine(line: string): string {
   for (const p of parts) if (!p[0] && p[1].includes("://")) p[1] = p[1].replace(URL_CRED, "$1$2:****@");
   const words = parts.map((p, i) => (p[0] ? -1 : i)).filter((i) => i >= 0);
   if (!words.length) return line;
+  for (const j of snmpSecretWords(words.map((i) => parts[i][1]))) if (!KEEP_VALUE.test(parts[words[j]][1])) parts[words[j]][1] = "****";
   const first = parts[words[0]][1].toLowerCase();
+  const w = (i: number) => parts[words[i]][1].toLowerCase();
   let k = 0;
   while (k < words.length) {
     const tok = parts[words[k]][1].toLowerCase().replace(/;+$/, "");
     const prev = k > 0 ? parts[words[k - 1]][1].toLowerCase() : "";
     const trigger =
       SECRET_WORDS.has(tok) ||
+      tok === "wpa-psk" ||
       (tok === "key" &&
         (prev === "isakmp" ||
+          first === "pre-shared-key" ||
           first.startsWith("tacacs") ||
           first.startsWith("radius") ||
+          first.startsWith("aaa-server") ||
           first === "server" ||
-          (k === 0 && words.length >= 3 && /^\d+$/.test(parts[words[1]][1])))) ||
+          (k === 0 && words.length >= 3 && /^\d+$/.test(parts[words[1]][1])) ||
+          (k === 0 && words.length === 2 && isBareKeyValue(parts[words[1]][1])))) ||
       (k === 1 && first === "set" && fortiSetSecret(tok));
     if (!trigger) {
       k++;
       continue;
     }
     let j = k + 1;
+    if (tok === "pre-shared-key") {
+      // IOS: "pre-shared-key local|remote [0|6] <valor>"; keyring: "pre-shared-key address <ip> key <valor>".
+      if (j < words.length && (w(j) === "address" || w(j) === "hostname")) {
+        k = j;
+        continue;
+      }
+      while (j < words.length && (w(j) === "local" || w(j) === "remote")) j++;
+    } else if (tok === "wpa-psk") {
+      while (j < words.length && (w(j) === "ascii" || w(j) === "hex")) j++;
+    }
     if (tok === "community") {
       while (j < words.length && ["read", "write", "cipher", "simple"].includes(parts[words[j]][1].toLowerCase())) j++;
     } else {
