@@ -4,6 +4,7 @@ import { useDragResize } from "../lib/useDragResize";
 import { useModal } from "../lib/useModal";
 import { Risk, computeRisk, riskLabel, textRisk } from "../lib/packs";
 import { BATCH_TOOL, WINDOW_MINUTES, canOfferWindowFor, isWindowMinutes, lineRisks } from "../lib/mcpWindow";
+import { useArmed } from "../lib/approvalArm";
 
 const BADGE: Record<Risk, string> = {
   read: "border border-line text-muted",
@@ -76,6 +77,12 @@ export function ApprovalDialog({ request, pending, windowMinutes = 15, onDecide 
   const [allow, setAllow] = useState(false);
   const [minutes, setMinutes] = useState<number>(isWindowMinutes(windowMinutes) ? windowMinutes : 15);
   const client = (request.client ?? "").trim();
+  // Cada solicitud nueva deja «Permitir» inactivo un momento: un doble clic no aprueba la siguiente.
+  const { armed, canApprove } = useArmed(request.id);
+  const approve = () => {
+    if (blocked || !canApprove()) return;
+    onDecide(true, offer && allow ? minutes : undefined);
+  };
 
   return (
     <div {...modal.overlay} className="fixed inset-0 z-[60] grid place-items-center bg-black/35 p-4">
@@ -151,8 +158,8 @@ export function ApprovalDialog({ request, pending, windowMinutes = 15, onDecide 
             Rechazar
           </button>
           <button
-            onClick={() => !blocked && onDecide(true, offer && allow ? minutes : undefined)}
-            disabled={blocked}
+            onClick={approve}
+            disabled={blocked || !armed}
             title={blocked ? "Marca la confirmación para permitir un comando que puede cortar servicio" : undefined}
             className={`px-3.5 h-8 rounded-md font-medium hover:opacity-90 disabled:opacity-50 ${risk === "disruptive" ? "bg-danger text-danger-fg" : "bg-accent text-accent-fg"}`}
           >

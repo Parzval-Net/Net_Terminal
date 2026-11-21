@@ -811,6 +811,28 @@ fn valid_name(name: &str) -> bool {
         && name != "netterminal.py"
 }
 
+/// Módulos de la biblioteca estándar que un script no debe tapar: la carpeta de scripts es la
+/// primera ruta de `sys.path` de todos los scripts (y está en PYTHONPATH), así que un `csv.py`
+/// importado reemplazaría al módulo `csv` en los demás scripts, y un `json.py` o `re.py`
+/// rompería `netterminal.py` en todas las ejecuciones.
+const STDLIB_SHADOW: [&str; 40] = [
+    "abc", "argparse", "ast", "base64", "collections", "concurrent", "contextlib", "copy", "csv", "datetime",
+    "enum", "functools", "getpass", "hashlib", "io", "ipaddress", "itertools", "json", "logging", "math",
+    "os", "pathlib", "platform", "queue", "random", "re", "shutil", "signal", "socket", "ssl",
+    "string", "struct", "subprocess", "sys", "tempfile", "threading", "time", "types", "typing", "uuid",
+];
+
+/// Nombre con que se guarda un script: si tapa un módulo estándar se agrega «-script» (con el
+/// guion ya no es importable). Se compara sin mayúsculas por los discos de macOS y Windows.
+fn unshadowed_name(name: &str) -> String {
+    let stem = &name[..name.len() - 3];
+    if STDLIB_SHADOW.contains(&stem.to_ascii_lowercase().as_str()) {
+        format!("{stem}-script.py")
+    } else {
+        name.to_string()
+    }
+}
+
 /// Guarda `content` con el primer nombre libre (`x.py`, `x-2.py`…). Si ya hay un archivo
 /// idéntico con ese nombre lo reutiliza. Nunca sobrescribe ni sigue enlaces (create_new) y
 /// salta los nombres que están en eliminados, para que un botón que apuntaba a un script
@@ -855,7 +877,7 @@ pub fn import(data_dir: &Path, src: &Path) -> Result<String, String> {
         return Err("El script supera 1 MB".into());
     }
     let content = fs::read(src).map_err(|e| e.to_string())?;
-    store_unique(&scripts_dir(data_dir), &name, &content)
+    store_unique(&scripts_dir(data_dir), &unshadowed_name(&name), &content)
 }
 
 /// Quita un script de la lista moviéndolo a `scripts/eliminados`, sin borrarlo del disco.
@@ -900,7 +922,7 @@ pub fn restore(data_dir: &Path, name: &str) -> Result<String, String> {
     }
     let content = fs::read(&src).map_err(|e| e.to_string())?;
     fs::remove_file(&src).map_err(|e| e.to_string())?;
-    store_unique(&dir, name, &content)
+    store_unique(&dir, &unshadowed_name(name), &content)
 }
 
 pub fn list(data_dir: &Path) -> Vec<String> {
@@ -1320,6 +1342,12 @@ mod tests {
         assert_eq!(list_deleted(&root), vec!["ejemplo_respaldo.py".to_string(), "respaldo.py".to_string()]);
         assert_eq!(restore(&root, "respaldo.py").unwrap(), "respaldo.py");
         assert!(!root.join("scripts/eliminados/respaldo.py").exists());
+        // Un nombre de módulo estándar taparía `import csv` (o el json/re del helper) en todos los
+        // scripts: se guarda con sufijo, que no es importable.
+        for (file, saved) in [("csv.py", "csv-script.py"), ("JSON.py", "JSON-script.py"), ("csv_tools.py", "csv_tools.py")] {
+            fs::write(ext.join(file), "print(4)").unwrap();
+            assert_eq!(import(&root, &ext.join(file)).unwrap(), saved);
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 
