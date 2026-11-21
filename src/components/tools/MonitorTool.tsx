@@ -130,46 +130,48 @@ const MonitorCard = memo(function MonitorCard(p: {
   const since = status && t.active && status.state !== "unknown" ? fmtDuration(Date.now() - status.since) : null;
 
   return (
-    <Section
-      title={t.name}
-      hint={`${t.kind === "tcp" ? `TCP ${t.host}:${t.port}` : `ICMP ${t.host}`} · cada ${t.intervalMs / 1000} s`}
-      right={
-        <div className="flex items-center gap-1 shrink-0">
-          <StatusPill state={state} label={since ? `${label} · ${since}` : label} />
-          <Btn kind="ghost" className="!px-1.5" title={t.active ? "Pausar" : "Reanudar"} onClick={() => a.toggle(t)}>
+    // El estado y las acciones van en una fila propia bajo el título: a la derecha del encabezado le
+    // quitaban casi todo el ancho y el nombre de la sonda quedaba truncado ("Gateway sitio ce…").
+    // El espacio duro en "cada N s" evita que la unidad quede sola en otra línea.
+    <Section title={t.name} hint={`${t.kind === "tcp" ? `TCP ${t.host}:${t.port}` : `ICMP ${t.host}`} · cada ${t.intervalMs / 1000}\u00a0s`}>
+      <div className="flex items-center justify-between gap-2 -mt-1 mb-3">
+        <StatusPill state={state} label={since ? `${label} · ${since}` : label} />
+        <div className="flex items-center gap-1 shrink-0" role="group" aria-label={`Acciones de ${t.name}`}>
+          <Btn kind="ghost" className="!px-1.5" title={t.active ? "Pausar" : "Reanudar"} aria-label={t.active ? "Pausar" : "Reanudar"} onClick={() => a.toggle(t)}>
             {t.active ? <Pause size={14} /> : <Play size={14} />}
           </Btn>
-          <Btn kind="ghost" className="!px-1.5" title={t.sound ? "Silenciar sonda" : "Activar sonido"} onClick={() => a.sound(t)}>
+          <Btn
+            kind="ghost"
+            className="!px-1.5"
+            title={t.sound ? "Silenciar sonda" : "Activar sonido"}
+            aria-label={t.sound ? "Silenciar sonda" : "Activar sonido"}
+            onClick={() => a.sound(t)}
+          >
             {t.sound ? <Volume2 size={14} /> : <VolumeX size={14} />}
           </Btn>
           {state === "down" && t.sound && (
-            <Btn kind="ghost" className="!px-1.5" title="Detener la alarma repetida" onClick={() => a.silence(t.id)}>
+            <Btn kind="ghost" className="!px-1.5" title="Detener la alarma repetida" aria-label="Detener la alarma repetida" onClick={() => a.silence(t.id)}>
               <BellOff size={14} />
             </Btn>
           )}
-          <Btn kind="ghost" className="!px-1.5" title="Editar" onClick={() => a.edit(t)}>
+          <Btn kind="ghost" className="!px-1.5" title="Editar" aria-label="Editar" onClick={() => a.edit(t)}>
             <Pencil size={13} />
           </Btn>
-          <Btn kind="ghost" className="!px-1.5" title="Reiniciar estadísticas" onClick={() => a.clear(t.id)}>
+          <Btn kind="ghost" className="!px-1.5" title="Reiniciar estadísticas" aria-label="Reiniciar estadísticas" onClick={() => a.clear(t.id)}>
             <RotateCcw size={13} />
           </Btn>
-          <Btn kind="ghost" className="!px-1.5 hover:!text-danger" title="Eliminar" onClick={() => a.remove(t.id)}>
+          <Btn kind="ghost" className="!px-1.5 hover:!text-danger" title="Eliminar" aria-label="Eliminar" onClick={() => a.remove(t.id)}>
             <Trash2 size={13} />
           </Btn>
         </div>
-      }
-    >
+      </div>
       {/* Indicadores sin marco propio (la tarjeta ya lo tiene) y sin truncar: si un valor no cabe, pasa a dos líneas. */}
       <div className="grid grid-cols-5 gap-x-3 gap-y-2 mb-3">
         <Metric label="Actual" value={st.last?.ok ? fmtMs(st.last.rtt) : st.last ? "Sin resp." : "—"} tone={st.last && !st.last.ok ? "danger" : undefined} />
         <Metric label="Promedio" value={fmtMs(st.avg)} />
         <Metric label="Mín / máx" value={st.min == null ? "—" : `${st.min.toFixed(0)} / ${st.max!.toFixed(0)}`} />
         <Metric label="Jitter" value={fmtMs(st.jitter)} />
-        <Metric
-          label={`Pérdida (${st.lost}/${st.sent})`}
-          value={`${st.loss.toFixed(1)} %`}
-          tone={st.loss >= 5 ? "danger" : st.loss > 0 ? "warn" : st.sent ? "ok" : undefined}
-        />
+        <LossMetric lost={st.lost} sent={st.sent} loss={st.loss} />
       </div>
       <LineChart
         title={`Latencia de ${t.name}`}
@@ -187,6 +189,26 @@ const MonitorCard = memo(function MonitorCard(p: {
     </Section>
   );
 });
+
+/**
+ * Pérdida con el mismo aspecto que Metric, pero con el rótulo corto y el detalle (perdidos/enviados)
+ * junto al valor en tono muted: con "Pérdida (14/300)" el rótulo pasaba a dos líneas y su valor
+ * quedaba más abajo que los de las otras métricas.
+ */
+function LossMetric({ lost, sent, loss }: { lost: number; sent: number; loss: number }) {
+  const color = loss >= 5 ? "text-danger" : loss > 0 ? "text-warn" : sent ? "text-ok" : "text-fg";
+  return (
+    <div className="min-w-0">
+      <div className="text-caption text-muted leading-tight">Pérdida</div>
+      <div className="mt-0.5 leading-snug tabular-nums [overflow-wrap:anywhere]">
+        <span className={`text-title font-semibold ${color}`}>{loss.toFixed(1)} %</span>{" "}
+        <span className="text-caption text-muted" title={`${lost} de ${sent} sin respuesta`}>
+          {lost}/{sent}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function MonitorForm({ initial, onSave, onCancel }: { initial: MonitorTarget; onSave: (t: MonitorTarget) => void; onCancel: () => void }) {
   const [t, setT] = useState(initial);

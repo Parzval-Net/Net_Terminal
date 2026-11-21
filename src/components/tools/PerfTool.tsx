@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderSearch, Gauge, Play, RefreshCw, Square, Trash2 } from "lucide-react";
+import { ChevronRight, FolderSearch, Gauge, Play, RefreshCw, Square, Trash2 } from "lucide-react";
 import { SpeedResult } from "../../lib/settings";
 import { LineChart } from "./LineChart";
 import { Btn, Console, CopyText, Label, Metric, Section, ToolHeader, Toggle } from "./ui";
@@ -108,8 +108,12 @@ function SpeedTest({ history, onResult, onHistory }: SpeedProps) {
         </div>
       )}
       {history.length > 0 && (
-        <details className="mt-3">
-          <summary className="text-body-sm text-muted cursor-default">Historial ({history.length})</summary>
+        // Mismo chevron que Collapsible en lugar del marcador nativo (▶), que cambia según la plataforma.
+        <details className="group mt-3">
+          <summary className="inline-flex items-center gap-1.5 px-1 -mx-1 h-6 rounded-md text-body-sm text-muted hover:text-fg hover:bg-hover cursor-default list-none [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={14} aria-hidden className="shrink-0 transition-transform group-open:rotate-90" />
+            Historial ({history.length})
+          </summary>
           <table className="w-full mt-2 text-body-sm">
             <thead className="text-muted text-left">
               <tr>
@@ -285,7 +289,8 @@ function Iperf() {
   const measureWhy = !client.running && !host.trim() ? "Ingresa la IP del servidor iperf3" : undefined;
 
   return (
-    <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(400px,1fr))]">
+    // items-start: cada tarjeta mide lo que su contenido; estiradas al alto de la vecina dejaban bloques vacíos.
+    <div className="grid items-start gap-4 [grid-template-columns:repeat(auto-fit,minmax(400px,1fr))]">
       <Section
         title="iperf3 · cliente"
         hint={found ? `${found.version} · ${found.path}` : "Detectando…"}
