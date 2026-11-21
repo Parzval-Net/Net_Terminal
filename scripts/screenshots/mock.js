@@ -1669,7 +1669,10 @@ async function svgNode(name) {
   await wait(250);
 }
 const open = (l) => act("dblclick", l);
-const key = (k) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code: `Key${k.toUpperCase()}`, metaKey: true, bubbles: true, cancelable: true }));
+// Atajo de la app: ⌘ en macOS y Ctrl+Shift en Windows/Linux (isMod de src/lib/platform.ts), según el navegador que captura.
+const MAC_UA = /Mac|iPhone|iPad/.test(navigator.userAgent);
+const key = (k) =>
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: MAC_UA ? k : k.toUpperCase(), code: `Key${k.toUpperCase()}`, metaKey: MAC_UA, ctrlKey: !MAC_UA, shiftKey: !MAC_UA, bubbles: true, cancelable: true }));
 async function quickTo(host) {
   await click("Conexión rápida sin guardar");
   typeInto(document.querySelector('input[placeholder="192.0.2.10 o hostname"]'), host);
@@ -1788,7 +1791,15 @@ const scenes = {
     document.querySelector(".xterm")?.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
     await wait(300);
   },
-  toasts: async () => { await open("core-sw01"); await open("ar-wan01"); await wait(1200); },
+  // Avisos: uno informativo y uno de error, como los de un script (evento script-event).
+  toasts: async () => {
+    await open("core-sw01");
+    await open("ar-wan01");
+    await wait(600);
+    emit("script-event", { run: "r1", script: "respaldo-nocturno", kind: "log", message: "3 de 3 equipos respaldados" });
+    emit("script-event", { run: "r2", script: "verificar-ntp", kind: "error", message: "ar-wan01: tiempo agotado esperando el prompt" });
+    await wait(400);
+  },
   // Barra de difusión en curso: se arranca un envío ficticio directo en el módulo.
   bcastbar: async () => {
     await open("core-sw01"); await open("core-sw02");
@@ -1799,7 +1810,17 @@ const scenes = {
     await wait(300);
     await click("Ver detalle");
   },
-  macros: async () => { await open("core-sw01"); await wait(300); },
+  macros: async () => { await open("core-sw01"); await wait(300); await click("Nuevo botón"); await wait(400); },
+  // Difusión activa: destino la carpeta "Sitio Central" con tres equipos abiertos de ella.
+  "broadcast-active": async () => {
+    await open("core-sw01"); await open("core-sw02"); await open("dist-sw01");
+    await wait(300);
+    const m = await import("/src/lib/broadcast.ts");
+    m.setBroadcastTarget({ mode: "folder", folder: "Sitio Central" });
+    await wait(400);
+  },
+  // Buscar en logs (Herramientas › Operar).
+  logsearch: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Buscar en logs"); await wait(500); },
   broadcast: async () => { await open("core-sw01"); await open("core-sw02"); await open("Shell local"); await click("Notas"); await click("Elegir a qué sesiones se envía"); },
 };
 // Escenas de QA visual (modales, ajustes y herramientas).
