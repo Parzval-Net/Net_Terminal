@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { notesCall } from "../lib/api";
 import type { ITheme } from "@xterm/xterm";
 import { ArrowDownToLine, Check, FolderOpen, Lock, MoreHorizontal, Network, Pencil, Plus, Replace, Search, Send, SendHorizontal, ShieldCheck, Trash2, Workflow, X } from "lucide-react";
 import { DiagramPreview } from "./DiagramPreview";
@@ -159,7 +160,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     if (!job) return;
     pendingSave.current = null;
     if (job.secure) {
-      const ok = await invoke("note_save_secure", { name: job.name, content: job.content }).then(
+      const ok = await notesCall("note_save_secure", { name: job.name, content: job.content }).then(
         () => true,
         (e) => (flash(`No se pudo guardar: ${e}`), false),
       );
@@ -170,7 +171,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
         setContent("");
       }
     } else {
-      await invoke("save_note", { name: job.name, content: job.content }).catch((e) => flash(`No se pudo guardar: ${e}`));
+      await notesCall("save_note", { name: job.name, content: job.content }).catch((e) => flash(`No se pudo guardar: ${e}`));
     }
     setSaved(true);
   }, []);
@@ -180,7 +181,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     async (msg?: string) => {
       await flushSave();
       if (!unlockedRef.current) return;
-      await invoke("note_lock").catch(() => {});
+      await notesCall("note_lock").catch(() => {});
       unlockedRef.current = false;
       setUnlocked(false);
       setContent("");
@@ -189,12 +190,12 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     [flushSave],
   );
 
-  const refresh = useCallback(() => invoke<NoteInfo[]>("list_notes").then(setNotes), []);
+  const refresh = useCallback(() => notesCall<NoteInfo[]>("list_notes").then(setNotes), []);
 
   const open = useCallback(
     async (name: string) => {
       await lockNote();
-      const list = await invoke<NoteInfo[]>("list_notes").catch(() => null);
+      const list = await notesCall<NoteInfo[]>("list_notes").catch(() => null);
       if (list) setNotes(list);
       if (list?.find((n) => n.name === name)?.protected) {
         // Protegida: se muestra la pantalla de contraseña, sin leer nada del disco.
@@ -206,7 +207,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
       }
       let text: string;
       try {
-        text = await invoke<string>("read_note", { name });
+        text = await notesCall<string>("read_note", { name });
       } catch (e) {
         // Sin abrirla: mostrarla vacía haría que el autoguardado borre su contenido.
         flash(`No se pudo abrir ${name}: ${e}`);
@@ -222,10 +223,10 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
 
   const create = useCallback(async (rename = true) => {
     await lockNote();
-    const list = await invoke<NoteInfo[]>("list_notes");
+    const list = await notesCall<NoteInfo[]>("list_notes");
     let name = "Nota";
     for (let i = 2; list.some((n) => n.name === name); i++) name = `Nota ${i}`;
-    await invoke("save_note", { name, content: "" });
+    await notesCall("save_note", { name, content: "" });
     await refresh();
     setCurrent(name);
     setContent("");
@@ -233,14 +234,14 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
   }, [lockNote, refresh]);
 
   useEffect(() => {
-    invoke<NoteInfo[]>("list_notes").then((list) => {
+    notesCall<NoteInfo[]>("list_notes").then((list) => {
       setNotes(list);
       if (list[0]) open(list[0].name);
       else create(false);
     });
     // Al cerrar el panel se guarda lo pendiente y se bloquea la nota protegida abierta.
     return () => {
-      flushSave().finally(() => invoke("note_lock").catch(() => {}));
+      flushSave().finally(() => notesCall("note_lock").catch(() => {}));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -252,7 +253,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
       const name = (e as CustomEvent<{ name: string }>).detail?.name;
       refresh();
       if (name && name === current && !isProtected && !pendingSave.current)
-        invoke<string>("read_note", { name }).then(setContent, () => {});
+        notesCall<string>("read_note", { name }).then(setContent, () => {});
     };
     window.addEventListener("nt-note-saved", onSaved);
     return () => window.removeEventListener("nt-note-saved", onSaved);
@@ -262,7 +263,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     if (tool !== "search" || query.trim().length < 2) return setResults(null);
     const t = window.setTimeout(async () => {
       await flushSave();
-      invoke<NoteMatch[]>("search_notes", { query })
+      notesCall<NoteMatch[]>("search_notes", { query })
         .then(setResults)
         .catch(() => setResults([]));
     }, 250);
@@ -282,7 +283,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     lastActivity.current = Date.now();
     if (unlockedRef.current && current && Date.now() - lastTouch.current > 30_000) {
       lastTouch.current = Date.now();
-      invoke("note_touch", { name: current }).catch(() => {});
+      notesCall("note_touch", { name: current }).catch(() => {});
     }
   };
 
@@ -299,7 +300,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
   const unlock = async (password: string): Promise<string | null> => {
     if (!current) return null;
     try {
-      const text = await invoke<string>("note_unlock", { name: current, password, idleSecs });
+      const text = await notesCall<string>("note_unlock", { name: current, password, idleSecs });
       setContent(text);
       setSaved(true);
       markUnlocked(true);
@@ -313,7 +314,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     if (!current) return null;
     await flushSave();
     try {
-      await invoke("note_protect", { name: current, password, idleSecs });
+      await notesCall("note_protect", { name: current, password, idleSecs });
     } catch (e) {
       return String(e);
     }
@@ -328,7 +329,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     if (!current) return null;
     await flushSave();
     try {
-      await invoke("note_change_password", { name: current, old, new: next });
+      await notesCall("note_change_password", { name: current, old, new: next });
     } catch (e) {
       return String(e);
     }
@@ -340,7 +341,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     if (!current) return null;
     await flushSave();
     try {
-      await invoke("note_unprotect", { name: current });
+      await notesCall("note_unprotect", { name: current });
     } catch (e) {
       return String(e);
     }
@@ -402,7 +403,7 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     if (!from || !to.trim() || to.trim() === from) return;
     await flushSave();
     try {
-      const name = await invoke<string>("rename_note", { from, to });
+      const name = await notesCall<string>("rename_note", { from, to });
       await refresh();
       setCurrent(name);
     } catch (e) {
@@ -417,8 +418,8 @@ export const NotesPanel = memo(function NotesPanel(p: Props) {
     pendingSave.current = null;
     unlockedRef.current = false;
     setUnlocked(false);
-    await invoke("delete_note", { name: current }).catch(() => {});
-    const list = await invoke<NoteInfo[]>("list_notes");
+    await notesCall("delete_note", { name: current }).catch(() => {});
+    const list = await notesCall<NoteInfo[]>("list_notes");
     setNotes(list);
     setConfirmDelete(false);
     if (list[0]) open(list[0].name);

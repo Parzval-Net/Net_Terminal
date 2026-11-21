@@ -185,8 +185,13 @@ pub(crate) fn parse_entries(lines: &[String]) -> Vec<Entry> {
         .collect()
 }
 
-#[tauri::command(async)]
-pub fn ftp_list(params: FtpParams) -> Result<Listing, String> {
+/// Conexión, login y listado: espera de red, en el pool de bloqueo (no en un worker asíncrono).
+#[tauri::command]
+pub async fn ftp_list(params: FtpParams) -> Result<Listing, String> {
+    crate::blocking(move || list_blocking(params)).await
+}
+
+fn list_blocking(params: FtpParams) -> Result<Listing, String> {
     let mut ftp = open(&params)?;
     let cwd = ftp.pwd().unwrap_or_default();
     let mut entries = parse_entries(&list_bounded(&mut ftp)?);

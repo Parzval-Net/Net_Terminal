@@ -201,7 +201,8 @@ fn take_turn<'a>(lock: &'a Mutex<()>, max: Duration, mut waiting: impl FnMut()) 
 /// `answer = false`: no confirma nada; ante una pregunta responde que no (Ctrl+C en "[confirm]"),
 /// espera el prompt y lo informa en el resultado (`declined`). Con `answer = true` pasa lo mismo con
 /// las preguntas destructivas (`destructive_question`): quien llama muestra `declined`.
-pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, answer: bool) -> Result<String, String> {
+/// `lines = false`: sin eventos "line" (quien llama solo usa "result"); el resto de los eventos no cambia.
+pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, answer: bool, lines: bool) -> Result<String, String> {
     if command.contains(['\r', '\n']) {
         return Err("Un solo comando por operación".into());
     }
@@ -220,7 +221,7 @@ pub fn run(app: AppHandle, conn: String, command: String, timeout_secs: u64, ans
             let _ = app.emit("tool-job", JobEvent { job: id.clone(), kind, text, data });
         };
         let conns = &app.state::<crate::AppState>().conns;
-        let r = run_core(conns, &conn, &command, deadline, answer, &emit);
+        let r = run_core(conns, &conn, &command, deadline, answer, lines, &emit);
         if r.ran {
             emit("result", String::new(), Some(json!({ "ok": r.ok, "output": r.output, "declined": r.declined })));
         }
@@ -259,12 +260,33 @@ pub fn run_blocking(conns: &crate::connection::ConnectionManager, conn: &str, co
     if conns.is_read_only(conn) {
         return Err(crate::connection::READ_ONLY.into());
     }
-    Ok(run_core(conns, conn, command, timeout, answer, &|_, _, _| {}))
+    // Sin interfaz que muestre líneas: no se arman (el emisor las descartaba igual).
+    Ok(run_core(conns, conn, command, timeout, answer, false, &|_, _, _| {}))
 }
 
 type Emit<'a> = &'a dyn Fn(&'static str, String, Option<serde_json::Value>);
 
-fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &str, deadline: Duration, answer: bool, emit: Emit) -> RunOutcome {
+/// Envía a `emit` las líneas completas de `partial` (sin las vacías) y las quita de una vez; con `all`
+/// también el resto sin salto de línea (prompts, preguntas de confirmación).
+fn flush_lines(partial: &mut String, all: bool, emit: Emit) {
+    let mut done = 0;
+    while let Some(i) = partial[done..].find('\n') {
+        let line = partial[done..done + i].trim_end();
+        if !line.is_empty() {
+            emit("line", line.to_string(), None);
+        }
+        done += i + 1;
+    }
+    // Un solo drain por bloque: antes cada línea corría el resto del búfer.
+    partial.drain(..done);
+    if all && !partial.trim().is_empty() {
+        emit("line", partial.trim_end().to_string(), None);
+        partial.clear();
+    }
+}
+
+/// `lines = false`: no se arman ni se emiten los eventos "line" (`partial` solo los alimenta).
+fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &str, deadline: Duration, answer: bool, lines: bool, emit: Emit) -> RunOutcome {
     {
         let p = patterns();
         let lock = session_lock(conn);
@@ -296,17 +318,8 @@ fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &
         // Líneas completas hacia la interfaz: un fragmento puede cortar una línea a la mitad.
         let mut partial = String::new();
         let flush = |partial: &mut String, all: bool| {
-            while let Some(i) = partial.find('\n') {
-                let line = partial[..i].trim_end().to_string();
-                partial.drain(..=i);
-                if !line.is_empty() {
-                    emit("line", line, None);
-                }
-            }
-            // Sin salto de línea tras una pausa (prompts, preguntas de confirmación).
-            if all && !partial.trim().is_empty() {
-                emit("line", partial.trim_end().to_string(), None);
-                partial.clear();
+            if lines {
+                flush_lines(partial, all, emit);
             }
         };
         loop {
@@ -346,7 +359,9 @@ fn run_core(conns: &crate::connection::ConnectionManager, conn: &str, command: &
                 }
                 tail.drain(..cut);
             }
-            partial.push_str(&chunk);
+            if lines {
+                partial.push_str(&chunk);
+            }
             flush(&mut partial, false);
             match auto.next(p, tail.trim_end_matches([' ', '\t']), answer) {
                 Auto::Wait => {}
@@ -644,5 +659,50 @@ mod tests {
     fn source_ip_uses_routing_table() {
         assert_eq!(source_ip_for("127.0.0.1").unwrap(), "127.0.0.1");
         assert!(source_ip_for("-x").is_err());
+    }
+
+    /// `flush_lines` (un solo drain por bloque) emite exactamente lo mismo que la versión anterior
+    /// (un drain por línea), con bloques que cortan líneas, CRLF, líneas vacías y texto multibyte.
+    #[test]
+    fn flush_lines_matches_the_line_by_line_version() {
+        fn before(partial: &mut String, all: bool, out: &mut Vec<String>) {
+            while let Some(i) = partial.find('\n') {
+                let line = partial[..i].trim_end().to_string();
+                partial.drain(..=i);
+                if !line.is_empty() {
+                    out.push(line);
+                }
+            }
+            if all && !partial.trim().is_empty() {
+                out.push(partial.trim_end().to_string());
+                partial.clear();
+            }
+        }
+        let text = "show ver\r\nCisco IOS  \r\n\r\n\nuptime año ñandú\n  \n --More-- \rsw1#\nconfirm [y/n] ";
+        for size in [1, 2, 3, 5, 7, 16, 64, text.len()] {
+            let (mut a, mut b) = (String::new(), String::new());
+            let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
+            let chars: Vec<char> = text.chars().collect();
+            for (k, chunk) in chars.chunks(size).enumerate() {
+                let chunk: String = chunk.iter().collect();
+                a.push_str(&chunk);
+                b.push_str(&chunk);
+                let all = k % 3 == 2; // pausas intermedias (recv_timeout) también
+                before(&mut a, all, &mut out_a);
+                let got = std::cell::RefCell::new(Vec::new());
+                flush_lines(&mut b, all, &|kind, line, data| {
+                    assert_eq!((kind, data), ("line", None));
+                    got.borrow_mut().push(line);
+                });
+                out_b.extend(got.into_inner());
+                assert_eq!(a, b, "mismo resto pendiente (bloques de {size})");
+            }
+            before(&mut a, true, &mut out_a);
+            let got = std::cell::RefCell::new(Vec::new());
+            flush_lines(&mut b, true, &|_, line, _| got.borrow_mut().push(line));
+            out_b.extend(got.into_inner());
+            assert_eq!(out_a, out_b, "mismas líneas (bloques de {size})");
+            assert_eq!(a, b, "mismo resto (solo espacios) al final");
+        }
     }
 }

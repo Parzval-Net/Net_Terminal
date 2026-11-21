@@ -25,7 +25,7 @@ import {
   withDest,
 } from "../lib/bundle";
 import { type Pack, type Risk, riskLabel, validatePack } from "../lib/packs";
-import { cmdpacksList } from "../lib/api";
+import { cmdpacksList, notesCall, packsCall } from "../lib/api";
 import { plural } from "../lib/plural";
 import { VaultUnlock } from "./VaultUnlock";
 import { CreateVault } from "./CredentialSettings";
@@ -178,14 +178,14 @@ export function BundleImport({ path, folders, sessions, settings, onImport, onSe
       }
       if (extras.packs && packs.length) {
         let ok = 0;
-        for (const p of packs) await invoke("cmdpack_save", { pack: p }).then(() => ok++, () => {});
+        for (const p of packs) await packsCall("cmdpack_save", { pack: p }).then(() => ok++, () => {});
         if (ok) parts.push(plural(ok, "pack de comandos", "packs de comandos"));
         onPacks?.();
       }
       if (extras.notes && preview.notes?.length) {
-        const existing = await invoke<{ name: string }[]>("list_notes").catch(() => []);
+        const existing = await notesCall<{ name: string }[]>("list_notes").catch(() => []);
         let ok = 0;
-        for (const n of planNotes(NOTE_NAMES(existing), preview.notes)) await invoke("save_note", { name: n.name, content: n.content }).then(() => ok++, () => {});
+        for (const n of planNotes(NOTE_NAMES(existing), preview.notes)) await notesCall("save_note", { name: n.name, content: n.content }).then(() => ok++, () => {});
         if (ok) parts.push(plural(ok, "nota", "notas"));
       }
       const warn = r.warnings.length ? ` Avisos: ${r.warnings.slice(0, 3).join("; ")}${r.warnings.length > 3 ? "…" : ""}` : "";

@@ -63,7 +63,8 @@ export async function runOnDeviceResult(conn: string, command: string, timeoutSe
     else if (payload.job === job) handle(payload);
   });
   try {
-    job = await invoke<string>("device_run", { conn, command, timeoutSecs, answer });
+    // lines: false: aquí solo se usa el resultado; el backend no arma ni envía un evento por línea.
+    job = await invoke<string>("device_run", { conn, command, timeoutSecs, answer, lines: false });
     early.filter((e) => e.job === job).forEach(handle);
     await done;
   } finally {

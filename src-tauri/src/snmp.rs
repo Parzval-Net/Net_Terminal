@@ -1794,15 +1794,15 @@ fn parse_oids(oids: &[String]) -> Result<Vec<Oid>, String> {
     oids.iter().map(|o| parse_oid(o)).collect()
 }
 
-/// GET, GETNEXT o GETBULK. Devuelve las filas (OID, tipo, valor).
-#[tauri::command(async)]
-pub fn snmp_request(
-    target: TargetParams,
-    op: String,
-    oids: Vec<String>,
-    max_rep: Option<u32>,
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<Vec<Row>, String> {
+/// GET, GETNEXT o GETBULK. Devuelve las filas (OID, tipo, valor). La consulta (espera de red de
+/// hasta timeout x reintentos) corre en el pool de bloqueo, no en un worker asíncrono.
+#[tauri::command]
+pub async fn snmp_request(target: TargetParams, op: String, oids: Vec<String>, max_rep: Option<u32>, app: tauri::AppHandle) -> Result<Vec<Row>, String> {
+    use tauri::Manager;
+    crate::blocking(move || request_blocking(target, op, oids, max_rep, &app.state::<crate::AppState>())).await
+}
+
+fn request_blocking(target: TargetParams, op: String, oids: Vec<String>, max_rep: Option<u32>, state: &crate::AppState) -> Result<Vec<Row>, String> {
     let oids = parse_oids(&oids)?;
     let op = match op.as_str() {
         "get" => Op::Get,
@@ -1810,7 +1810,7 @@ pub fn snmp_request(
         "getbulk" => Op::GetBulk { max_rep: max_rep.unwrap_or(10).clamp(1, 100) },
         _ => return Err("Operación SNMP inválida".into()),
     };
-    let target = target.into_target(|p| vault_secret(&state, p))?;
+    let target = target.into_target(|p| vault_secret(state, p))?;
     query(target, op, &oids).map(|v| rows(&v)).map_err(|e| e.text())
 }
 
@@ -1823,16 +1823,16 @@ pub struct WalkResult {
 }
 
 /// Varios recorridos en una sola sesión (un descubrimiento v3): columnas de una tabla para
-/// los conjuntos de OIDs. Un error en una columna no detiene las demás.
-#[tauri::command(async)]
-pub fn snmp_walk_many(
-    target: TargetParams,
-    oids: Vec<String>,
-    max_rows: Option<usize>,
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<Vec<WalkResult>, String> {
+/// los conjuntos de OIDs. Un error en una columna no detiene las demás. Corre en el pool de bloqueo.
+#[tauri::command]
+pub async fn snmp_walk_many(target: TargetParams, oids: Vec<String>, max_rows: Option<usize>, app: tauri::AppHandle) -> Result<Vec<WalkResult>, String> {
+    use tauri::Manager;
+    crate::blocking(move || walk_many_blocking(target, oids, max_rows, &app.state::<crate::AppState>())).await
+}
+
+fn walk_many_blocking(target: TargetParams, oids: Vec<String>, max_rows: Option<usize>, state: &crate::AppState) -> Result<Vec<WalkResult>, String> {
     let roots = parse_oids(&oids)?;
-    let target = target.into_target(|p| vault_secret(&state, p))?;
+    let target = target.into_target(|p| vault_secret(state, p))?;
     let limit = max_rows.unwrap_or(2000).clamp(1, 20_000);
     let mut c = Client::connect(target).map_err(|e| e.text())?;
     let never = AtomicBool::new(false);
@@ -2250,20 +2250,20 @@ pub fn vlan_scope(sec: &mut Security, vlan: u16) {
 
 /// Lectura para Topología con un perfil SNMP: GET de contadores y escalares permitidos y
 /// recorridos de las tablas permitidas, con topes de filas y tiempo. Solo lectura. Con `vlan`,
-/// lee la tabla MAC de esa VLAN (Cisco: community@vlan o contexto vlan-N en v3).
-#[tauri::command(async)]
-pub fn snmp_topo_read(
-    target: TargetParams,
-    gets: Vec<String>,
-    walks: Vec<String>,
-    vlan: Option<u16>,
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<TopoRead, String> {
+/// lee la tabla MAC de esa VLAN (Cisco: community@vlan o contexto vlan-N en v3). Corre en el pool de
+/// bloqueo: un equipo que no responde retiene la lectura hasta ~15 s.
+#[tauri::command]
+pub async fn snmp_topo_read(target: TargetParams, gets: Vec<String>, walks: Vec<String>, vlan: Option<u16>, app: tauri::AppHandle) -> Result<TopoRead, String> {
+    use tauri::Manager;
+    crate::blocking(move || topo_read_blocking(target, gets, walks, vlan, &app.state::<crate::AppState>())).await
+}
+
+fn topo_read_blocking(target: TargetParams, gets: Vec<String>, walks: Vec<String>, vlan: Option<u16>, state: &crate::AppState) -> Result<TopoRead, String> {
     if let Some(v) = vlan {
         topo_vlan_check(&gets, &walks, v)?;
     }
     let (gets, walks) = topo_check(&gets, &walks)?;
-    let mut target = target.into_target(|p| vault_secret(&state, p))?;
+    let mut target = target.into_target(|p| vault_secret(state, p))?;
     if let Some(v) = vlan {
         vlan_scope(&mut target.sec, v);
     }

@@ -289,7 +289,13 @@ pub struct Broker<B: Bridge> {
     /// El usuario permitió, para esta ejecución, escribir contraseñas guardadas en los destinos.
     allow_vault: bool,
     vault_typed: Mutex<usize>,
+    /// Patrones de `wait` ya compilados en esta ejecución: un script que espera el prompt en un ciclo
+    /// no recompila el mismo regex en cada vuelta. Tope de `MAX_PATTERNS` (al llenarse se vacía).
+    patterns: Mutex<HashMap<String, Regex>>,
 }
+
+/// Patrones distintos que guarda la caché de `wait` en una ejecución.
+const MAX_PATTERNS: usize = 64;
 
 fn ok() -> Value {
     json!({"ok": true})
@@ -313,6 +319,7 @@ impl<B: Bridge> Broker<B> {
             stop,
             allow_vault: false,
             vault_typed: Mutex::new(0),
+            patterns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -386,7 +393,7 @@ impl<B: Bridge> Broker<B> {
         match op {
             "send" => self.send(t, &mut io, req["data"].as_str().unwrap_or("")),
             "wait" => {
-                let Ok(re) = Regex::new(req["pattern"].as_str().unwrap_or("")) else {
+                let Some(re) = self.pattern(req["pattern"].as_str().unwrap_or("")) else {
                     return fail("pattern", "patrón inválido");
                 };
                 let only_match = req["return_match_only"].as_bool().unwrap_or(false);
@@ -399,6 +406,21 @@ impl<B: Bridge> Broker<B> {
                 ok()
             }
         }
+    }
+
+    /// Regex de `wait`, compilado una vez por ejecución. Un patrón inválido no se guarda: falla igual
+    /// cada vez que se pide.
+    fn pattern(&self, text: &str) -> Option<Regex> {
+        let mut cache = lock(&self.patterns);
+        if let Some(re) = cache.get(text) {
+            return Some(re.clone());
+        }
+        let re = Regex::new(text).ok()?;
+        if cache.len() >= MAX_PATTERNS {
+            cache.clear();
+        }
+        cache.insert(text.to_string(), re.clone());
+        Some(re)
     }
 
     /// Contraseña guardada escrita por la app en el pedido de login del destino. El script solo
@@ -1659,6 +1681,28 @@ mod tests {
         tx.send("parcial".into()).unwrap();
         let r = b.wait(&mut io, &Regex::new("nunca").unwrap(), Duration::from_millis(80), false);
         assert_eq!((r["code"].as_str(), r["output"].as_str()), (Some("timeout"), Some("parcial")));
+    }
+
+    /// La caché de `wait` devuelve el mismo regex que compilar cada vez, no guarda los inválidos y
+    /// respeta el tope.
+    #[test]
+    fn wait_patterns_are_compiled_once_per_run() {
+        let b = broker(Fake::new(true, None), &["core"], false);
+        let first = b.pattern(r"[>#]\s*$").unwrap();
+        assert_eq!(first.as_str(), Regex::new(r"[>#]\s*$").unwrap().as_str());
+        assert!(first.is_match("core# ") && !first.is_match("core#x"));
+        assert_eq!(lock(&b.patterns).len(), 1);
+        b.pattern(r"[>#]\s*$").unwrap();
+        assert_eq!(lock(&b.patterns).len(), 1, "el mismo patrón no se compila de nuevo");
+        assert!(b.pattern("(sin cerrar").is_none());
+        assert!(b.pattern("(sin cerrar").is_none(), "un patrón inválido falla siempre");
+        assert_eq!(lock(&b.patterns).len(), 1);
+        for i in 0..MAX_PATTERNS * 2 {
+            assert!(b.pattern(&format!("p{i}$")).unwrap().is_match(&format!("xp{i}")));
+        }
+        assert!(lock(&b.patterns).len() <= MAX_PATTERNS);
+        // Por handle: mismo resultado y mismo error que antes.
+        assert_eq!(b.handle(&json!({"op": "wait", "pattern": "(", "timeout": 0.05}))["code"], "pattern");
     }
 
     #[test]
