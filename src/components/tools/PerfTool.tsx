@@ -258,6 +258,9 @@ function Iperf({ onServing }: { onServing?: (on: boolean) => void }) {
       const f = await invoke<IperfFound | null>("tool_iperf_version", { custom: custom || null });
       setFound(f);
       return f;
+    } catch {
+      setFound(null);
+      return null;
     } finally {
       setSearching(false);
     }
@@ -287,7 +290,9 @@ function Iperf({ onServing }: { onServing?: (on: boolean) => void }) {
   const whyId = useId();
   useEffect(() => {
     void detect();
-    invoke<{ name: string; ip: string }[]>("local_ips").then(setIps);
+    invoke<{ name: string; ip: string }[]>("local_ips")
+      .then(setIps)
+      .catch(() => setIps([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
