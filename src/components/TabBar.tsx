@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Columns2, History, LayoutGrid, Lock, Maximize2, Minimize2, Plus, Radio, Rows2, Search, TextSearch, X } from "lucide-react";
 import { newTabMenuItems } from "./tabMenu";
 import { SplitLayout, layoutLabel } from "../lib/split";
+import { tabPaneNumbers } from "../lib/paneNumbers";
 import type { TabLayout } from "../lib/settings";
 import { MenuItem, layoutItem, splitMenuItems, tabMenuItems } from "./tabMenu";
 import { ConnStatus, Tab, TabState, tabTitle } from "../types";
@@ -223,12 +224,9 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
     const r = resolveTargets(bcTarget, tabs, (id) => states[id]?.status, activeId, workspace.panes);
     return new Set(r.targets.map((t) => t.id));
   }, [bcTarget, tabs, states, activeId, workspace.panes]);
-  // Número de panel de cada pestaña en la vista dividida (el mismo que muestra la cabecera del panel).
-  const paneOf = useMemo(() => {
-    const m = new Map<string, number>();
-    props.splitPanes?.forEach((id, i) => id && m.set(id, i + 1));
-    return m;
-  }, [props.splitPanes]);
+  // Número de panel de cada pestaña en la vista dividida (el mismo que muestra la cabecera del panel):
+  // sigue el orden de la barra, de izquierda a derecha.
+  const paneOf = useMemo(() => tabPaneNumbers(props.splitPanes, tabs.map((t) => t.id)), [props.splitPanes, tabs]);
   const activeTab = tabs.find((t) => t.id === activeId);
 
   const commit = (id: string, value: string) => {
@@ -425,6 +423,7 @@ export const TabBar = memo(function TabBar(props: TabBarProps) {
           title={`Buscar sesión o acción (${modLabel}K)`}
           aria-label="Buscar sesión o acción"
           aria-keyshortcuts={isMac ? "Meta+K" : "Control+Shift+K"}
+          data-command-center=""
           className="mb-[5px] mx-1 h-6 w-7 @[760px]:w-[260px] shrink-0 flex items-center justify-center @[760px]:justify-start gap-2 @[760px]:px-2 rounded-md border border-line bg-panel text-[12px] text-muted hover:text-fg hover:border-field-line"
         >
           <Search aria-hidden size={13} className="shrink-0" />

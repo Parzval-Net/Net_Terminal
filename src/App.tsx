@@ -381,6 +381,26 @@ function Workspace({
   useEffect(() => {
     if (activeId && activeId !== "tools") lastTermRef.current = activeId;
   }, [activeId]);
+  // Paleta (Command Center): si al cerrarla quedó otra pestaña activa (abrió una sesión o eligió una),
+  // el foco va a esa terminal. useModal devuelve el foco a quien abrió la paleta y, sin esto, el
+  // botón del Command Center se quedaba con el foco y la terminal sin cursor.
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const paletteFromRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (paletteOpen) paletteFromRef.current = activeIdRef.current;
+  }, [paletteOpen]);
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    requestAnimationFrame(() => {
+      const id = activeIdRef.current;
+      if (!id || id === "tools" || id === paletteFromRef.current) return;
+      // Solo si el foco quedó en el Command Center o en ninguna parte (una acción pudo abrir un diálogo o campo).
+      const a = document.activeElement;
+      if (a && a !== document.body && !a.closest("[data-command-center]")) return;
+      controllers.current.get(id)?.focus();
+    });
+  }, []);
 
   const monitors = useMonitors(settings.monitors, toast);
 
@@ -1613,6 +1633,7 @@ function Workspace({
           onAi={h.openAi}
           onSaveAs={activeTab ? () => h.saveTabAs(activeTab.id) : undefined}
           onToggleReadOnly={activeTab ? () => h.toggleReadOnly(activeTab.id) : undefined}
+          tools={activeId === "tools" ? { tab: lastTermTab, state: lastTermTab ? states[lastTermTab.id] : undefined } : undefined}
         />}
       </main>
 
@@ -1761,7 +1782,7 @@ function Workspace({
       {paletteOpen && (
         <CommandPalette
           sessions={sessions}
-          onClose={() => setPaletteOpen(false)}
+          onClose={closePalette}
           onOpen={openTab}
           actions={[
             // Acciones de la sesión activa que ya no están en la barra de estado.
