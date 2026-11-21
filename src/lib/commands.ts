@@ -254,8 +254,5 @@ export const riskLabel: Record<Risk, string> = {
   disruptive: "Puede cortar servicio",
 };
 
-/** Fabricante sugerido según el resaltado de la sesión. */
-export function vendorFor(highlight?: string): string {
-  if (highlight === "huawei" || highlight === "fortinet" || highlight === "juniper") return highlight;
-  return "cisco";
-}
+// Fabricante sugerido según el resaltado: en un módulo liviano que App importa directo.
+export { vendorFor } from "./vendorFor";

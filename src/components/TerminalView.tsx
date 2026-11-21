@@ -194,6 +194,11 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
   // "Visible" decide WebGL y el aviso de actividad; "active" (foco) decide el teclado.
   const activeRef = useRef(visible);
   activeRef.current = visible;
+  // Ya avisó salida nueva: App mantiene la marca de la pestaña hasta activarla (marcar de nuevo no
+  // cambia nada), así que en segundo plano no se vuelve a revisar cada bloque con hasVisibleText.
+  // Al activarla, App borra la marca y esto vuelve a revisar.
+  const notifiedRef = useRef(false);
+  if (active) notifiedRef.current = false;
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -487,7 +492,10 @@ export const TerminalView = memo(function TerminalView({ id, session, active, vi
         hl.push(text);
         // Solo cuenta como salida nueva el texto visible: keepalives, movimientos de cursor o un prompt
         // que se redibuja no marcan la pestaña.
-        if (!activeRef.current && hasVisibleText(text)) onActivity(id);
+        if (!activeRef.current && !notifiedRef.current && hasVisibleText(text)) {
+          notifiedRef.current = true;
+          onActivity(id);
+        }
       };
       channels = [onData as Channel<unknown>];
       const onExit = (reason: string) => {

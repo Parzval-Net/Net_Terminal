@@ -1,4 +1,4 @@
-import { ComponentProps, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { ComponentProps, memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -119,7 +119,11 @@ function snapTime(ts: number): string {
   return d.toDateString() === new Date().toDateString() ? hm : `${d.toLocaleDateString("es-CL", { day: "2-digit", month: "2-digit" })} ${hm}`;
 }
 
-export function TopologyTool({
+/**
+ * Memorizada: Herramientas se vuelve a dibujar con cada muestra de Monitoreo (aunque esté oculta) y
+ * Topología no depende de ellas; ToolsView le pasa callbacks estables.
+ */
+export const TopologyTool = memo(function TopologyTool({
   terminals,
   sessions,
   topo,
@@ -1388,4 +1392,4 @@ export function TopologyTool({
       </div>
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowUpToLine,
@@ -181,7 +181,9 @@ export const Sidebar = memo(function Sidebar(p: Props) {
 
   const folders = useMemo(() => allFolders(sessions, extraFolders), [sessions, extraFolders]);
 
-  const q = filter.trim().toLowerCase();
+  // Diferido: el campo muestra cada tecla al instante y el árbol (con miles de sesiones, lo caro) se
+  // filtra después con el último texto. Todo lo que depende del árbol usa este mismo valor.
+  const q = useDeferredValue(filter.trim().toLowerCase());
   const matches = useMemo(
     () =>
       q

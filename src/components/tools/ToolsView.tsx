@@ -5,6 +5,8 @@ import { Activity, ArrowDownUp, Calculator, DatabaseBackup, FileSearch, Gauge, N
 import { TopologyTool } from "./TopologyTool";
 import type { Session } from "../../types";
 import { ModuleId, Settings, SpeedResult } from "../../lib/settings";
+import type { TopoSnapshot, TopoSources, Topology } from "../../lib/topology";
+import type { SnmpProfile } from "../../lib/snmp";
 import { MonitorStatus, MonitorTarget, Sample } from "../../lib/monitors";
 import { MonitorTool } from "./MonitorTool";
 import { DiagTool } from "./DiagTool";
@@ -45,6 +47,10 @@ const GROUPS: { label: string; ids: ModuleId[] }[] = [
   { label: "Red", ids: ["topology", "subnet", "perf"] },
   { label: "Operar", ids: ["transfer", "backup", "logsearch", "plugins"] },
 ];
+
+/** Valores por omisión con identidad fija: un `{}` o `[]` nuevo en cada render anularía el memo de Topología. */
+const NO_SOURCES: TopoSources = {};
+const NO_PROFILES: SnmpProfile[] = [];
 
 /** Último módulo usado, para volver donde se estaba al reabrir Herramientas. */
 const LAST_KEY = "toolsModule";
@@ -114,6 +120,15 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     };
   }, [refreshRunning]);
 
+  // Topología está memorizada: sus callbacks no cambian de identidad, así no se vuelve a dibujar con cada
+  // muestra de Monitoreo (que llega aunque Herramientas esté oculta). `update` ya es estable.
+  const onTopo = useCallback(
+    (t: Topology | ((t: Topology) => Topology)) => update((s) => ({ topology: typeof t === "function" ? t(s.topology) : t })),
+    [update],
+  );
+  const onSnapshots = useCallback((topoSnapshots: TopoSnapshot[]) => update({ topoSnapshots }), [update]);
+  const onSources = useCallback((topoSources: TopoSources) => update({ topoSources }), [update]);
+
   const go = (id: ModuleId) => {
     persist(LAST_KEY, id);
     setCurrent(id);
@@ -147,11 +162,11 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
             sessions={sessions}
             topo={settings.topology}
             snapshots={settings.topoSnapshots}
-            onTopo={(t) => update((s) => ({ topology: typeof t === "function" ? t(s.topology) : t }))}
-            onSnapshots={(topoSnapshots) => update({ topoSnapshots })}
-            sources={settings.topoSources ?? {}}
-            onSources={(topoSources) => update({ topoSources })}
-            snmpProfiles={settings.snmpProfiles ?? []}
+            onTopo={onTopo}
+            onSnapshots={onSnapshots}
+            sources={settings.topoSources ?? NO_SOURCES}
+            onSources={onSources}
+            snmpProfiles={settings.snmpProfiles ?? NO_PROFILES}
             visible={active && current === "topology"}
             onOpenSession={onOpenSession}
             tabs={tabs}

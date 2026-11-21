@@ -34,20 +34,8 @@ export const FILL_SETTLE_MS = 400;
 /** Tope de saltos de una ruta (el pivote no cuenta: pivote + hasta 8 saltos). Pasado el tope se avisa, no se calla. */
 export const MAX_ROUTE_STEPS = 8;
 
-/**
- * Saltos en curso (destino de cada uno), para que quien cierra Herramientas avise antes de cortarlos:
- * Topología los publica al cambiar y los borra al desmontarse. Solo nombres, nunca credenciales.
- */
-let running: string[] = [];
-export const runningHops = (): string[] => running;
-export const setRunningHops = (names: string[]) => {
-  running = [...names];
-};
-/** Frase para el aviso al cerrar Herramientas: los saltos en curso se cortan (vacía si no hay). */
-export const hopCloseNote = (names: string[]): string =>
-  names.length
-    ? `${names.length === 1 ? `Hay un salto en curso hacia ${names[0]}` : `Hay ${names.length} saltos en curso (${names.slice(0, 4).join(", ")}${names.length > 4 ? "…" : ""})`}: al cerrar Herramientas se detiene${names.length === 1 ? "" : "n"} y su pestaña queda en el último equipo alcanzado, sin escribir contraseñas. `
-    : "";
+// Saltos en curso y aviso al cerrar Herramientas: en un módulo liviano que App importa directo.
+export { runningHops, setRunningHops, hopCloseNote } from "./hopRegistry";
 
 /** Sesión de la pestaña de salto: la misma del pivote, sin reconectar sola ni repetir comandos de inicio. */
 export function hopTabSession(base: Session, title: string): Session {

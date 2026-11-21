@@ -1,8 +1,12 @@
+import { memo } from "react";
 import { AttentionRow } from "../../../lib/topoInsights";
 import { shortName } from "../../../lib/topology";
 
-/** Lista de "Requieren atención": un clic ubica y resalta el enlace en el mapa. */
-export function AttentionList({ rows, focusLink, onPick }: { rows: AttentionRow[]; focusLink: string | null; onPick: (key: string) => void }) {
+/**
+ * Lista de "Requieren atención": un clic ubica y resalta el enlace en el mapa. Memorizada: el zoom y el
+ * paneo redibujan el panel y la lista solo cambia con sus filas, el enlace resaltado o el callback.
+ */
+export const AttentionList = memo(function AttentionList({ rows, focusLink, onPick }: { rows: AttentionRow[]; focusLink: string | null; onPick: (key: string) => void }) {
   return (
     <ul className="space-y-0.5 max-h-72 overflow-y-auto">
       {rows.map((r) => {
@@ -37,4 +41,4 @@ export function AttentionList({ rows, focusLink, onPick }: { rows: AttentionRow[
       })}
     </ul>
   );
-}
+});

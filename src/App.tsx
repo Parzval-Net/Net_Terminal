@@ -31,12 +31,12 @@ import { errText, failText } from "./lib/errors";
 import { TerminalView, TermController } from "./components/TerminalView";
 import type { CredChange } from "./components/SessionModal";
 import { ConfirmDialog } from "./components/ConfirmDialog";
-import { hopCloseNote, runningHops } from "./lib/hopTab";
+import { hopCloseNote, runningHops } from "./lib/hopRegistry";
 import { CloseManyMessage } from "./components/CloseManyMessage";
 import { CloseScope, summarizeClose, tabsToClose } from "./lib/closeAll";
 import { NotesPanel } from "./components/NotesPanel";
 import { CommandsPanel } from "./components/CommandsPanel";
-import { vendorFor } from "./lib/commands";
+import { vendorFor } from "./lib/vendorFor";
 import { CatalogEntry, Pack, PackCommand, Risk, buildCatalog, computeRisk, orderPacks, riskLabel, validatePack } from "./lib/packs";
 import type { ScpRequest } from "./components/tools/FileManager";
 
@@ -1296,6 +1296,28 @@ function Workspace({
   // Buscar e Historial de la pestaña activa: abren o cierran. Los usan la barra de pestañas y la de estado.
   const toggleFind = () => (activeId && findOpenIds[activeId] ? controllers.current.get(activeId)?.closeFind() : h.find());
   const toggleHistory = () => (historyFor ? h.closeHistory() : h.openHistory());
+  // Acciones de TabBar, VerticalTabs y StatusBar con identidad estable: con flechas nuevas en cada
+  // render su memo no servía y se volvían a dibujar con cada muestra de monitoreo o cambio de App.
+  const bars = useHandlers({
+    focusTab: (id: string) => {
+      if (id === activeId) controllers.current.get(id)?.focus();
+    },
+    palette: () => setPaletteOpen(true),
+    toggleFind,
+    toggleHistory,
+    saveActiveAs: () => {
+      if (activeTab) h.saveTabAs(activeTab.id);
+    },
+    toggleActiveReadOnly: () => {
+      if (activeTab) h.toggleReadOnly(activeTab.id);
+    },
+  });
+  // Pestaña de la que viene Herramientas (para su barra de estado): mismo objeto mientras no cambie.
+  const lastTermState = lastTermTab ? states[lastTermTab.id] : undefined;
+  const toolsBrief = useMemo(
+    () => (activeId === "tools" ? { tab: lastTermTab, state: lastTermState } : undefined),
+    [activeId, lastTermTab, lastTermState],
+  );
 
   // Mismos datos y acciones para la barra horizontal y la columna de pestañas verticales.
   const tabBarProps: TabBarProps = {
@@ -1303,9 +1325,7 @@ function Workspace({
     states,
     activeId,
     onSelect: setActiveId,
-    onFocusTab: (id) => {
-      if (id === activeId) controllers.current.get(id)?.focus();
-    },
+    onFocusTab: bars.focusTab,
     onClose: h.requestClose,
     onCloseMany: h.requestCloseMany,
     onNew: newLocal,
@@ -1339,10 +1359,10 @@ function Workspace({
     alerted,
     tabLayout: settings.tabLayout,
     onTabLayout: h.setTabLayout,
-    onPalette: () => setPaletteOpen(true),
-    onToggleFind: toggleFind,
+    onPalette: bars.palette,
+    onToggleFind: bars.toggleFind,
     findOpen: !!activeId && !!findOpenIds[activeId],
-    onToggleHistory: toggleHistory,
+    onToggleHistory: bars.toggleHistory,
     historyOpen: !!historyFor,
     splitPanes: splitOn ? split!.panes : null,
   };
@@ -1637,9 +1657,9 @@ function Workspace({
           aiEnabled={settings.mcpEnabled}
           aiWindows={mcp.windows.length}
           onAi={h.openAi}
-          onSaveAs={activeTab ? () => h.saveTabAs(activeTab.id) : undefined}
-          onToggleReadOnly={activeTab ? () => h.toggleReadOnly(activeTab.id) : undefined}
-          tools={activeId === "tools" ? { tab: lastTermTab, state: lastTermTab ? states[lastTermTab.id] : undefined } : undefined}
+          onSaveAs={activeTab ? bars.saveActiveAs : undefined}
+          onToggleReadOnly={activeTab ? bars.toggleActiveReadOnly : undefined}
+          tools={toolsBrief}
         />}
       </main>
 
