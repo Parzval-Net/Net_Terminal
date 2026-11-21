@@ -1,17 +1,29 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useModal } from "../lib/useModal";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, KeyRound, Plus, Trash2, X } from "lucide-react";
 import { SerialPortInfo, Session, SessionType, Tunnel, TunnelKind } from "../types";
 import { SerialPortField } from "./SerialPortField";
 import { Segmented } from "./controls";
-import { SessionIcon, typeLabel } from "./SessionIcon";
+import { SessionIcon } from "./SessionIcon";
 import { vendorSchemes } from "../lib/highlight";
 import { backspaceOptions } from "../lib/backspace";
 import { normPath } from "../lib/folders";
 import { useDragResize } from "../lib/useDragResize";
 import { CredStatus, MASK, credStatus, needsUnlock, storageLabel } from "../lib/credentials";
 import { VaultUnlock } from "./VaultUnlock";
+import {
+  BAUDS,
+  DATA_BITS,
+  FLOW_OPTIONS,
+  PARITY_OPTIONS,
+  SESSION_TYPES,
+  STOP_BITS,
+  followHostName,
+  portForType,
+  serialSummary,
+  suggestName,
+} from "../lib/sessionTypes";
 
 /** Qué hacer con la contraseña guardada al guardar la sesión. */
 export type CredChange = { action: "keep" } | { action: "set"; password: string } | { action: "delete" };
@@ -26,8 +38,6 @@ interface Props {
   onSave: (s: Session, connect: boolean, cred: CredChange) => void;
 }
 
-const BAUDS = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
-const DEFAULT_PORT: Partial<Record<SessionType, number>> = { ssh: 22, telnet: 23, raw: 2001 };
 const ENCODINGS: [string, string][] = [
   ["utf-8", "UTF-8 (por defecto)"],
   ["iso-8859-1", "ISO-8859-1 (Latin-1, equipos antiguos)"],
@@ -70,12 +80,14 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
 
   const modal = useModal({ onClose: onClose });
 
-  const changeType = (type: SessionType) =>
-    setS((p) => ({
-      ...p,
-      type,
-      port: p.port === DEFAULT_PORT[p.type] || !p.port ? DEFAULT_PORT[type] : p.port,
-    }));
+  const changeType = (type: SessionType) => setS((p) => ({ ...p, type, port: portForType(p.type, p.port, type) }));
+
+  // El nombre sigue al host mientras esté vacío o sea el host anterior; en una sesión ya guardada no se toca.
+  const followName = !initial?.id;
+  const setHost = (host: string) =>
+    setS((p) => ({ ...p, host, name: followName ? followHostName(p.name, p.host, host) : p.name }));
+  // Opciones avanzadas de SSH: abiertas si la sesión ya usa alguna; después se abren y cierran solo a mano.
+  const [sshAdvanced, setSshAdvanced] = useState(() => !!(s.ssh_args || s.legacy_ssh));
 
   const [error, setError] = useState("");
   /** Contraseña nueva escrita en el modal (solo se envía al backend al guardar). */
@@ -103,8 +115,8 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
     if (tunnelError) return setError(tunnelError);
     const name =
       s.name.trim() ||
-      (s.type === "serial" ? s.serial_port : s.type === "local" ? "Terminal local" : s.host) ||
-      typeLabel[s.type];
+      (s.type === "serial" ? s.serial_port : s.type === "local" ? "Terminal local" : suggestName(s.host)) ||
+      SESSION_TYPES.find((t) => t.type === s.type)!.label;
     const tunnels = s.type === "ssh" && s.tunnels?.length ? s.tunnels : undefined;
     const pw = credChange();
     if (s.save_password && s.type !== "local" && !hadPw && pw.action !== "set")
@@ -150,7 +162,7 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
       <form
         {...modal.dialog}
         {...win.box}
-        className="w-[460px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[360px] min-h-[260px] max-w-[96vw] max-h-[94vh]"
+        className="w-[500px] bg-panel border border-line rounded-xl shadow-pop resize overflow-hidden flex flex-col min-w-[360px] min-h-[260px] max-w-[96vw] max-h-[94vh]"
         onMouseDown={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault();
@@ -176,15 +188,62 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
             label="Tipo de sesión"
             value={s.type}
             onChange={changeType}
-            options={(["ssh", "telnet", "serial", "raw", "local"] as SessionType[]).map((t) => [t, <><SessionIcon type={t} size={14} />{typeLabel[t]}</>] as const)}
+            options={SESSION_TYPES.map((t) => [
+              t.type,
+              <span title={t.hint} className="flex items-center gap-1.5">
+                <SessionIcon type={t.type} size={14} />
+                {t.label}
+              </span>,
+            ] as const)}
           />
+
+          {/* Primero el destino (el dato que se tiene a mano); el nombre se sugiere desde el host. */}
+          {remote && (
+            <Row cols="3fr 1fr">
+              <Field label="Host">
+                <input
+                  className="field"
+                  required
+                  autoFocus
+                  value={s.host ?? ""}
+                  placeholder="192.0.2.10 o hostname"
+                  onChange={(e) => setHost(e.target.value)}
+                />
+              </Field>
+              <Field label="Puerto">
+                <input
+                  className="field"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={s.port ?? ""}
+                  onChange={(e) => set("port", Number(e.target.value) || undefined)}
+                />
+              </Field>
+            </Row>
+          )}
+
+          {s.type === "serial" && (
+            <>
+              {/* Puerto a todo el ancho: el nombre del adaptador (FTDI, CH340) distingue un cable de otro. */}
+              <Field label="Puerto">
+                <SerialPortField value={s.serial_port ?? ""} ports={ports} onChange={(v) => set("serial_port", v)} onRefresh={loadPorts} />
+              </Field>
+              <SerialLine session={s} set={set} />
+              {ports.length === 0 && (
+                <p className="text-[11.5px] text-muted">
+                  No se detectaron adaptadores. Conecta el cable USB-serial y presiona actualizar.
+                </p>
+              )}
+            </>
+          )}
 
           <Row>
             <Field label="Nombre">
               <input
                 className="field"
                 value={s.name}
-                placeholder={s.type === "serial" ? "Consola switch" : "Router core"}
+                placeholder={s.type === "serial" ? "Consola switch" : s.type === "local" ? "Terminal local" : "Se toma del host"}
                 onChange={(e) => set("name", e.target.value)}
               />
             </Field>
@@ -203,31 +262,6 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
               </datalist>
             </Field>
           </Row>
-
-          {remote && (
-            <Row cols="3fr 1fr">
-              <Field label="Host">
-                <input
-                  className="field"
-                  required
-                  autoFocus
-                  value={s.host ?? ""}
-                  placeholder="192.0.2.10 o hostname"
-                  onChange={(e) => set("host", e.target.value)}
-                />
-              </Field>
-              <Field label="Puerto">
-                <input
-                  className="field"
-                  type="number"
-                  min={1}
-                  max={65535}
-                  value={s.port ?? ""}
-                  onChange={(e) => set("port", Number(e.target.value) || undefined)}
-                />
-              </Field>
-            </Row>
-          )}
 
           {s.type === "ssh" && (
             <>
@@ -258,14 +292,6 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
                   onChange={(e) => set("jump_host", e.target.value)}
                 />
               </Field>
-              <Field label="Argumentos extra de ssh (avanzado)">
-                <input
-                  className="field font-mono !text-[12px]"
-                  value={s.ssh_args ?? ""}
-                  placeholder="-L 8443:192.0.2.10:443 -A -o StrictHostKeyChecking=accept-new"
-                  onChange={(e) => set("ssh_args", e.target.value)}
-                />
-              </Field>
               <TunnelsEditor
                 tunnels={s.tunnels ?? []}
                 onChange={(t) => {
@@ -273,98 +299,41 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
                   set("tunnels", t.length ? t : undefined);
                 }}
               />
-              <label className="flex items-start gap-2.5 text-[12.5px]">
-                <input
-                  type="checkbox"
-                  className="mt-0.5 accent-[var(--accent)]"
-                  checked={!!s.legacy_ssh}
-                  onChange={(e) => set("legacy_ssh", e.target.checked)}
-                />
-                <span>
-                  Permitir algoritmos legacy
-                  <span className="block text-muted">
-                    Equipos antiguos: DH group1/14/GEX-sha1, ssh-rsa, cifrados CBC/3DES y MAC hmac-sha1/md5.
-                    Solo se activan los que soporte el OpenSSH instalado.
-                  </span>
-                </span>
-              </label>
+              <details className="rounded-lg border border-line" open={sshAdvanced} onToggle={(e) => setSshAdvanced(e.currentTarget.open)}>
+                <summary className="px-3 h-9 flex items-center text-[12.5px] cursor-default">
+                  Opciones avanzadas
+                  {!sshAdvanced && s.legacy_ssh && <span className="ml-1.5 text-muted">· algoritmos legacy</span>}
+                </summary>
+                <div className="px-3 pb-3 space-y-3">
+                  <Field label="Argumentos extra de ssh">
+                    <input
+                      className="field font-mono !text-[12px]"
+                      value={s.ssh_args ?? ""}
+                      placeholder="-L 8443:192.0.2.10:443 -A -o StrictHostKeyChecking=accept-new"
+                      onChange={(e) => set("ssh_args", e.target.value)}
+                    />
+                  </Field>
+                  <label className="flex items-start gap-2.5 text-[12.5px]">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 accent-[var(--accent)]"
+                      checked={!!s.legacy_ssh}
+                      onChange={(e) => set("legacy_ssh", e.target.checked)}
+                    />
+                    <span>
+                      Permitir algoritmos legacy
+                      <span className="block text-muted">
+                        Equipos antiguos: DH group1/14/GEX-sha1, ssh-rsa, cifrados CBC/3DES y MAC hmac-sha1/md5.
+                        Solo se activan los que soporte el OpenSSH instalado.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </details>
               <p className="text-[11.5px] text-muted">
                 Usa OpenSSH del sistema, por lo que respeta tu ~/.ssh/config, agente y known_hosts. Las llaves y el
                 agente siguen siendo la opción más segura.
               </p>
-            </>
-          )}
-
-          {s.type === "serial" && (
-            <>
-              <Row cols="3fr 2fr">
-                <Field label="Puerto">
-                  <SerialPortField value={s.serial_port ?? ""} ports={ports} onChange={(v) => set("serial_port", v)} onRefresh={loadPorts} />
-                </Field>
-                <Field label="Velocidad">
-                  <select
-                    className="field"
-                    value={s.baud_rate ?? 9600}
-                    onChange={(e) => set("baud_rate", Number(e.target.value))}
-                  >
-                    {BAUDS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              </Row>
-              <Row cols="1fr 1fr 1fr 1fr">
-                <Field label="Datos">
-                  <select
-                    className="field"
-                    value={s.data_bits ?? 8}
-                    onChange={(e) => set("data_bits", Number(e.target.value))}
-                  >
-                    {[8, 7, 6, 5].map((b) => (
-                      <option key={b}>{b}</option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Paridad">
-                  <select
-                    className="field"
-                    value={s.parity ?? "none"}
-                    onChange={(e) => set("parity", e.target.value as Session["parity"])}
-                  >
-                    <option value="none">None</option>
-                    <option value="even">Even</option>
-                    <option value="odd">Odd</option>
-                  </select>
-                </Field>
-                <Field label="Stop">
-                  <select
-                    className="field"
-                    value={s.stop_bits ?? 1}
-                    onChange={(e) => set("stop_bits", Number(e.target.value))}
-                  >
-                    <option>1</option>
-                    <option>2</option>
-                  </select>
-                </Field>
-                <Field label="Flujo">
-                  <select
-                    className="field"
-                    value={s.flow_control ?? "none"}
-                    onChange={(e) => set("flow_control", e.target.value as Session["flow_control"])}
-                  >
-                    <option value="none">None</option>
-                    <option value="software">XON/XOFF</option>
-                    <option value="hardware">RTS/CTS</option>
-                  </select>
-                </Field>
-              </Row>
-              {ports.length === 0 && (
-                <p className="text-[11.5px] text-muted">
-                  No se detectaron adaptadores. Conecta el cable USB-serial y presiona actualizar.
-                </p>
-              )}
             </>
           )}
 
@@ -495,6 +464,85 @@ export function SessionModal({ initial, title, defaultFolder, folders, onClose, 
           </button>
         </footer>
       </form>
+    </div>
+  );
+}
+
+/**
+ * Línea serial resumida ("9600 8N1 · sin flujo · Cambiar"): casi siempre queda en 8N1 sin flujo, así
+ * que velocidad, datos, paridad, stop y flujo se despliegan solo al pedirlo.
+ */
+function SerialLine({ session: s, set }: { session: Session; set: <K extends keyof Session>(k: K, v: Session[K]) => void }) {
+  const id = useId();
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 text-[12.5px]">
+        <span className="text-[11.5px] font-medium text-muted">Línea</span>
+        <span id={`${id}-sum`} className="tabular-nums">
+          {serialSummary(s)}
+        </span>
+        <span aria-hidden className="text-muted">·</span>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={`${id}-fields`}
+          aria-describedby={`${id}-sum`}
+          onClick={() => setOpen((o) => !o)}
+          className="px-1.5 h-6 rounded-md text-accent font-medium hover:bg-hover"
+        >
+          {open ? "Ocultar" : "Cambiar"}
+        </button>
+      </div>
+      {open && (
+        <div id={`${id}-fields`} className="mt-2 space-y-3">
+          <Row cols="2fr 1fr 1fr">
+            <Field label="Velocidad">
+              <select className="field" value={s.baud_rate ?? 9600} onChange={(e) => set("baud_rate", Number(e.target.value))}>
+                {BAUDS.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Datos">
+              <select className="field" value={s.data_bits ?? 8} onChange={(e) => set("data_bits", Number(e.target.value))}>
+                {DATA_BITS.map((b) => (
+                  <option key={b}>{b}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Stop">
+              <select className="field" value={s.stop_bits ?? 1} onChange={(e) => set("stop_bits", Number(e.target.value))}>
+                {STOP_BITS.map((b) => (
+                  <option key={b}>{b}</option>
+                ))}
+              </select>
+            </Field>
+          </Row>
+          <Row>
+            <Field label="Paridad">
+              <select className="field" value={s.parity ?? "none"} onChange={(e) => set("parity", e.target.value as Session["parity"])}>
+                {PARITY_OPTIONS.map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Control de flujo">
+              <select className="field" value={s.flow_control ?? "none"} onChange={(e) => set("flow_control", e.target.value as Session["flow_control"])}>
+                {FLOW_OPTIONS.map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </Row>
+        </div>
+      )}
     </div>
   );
 }
