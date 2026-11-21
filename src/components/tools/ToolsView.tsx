@@ -93,6 +93,8 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
   const navRef = useRef<HTMLElement>(null);
   const currentLabel = enabled.find((n) => n.id === current)?.label;
   const [running, setRunning] = useState<string[]>([]);
+  // El servidor iperf3 es un job de Velocidad (no un servidor de server_running): lo informa el módulo.
+  const [iperfServing, setIperfServing] = useState(false);
 
   const refreshRunning = useCallback(() => {
     invoke<string[]>("server_running").then(setRunning);
@@ -167,6 +169,7 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
             history={settings.speedHistory}
             onResult={(r: SpeedResult) => update((s) => ({ speedHistory: [r, ...s.speedHistory].slice(0, 20) }))}
             onHistory={(speedHistory: SpeedResult[]) => update({ speedHistory })}
+            onServing={setIperfServing}
           />
         );
       case "transfer":
@@ -213,7 +216,8 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     const serving =
       (id === "transfer" && (running.includes("tftp") || running.includes("http") || running.includes("ftp"))) ||
       (id === "snmp" && running.includes("snmptrap")) ||
-      (id === "syslog" && running.includes("syslog"));
+      (id === "syslog" && running.includes("syslog")) ||
+      (id === "perf" && iperfServing);
     return (
       <button
         key={id}

@@ -7,7 +7,8 @@ export interface V4Result {
   mask: string;
   wildcard: string;
   network: string;
-  broadcast: string;
+  /** null en /31 (punto a punto, RFC 3021) y /32 (host): no hay dirección de broadcast. */
+  broadcast: string | null;
   first: string;
   last: string;
   hosts: number;
@@ -15,6 +16,8 @@ export interface V4Result {
   cls: string;
   scope: string;
   binary: string;
+  /** La máscara escrita era una wildcard (0.0.0.255, como en una ACL u OSPF) y se invirtió. */
+  fromWildcard: boolean;
 }
 
 export interface V6Result {
@@ -41,35 +44,63 @@ function parseV4(s: string): number | null {
   return n >>> 0;
 }
 
-function maskToPrefix(mask: string): number | null {
+/**
+ * Prefijo de una máscara de red (255.255.255.0) o, si no lo es, de una wildcard (0.0.0.255,
+ * copiada de una ACL u OSPF). Una máscara que sirve como ambas (0.0.0.0, 255.255.255.255) se toma
+ * como máscara de red.
+ */
+function maskToPrefix(mask: string): { prefix: number; wildcard: boolean } | null {
   const m = parseV4(mask);
   if (m == null) return null;
   const bits = m.toString(2).padStart(32, "0");
-  if (!/^1*0*$/.test(bits)) return null;
-  return bits.indexOf("0") === -1 ? 32 : bits.indexOf("0");
+  if (/^1*0*$/.test(bits)) return { prefix: bits.indexOf("0") === -1 ? 32 : bits.indexOf("0"), wildcard: false };
+  if (/^0*1*$/.test(bits)) return { prefix: bits.indexOf("1"), wildcard: true };
+  return null;
 }
 
+/** Bloques de uso especial del registro de la IANA (RFC 6890), del más específico al más general. */
+const V4_SPECIAL: [string, number, string][] = [
+  ["255.255.255.255", 32, "Broadcast limitado (RFC 919)"],
+  ["192.0.2.0", 24, "Documentación (RFC 5737)"],
+  ["198.51.100.0", 24, "Documentación (RFC 5737)"],
+  ["203.0.113.0", 24, "Documentación (RFC 5737)"],
+  ["192.88.99.0", 24, "Relay 6to4 (RFC 7526, obsoleto)"],
+  ["192.0.0.0", 24, "Asignación IETF (RFC 6890)"],
+  ["198.18.0.0", 15, "Benchmarking (RFC 2544)"],
+  ["169.254.0.0", 16, "Link-local"],
+  ["192.168.0.0", 16, "Privada (RFC 1918)"],
+  ["172.16.0.0", 12, "Privada (RFC 1918)"],
+  ["100.64.0.0", 10, "CGNAT (RFC 6598)"],
+  ["0.0.0.0", 8, "Esta red (RFC 791)"],
+  ["10.0.0.0", 8, "Privada (RFC 1918)"],
+  ["127.0.0.0", 8, "Loopback"],
+  ["224.0.0.0", 4, "Multicast"],
+  ["240.0.0.0", 4, "Reservada"],
+];
+
 function v4Scope(n: number): string {
-  const a = n >>> 24;
-  const b = (n >>> 16) & 255;
-  if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return "Privada (RFC 1918)";
-  if (a === 100 && b >= 64 && b <= 127) return "CGNAT (RFC 6598)";
-  if (a === 127) return "Loopback";
-  if (a === 169 && b === 254) return "Link-local";
-  if (a >= 224 && a <= 239) return "Multicast";
-  if (a >= 240) return "Reservada";
+  for (const [net, bits, label] of V4_SPECIAL) {
+    const mask = (0xffffffff << (32 - bits)) >>> 0; // bits >= 4: el desplazamiento nunca es 32
+    if (((n & mask) >>> 0) === parseV4(net)) return label;
+  }
   return "Pública";
 }
 
-/** Acepta "10.0.0.1/24", "10.0.0.1 255.255.255.0" o "10.0.0.1/255.255.255.0". */
+/** Acepta "10.0.0.1/24", "10.0.0.1 255.255.255.0", "10.0.0.1/255.255.255.0" o una wildcard ("10.0.0.0 0.0.0.255"). */
 export function calcV4(input: string): V4Result | null {
   const m = input.trim().match(/^(\d+\.\d+\.\d+\.\d+)(?:\s*[/ ]\s*(\S+))?$/);
   if (!m) return null;
   const addr = parseV4(m[1]);
   if (addr == null) return null;
   let prefix = 32;
+  let fromWildcard = false;
   if (m[2]) {
-    prefix = /^\d{1,2}$/.test(m[2]) ? Number(m[2]) : (maskToPrefix(m[2]) ?? -1);
+    if (/^\d{1,2}$/.test(m[2])) prefix = Number(m[2]);
+    else {
+      const mp = maskToPrefix(m[2]);
+      if (!mp) return null;
+      ({ prefix, wildcard: fromWildcard } = mp);
+    }
     if (prefix < 0 || prefix > 32) return null;
   }
   const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
@@ -89,7 +120,7 @@ export function calcV4(input: string): V4Result | null {
     mask: toV4(mask),
     wildcard: toV4(~mask >>> 0),
     network: toV4(network),
-    broadcast: toV4(broadcast),
+    broadcast: prefix >= 31 ? null : toV4(broadcast),
     first: toV4(first),
     last: toV4(last),
     hosts,
@@ -97,6 +128,7 @@ export function calcV4(input: string): V4Result | null {
     cls,
     scope: v4Scope(addr),
     binary: [0, 8, 16, 24].map((i) => bin.slice(i, i + 8)).join("."),
+    fromWildcard,
   };
 }
 
@@ -133,7 +165,8 @@ function parseV6(s: string): bigint | null {
   const h = head ? head.split(":") : [];
   const t = tail ? tail.split(":") : [];
   const fill = tail === null ? 0 : 8 - h.length - t.length;
-  if (fill < 0 || (tail === null && h.length !== 8)) return null;
+  // "::" reemplaza uno o más grupos en cero; con 8 grupos explícitos no cabe (RFC 4291).
+  if (fill < 0 || (tail !== null && fill === 0) || (tail === null && h.length !== 8)) return null;
   const groups = [...h, ...Array(fill).fill("0"), ...t];
   if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
   return groups.reduce((acc, g) => (acc << 16n) + BigInt(parseInt(g, 16)), 0n);
@@ -162,7 +195,14 @@ export function formatV6(n: bigint): string {
 
 function v6Scope(n: bigint): string {
   const top = Number(n >> 112n);
+  const top32 = Number(n >> 96n);
+  if (n === 0n) return "No especificada (::)";
   if (n === 1n) return "Loopback";
+  if (n >> 32n === 0xffffn) return "IPv4 mapeada (RFC 4291)";
+  if (n >> 32n === 0x64ff9b0000000000000000n) return "Traducción IPv4/IPv6 (RFC 6052)";
+  if (top32 === 0x20010db8) return "Documentación (RFC 3849)";
+  if (top32 === 0x20010000) return "Teredo (RFC 4380)";
+  if (top === 0x2002) return "6to4 (RFC 3056)";
   if ((top & 0xffc0) === 0xfe80) return "Link-local";
   if ((top & 0xfe00) === 0xfc00) return "ULA (privada)";
   if ((top & 0xff00) === 0xff00) return "Multicast";
@@ -171,7 +211,8 @@ function v6Scope(n: bigint): string {
 }
 
 export function calcV6(input: string): V6Result | null {
-  const m = input.trim().match(/^([0-9a-fA-F:.]+)(?:\/(\d{1,3}))?$/);
+  // La zona (fe80::1%eth0, como la muestran ip addr o ipconfig) no cambia el cálculo: se quita.
+  const m = input.trim().match(/^([0-9a-fA-F:.]+)(?:%[\w.-]+)?(?:\/(\d{1,3}))?$/);
   if (!m || !m[1].includes(":")) return null;
   const addr = parseV6(m[1]);
   const prefix = m[2] ? Number(m[2]) : 128;
