@@ -199,13 +199,23 @@ export function useTopoTraffic({
       return out;
     };
 
+    /** Prompt en pantalla, esperando hasta `ms` a que la terminal termine de dibujar la salida. */
+    const promptShown = async (term: TerminalRef, ms = 1500): Promise<boolean> => {
+      const until = Date.now() + ms;
+      for (;;) {
+        if (atPrompt(term.screen?.(6))) return true;
+        if (Date.now() >= until) return false;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+
     const readCli = async (n: TopoNode, term: TerminalRef, portNames: Map<string, string>, state: Map<string, PortInfo>, note: { partial?: string }): Promise<Map<string, CounterSample>> => {
       const ports = [...portNames.keys()];
       const h = term.highlight && term.highlight !== "off" ? (vendorFor(term.highlight) as TopoVendor) : undefined;
       // Nunca a ciegas: sin prompt en pantalla (paginador, contraseña, comando del usuario a medias o
       // el usuario escribiendo en esa pestaña) el primer carácter se pierde y el comando llega mutilado.
+      if (!(await promptShown(term, 600))) throw new BusyTab();
       const screen = term.screen?.(6);
-      if (!atPrompt(screen)) throw new BusyTab();
       const route = term.tabId ? ctx.current.routes?.[term.tabId] : undefined;
       // Y solo en el equipo esperado: tras un exec-timeout en un salto la pestaña vuelve al pivote y
       // antes se le enviaba la lectura igual (se descartaba después, pero llenaba su pantalla).
@@ -224,7 +234,9 @@ export function useTopoTraffic({
         const parts: string[] = [];
         for (const [i, c] of plan.entries()) {
           // Entre comandos el usuario pudo empezar a escribir en la pestaña: se deja para la próxima ronda.
-          if (i > 0 && !atPrompt(term.screen?.(6))) throw new BusyTab();
+          // La respuesta anterior ya terminó en el equipo, pero la pantalla puede tardar unos ms en
+          // dibujar su prompt: se espera a verlo antes de concluir que la pestaña está ocupada.
+          if (i > 0 && !(await promptShown(term))) throw new BusyTab();
           const r = await runOnDeviceResult(term.connId, c, CLI_READ_SECS);
           parts.push(r.output);
           if (r.cut) return { out: parts.join("\n"), cut: `${c}: ${r.cut}` };
