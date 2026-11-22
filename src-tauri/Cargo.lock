@@ -2749,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "net-terminal"
-version = "0.9.27"
+version = "0.9.28"
 dependencies = [
  "aes 0.9.4",
  "argon2",
