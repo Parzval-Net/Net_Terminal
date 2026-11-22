@@ -685,4 +685,62 @@ noc@mx1>`]);
   assert.equal(T.mergeNeighbors(t, { name: "sw-a-re0" }, []).nodes.length, 3, "el alias guardado se reconoce");
 }
 
+// Enlace simétrico entre dos switches Cisco con nombres de distinto estilo (guion bajo y dominio) y la
+// salida CDP paginada con --More-- en sus formas reales: en cualquier orden de exploración ambos
+// extremos lo informan y no hay aviso de asimetría. Cada lectura deja su fecha (readAt) y el aviso,
+// cuando aparece, pide volver a explorar con la fecha de la última lectura.
+{
+  const cdp = (prompt, entries) =>
+    `${prompt}#show cdp neighbors detail\n` +
+    entries
+      .map(
+        ([dev, ip, local, remote]) =>
+          `-------------------------\nDevice ID: ${dev}\nEntry address(es):\n  IP address: ${ip}\nPlatform: cisco WS-C2960S-24PS-L,  Capabilities: Switch IGMP \nInterface: ${local},  Port ID (outgoing port): ${remote}\nHoldtime : 139 sec\n\nNative VLAN: 2\nDuplex: full\nManagement address(es):\n  IP address: ${ip}\n`,
+      )
+      .join("\n") +
+    `\n${prompt}#`;
+  const r11 = cdp("SW_1_RACK_11", [["SW1_RACK_10.lab.example.net", "192.0.2.17", "GigabitEthernet0/5", "GigabitEthernet1/0/12"]]);
+  const r10raw = cdp("SW1_RACK_10", [
+    ["SW_1_MESON_01.lab.example.net", "192.0.2.18", "GigabitEthernet1/0/25", "GigabitEthernet0/2"],
+    ["SW_1_RACK_11.lab.example.net", "192.0.2.16", "GigabitEthernet1/0/12", "GigabitEthernet0/5"],
+  ]);
+  const bs = "\b".repeat(9);
+  const pagers = [` --More-- ${bs}         ${bs}`, " --More-- \r          \r", " --More-- "];
+  // Leída desde la pantalla (retrocesos ya aplicados): el paginador queda pegado al separador del bloque
+  // siguiente. Antes, el separador se borraba con el paginador y el vecino se perdía en el bloque anterior.
+  const glued = r10raw.replace("-------------------------\nDevice ID: SW_1_RACK_11", " --More---------------------------\nDevice ID: SW_1_RACK_11");
+  assert.ok(glued.includes("--More-----"), "variante pegada armada");
+  for (const out of [glued, C.stripPager(glued)]) {
+    const names = T.parseCdp(out).map((n) => `${n.name} ${n.remotePort}`);
+    assert.deepEqual(names, ["SW_1_MESON_01.lab.example.net GigabitEthernet0/2", "SW_1_RACK_11.lab.example.net GigabitEthernet0/5"], "cada vecino con su puerto");
+  }
+  // Huawei ("  ---- More ----") y Junos ("---(more 45%)---") se siguen limpiando.
+  assert.equal(C.stripPager("a\n  ---- More ----\x1b[Kb"), "a\nb");
+  assert.equal(C.stripPager("a\n---(more 45%)---\rb").replace("\r", ""), "a\nb");
+  for (const pg of [...pagers, null]) {
+    const src = pg === null ? glued : r10raw.replace("Device ID: SW_1_RACK_11", `${pg}Device ID: SW_1_RACK_11`);
+    const r10 = C.stripPager(src);
+    for (const order of [
+      [["SW_1_RACK_11", "192.0.2.16", r11], ["SW1_RACK_10", "192.0.2.17", r10]],
+      [["SW1_RACK_10", "192.0.2.17", r10], ["SW_1_RACK_11", "192.0.2.16", r11]],
+    ]) {
+      let t = EMPTY;
+      for (const [name, ip, out] of order) t = T.mergeNeighbors(t, { name, ip }, T.parseCdp(out), { now: 1_700_000_000_000 });
+      const l = t.links.find((x) => [x.a, x.b].sort().join() === "sw1_rack_10,sw_1_rack_11");
+      assert.ok(l, "enlace entre los dos racks");
+      assert.deepEqual([...l.seenBy].sort(), ["sw1_rack_10", "sw_1_rack_11"], "lo informan ambos extremos");
+      assert.equal(I.linkChecks(t).get(T.linkKey(l)), undefined, "sin aviso de asimetría");
+      assert.equal(t.nodes.find((n) => n.id === "sw1_rack_10").readAt, 1_700_000_000_000, "fecha de la lectura");
+    }
+  }
+  // Diagrama guardado con una lectura vieja de un extremo: el aviso lo dice y pide volver a explorar.
+  let t = T.mergeNeighbors(EMPTY, { name: "SW_1_RACK_11" }, T.parseCdp(r11), { now: 1_700_000_000_000 });
+  t = T.mergeNeighbors(t, { name: "SW1_RACK_10" }, [], { now: 1_700_000_000_000, complete: [] });
+  t.links[0].seenBy = ["sw_1_rack_11"];
+  const issue = I.linkChecks(t).get(T.linkKey(t.links[0]))[0];
+  assert.equal(issue.kind, "asym");
+  assert.match(issue.short, /vuelve a explorarlo/);
+  assert.match(issue.text, /última lectura \(\d\d-\d\d \d\d:\d\d\)/);
+}
+
 console.log("topoAudit: ok");

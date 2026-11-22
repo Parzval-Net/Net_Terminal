@@ -195,12 +195,15 @@ export function linkChecks(t: Topology, live?: LivePorts): Map<string, LinkIssue
     // Asimetría: ambos explorados por CDP/LLDP y solo uno informa el enlace.
     if (isPhysicalProto(l.proto) && a.explored && b.explored && l.seenBy?.length === 1) {
       const [who, other] = l.seenBy[0] === a.id ? [a, b] : [b, a];
+      // Se juzga con la última lectura guardada del otro equipo: si es antigua (o de una versión que no
+      // guardaba la fecha), lo primero es volver a explorarlo.
+      const when = other.readAt ? `su última lectura (${sinceText(other.readAt)})` : "su última lectura guardada";
       issues.push({
         kind: "asym",
         sev: "warn",
         end: other === a ? "a" : "b",
-        text: `${who.name} ve a ${other.name}, pero ${other.name} no informa a ${who.name} (CDP/LLDP apagado en un puerto o solo recepción)`,
-        short: `${other.name} no informa el enlace`,
+        text: `${who.name} ve a ${other.name}, pero en ${when} ${other.name} no informa a ${who.name}. Vuelve a explorar ${other.name} para confirmar; si sigue, revisa CDP/LLDP en ese puerto (apagado o solo recepción).`,
+        short: `${other.name} no informa el enlace · vuelve a explorarlo`,
       });
     }
     if (issues.length) res.set(linkKey(l), issues);
