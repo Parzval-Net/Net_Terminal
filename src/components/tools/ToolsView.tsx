@@ -91,6 +91,8 @@ interface Props {
   /** Activa una pestaña (sale de Herramientas). */
   onFocusTab: (tabId: string) => void;
   onReconnectTab: (tabId: string) => void;
+  /** Cambia el título de una pestaña (Topología: el de una pestaña de salto cuando su ruta cambia). */
+  onRenameTab?: (tabId: string, title: string | undefined) => void;
   onConfirm: (req: { title: string; message: string; label: string; danger?: boolean; action: () => void }) => void;
   /** Aviso breve (por ejemplo, un servidor que se detuvo por inactividad). */
   onToast?: (text: string, kind?: "info" | "error") => void;
@@ -100,7 +102,7 @@ interface Props {
  * Pestaña de herramientas. Cada módulo se monta al visitarlo y luego se mantiene
  * vivo oculto, para no perder servidores, logs ni mediciones al cambiar de sección.
  */
-export const ToolsView = memo(function ToolsView({ active, onBack, onClose, settings, update, monitors, connId, terminals, tabs, sessions, onConfirm, onScp, onOpenSession, onFocusTab, onReconnectTab, onToast }: Props) {
+export const ToolsView = memo(function ToolsView({ active, onBack, onClose, settings, update, monitors, connId, terminals, tabs, sessions, onConfirm, onScp, onOpenSession, onFocusTab, onReconnectTab, onRenameTab, onToast }: Props) {
   const enabled = NAV.filter((n) => settings.modules[n.id] !== false);
   const [current, setCurrent] = useState<ModuleId>(() => {
     const last = stored<ModuleId | null>(LAST_KEY, null);
@@ -194,11 +196,12 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         tabs={tabs}
         onFocusTab={onFocusTab}
         onReconnectTab={onReconnectTab}
+        onRenameTab={onRenameTab}
         onConfirm={onConfirm}
         lifecycle={settings.lifecycleInfo}
       />
     ),
-    [terminals, sessions, settings.topology, settings.topoSnapshots, onTopo, onSnapshots, settings.topoSources, onSources, settings.snmpProfiles, topoVisible, onOpenSession, tabs, onFocusTab, onReconnectTab, onConfirm, settings.lifecycleInfo],
+    [terminals, sessions, settings.topology, settings.topoSnapshots, onTopo, onSnapshots, settings.topoSources, onSources, settings.snmpProfiles, topoVisible, onOpenSession, tabs, onFocusTab, onReconnectTab, onRenameTab, onConfirm, settings.lifecycleInfo],
   );
   const subnetEl = useMemo(() => <SubnetTool />, []);
   const perfEl = useMemo(

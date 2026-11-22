@@ -102,3 +102,40 @@ export function partialNote(reader: Pick<CommandReader, "cut" | "skipped">): str
   const rest = reader.skipped.length ? ` y no se ${reader.skipped.length === 1 ? "envió 1 comando más" : `enviaron ${reader.skipped.length} comandos más`}` : "";
   return `Resultado parcial: la salida de "${reader.cut.cmd}" se cortó (${reader.cut.why.replace(/\.$/, "")})${rest}. Se sumó lo que alcanzó a leerse, sin dar por retirado ningún enlace. Vuelve a descubrir para completar.`;
 }
+
+/**
+ * Comando que apaga el paginador en la sesión: Cisco IOS/IOS-XE/NX-OS "terminal length 0" (Cisco IOS
+ * Configuration Fundamentals Command Reference, "terminal length") y Huawei VRP "screen-length 0
+ * temporary" (Huawei, Command Reference de VRP, "screen-length temporary"). Junos y Huawei ya van con
+ * "| no-more" por comando; FortiOS no tiene uno de consulta verificado.
+ */
+export const PAGER_OFF: Partial<Record<TopoVendor, string>> = { cisco: "terminal length 0", huawei: "screen-length 0 temporary" };
+
+/** Rutas de salto (por objeto) en cuyo último equipo ya se envió el comando: una vez por sesión vty. */
+const pagerSent = new WeakSet<object>();
+
+/**
+ * Apaga el paginador en el equipo al que saltó una pestaña de NetTerminal, antes de leerlo. Solo con
+ * la ruta en un equipo saltado (`steps` no vacío) y la pestaña verificada en él (`atLast`): la sesión
+ * del usuario en el pivote no se toca. Es seguro porque "terminal length 0" y "screen-length 0
+ * temporary" valen solo para esa sesión vty, no cambian la configuración guardada ni la de otras
+ * sesiones y se pierden al salir del equipo. Se envía una vez por ruta (un salto nuevo es otro objeto
+ * de ruta) y, si el equipo lo rechaza o falla, se sigue igual: el lector ya avanza el paginador.
+ * Devuelve el comando enviado, o undefined si no correspondía.
+ */
+export async function pagerOffOnHop(
+  route: { steps: unknown[] } | undefined,
+  atLast: boolean,
+  vendor: TopoVendor | undefined,
+  exec: Exec,
+): Promise<string | undefined> {
+  const cmd = vendor ? PAGER_OFF[vendor] : undefined;
+  if (!route || !route.steps.length || !atLast || !cmd || pagerSent.has(route)) return undefined;
+  pagerSent.add(route);
+  try {
+    await exec(cmd);
+  } catch {
+    // Rechazado o sin respuesta: se sigue con el paginador del equipo.
+  }
+  return cmd;
+}

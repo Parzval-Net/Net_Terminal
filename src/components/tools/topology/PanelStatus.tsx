@@ -212,8 +212,9 @@ export function TrafficSection({
           <Toggle checked={trafficCli} onChange={setTrafficCli} label="También por consola" />
           <p className="mt-0.5 pl-10 text-[11px] text-muted leading-snug">
             Para equipos sin perfil SNMP: envía <span className="font-mono">show interfaces</span>, <span className="font-mono">display interface</span> o{" "}
-            <span className="font-mono">show interfaces extensive</span> a su sesión conectada en cada lectura. Solo consulta, pero ocupa la sesión unos segundos. En Cisco la misma lectura trae el estado,
-            el dúplex y los errores CRC de cada interfaz, que alimentan los problemas de interfaz.
+            <span className="font-mono">show interfaces extensive</span> a su sesión conectada en cada lectura. En Cisco IOS pide solo las interfaces con enlace en el diagrama y solo las líneas de
+            contadores (<span className="font-mono">| include</span>). Solo consulta, pero ocupa la sesión unos segundos; se pausa si la pestaña no está en el prompt del equipo. En Cisco la misma
+            lectura trae el estado, el dúplex y los errores CRC de cada interfaz, que alimentan los problemas de interfaz.
           </p>
         </div>
         <div>

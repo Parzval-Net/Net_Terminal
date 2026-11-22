@@ -780,6 +780,31 @@ function sliceRow(line: string, cols: { name: string; start: number }[]): Record
   return row;
 }
 
+/** Columnas de "show interfaces status" reconocibles por su valor (IOS y NX-OS). */
+const ST_DUPLEX = /^(?:(?:a-)?(?:full|half)|auto|--)$/i;
+const ST_SPEED = /^(?:(?:a-)?\d{1,4}(?:\.\d)?[KMG]?|auto|--)$/i;
+const ST_VLAN = /^(?:\d{1,4}|trunk|routed|unassigned|--)$/i;
+const ST_STATUS = /^[A-Za-z][\w-]{0,20}$/;
+
+/**
+ * Fila de "show interfaces status" anclada desde la derecha: Status, Vlan, Duplex y Speed son
+ * palabras sueltas con valores conocidos ("notconnect 1 auto auto", "connected trunk a-full a-1000"),
+ * la descripción (Name) puede venir vacía o con espacios y el tipo (Type) también ("Not Present").
+ * Se toma el último grupo que calza, así una descripción con palabras parecidas no corre las columnas.
+ * Formato: Cisco, Catalyst 2960 Command Reference, "show interfaces status" (IOS 12.2 y 15.0).
+ */
+function statusRow(line: string): { port: string; desc?: string; status: string; vlan: string; duplex: string; speed: string } | null {
+  const tok = [...line.slice(0, 512).matchAll(/\S+/g)];
+  for (let j = tok.length - 2; j >= 3; j--) {
+    if (!ST_DUPLEX.test(tok[j][0]) || !ST_SPEED.test(tok[j + 1][0]) || !ST_VLAN.test(tok[j - 1][0]) || !ST_STATUS.test(tok[j - 2][0])) continue;
+    const st = tok[j - 2];
+    const desc = line.slice(tok[0][0].length, st.index).trim();
+    // NX-OS escribe "--" en Name cuando la interfaz no tiene descripción.
+    return { port: tok[0][0], desc: desc && desc !== "--" ? desc : undefined, status: st[0], vlan: tok[j - 1][0], duplex: tok[j][0], speed: tok[j + 1][0] };
+  }
+  return null;
+}
+
 /** Claves que no se usan como índice de un objeto con datos del equipo (prototype pollution). */
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
@@ -804,6 +829,13 @@ export function parsePortInfo(outputs: string[]): Record<string, PortInfo> {
       const vlanAt = cols.find((c) => c.name === "Vlan")?.start ?? 0;
       for (const l of lines.slice(hi + 1)) {
         if (!/^\S/.test(l) || /^-+/.test(l) || /[#>]\s*$/.test(l)) continue;
+        // Primero desde la derecha (Status Vlan Duplex Speed reconocibles): no depende de que la fila
+        // calce con el encabezado. Una fila corrida dejaba "notconnect   1" como descripción.
+        const a = statusRow(l);
+        if (a) {
+          put(a.port, { status: a.status, speed: a.speed, desc: a.desc, vlan: a.vlan, duplex: a.duplex });
+          continue;
+        }
         const r = sliceRow(l.slice(0, vlanAt), cols.filter((c) => c.name !== "Vlan"));
         const [vlan, duplex, speed] = l.slice(vlanAt).trim().split(/\s+/);
         // NX-OS escribe "--" en Name cuando la interfaz no tiene descripción.

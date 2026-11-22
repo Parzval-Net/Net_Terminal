@@ -1197,6 +1197,9 @@ if (TOPO_SNMP_SCENE) {
   if (tu) localStorage.setItem("topoUi", JSON.stringify({ ver: 4, panel: true, ...JSON.parse(localStorage.getItem("topoUi") ?? "{}"), ...JSON.parse(tu) }));
 }
 
+// ?nosnmp=1: sin perfiles SNMP (el tráfico de Topología se lee por consola; medición de bytes por ciclo).
+if (new URLSearchParams(location.search).has("nosnmp")) settings.snmpProfiles = [];
+
 // ---- Modo video (?video=1, scripts/video): la terminal responde a lo que se escribe o envía,
 // las sesiones nuevas se guardan y ?update=1 simula una versión nueva. Las capturas no lo usan.
 if (new URLSearchParams(location.search).has("video")) {
@@ -1316,7 +1319,7 @@ if (new URLSearchParams(location.search).has("video")) {
   };
   // Respuesta de ejemplo a un comando (texto con \r\n al final o vacío).
   const respond = (id, s, raw) => {
-    const [cmd, filter] = raw.trim().split(/\s*\|\s*(?:include|i)\s+/);
+    const [cmd, filter] = raw.trim().split(/\s*\|\s*(?:include|i)\s+(.*)$/);
     const c = cmd.toLowerCase();
     let body = "";
     if (s.type === "local") {
@@ -1332,18 +1335,23 @@ if (new URLSearchParams(location.search).has("video")) {
       const pid = /router|^rt-|^mx-borde/.test(s.name ?? "") ? "ISR4331/K9" : "C9500-24Y4C";
       body = `Cisco IOS XE Software, Version 17.12.04\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE)\n${s.name} uptime is 47 weeks, 17 hours, 30 minutes\ncisco ${pid} (1RU) processor with 1795999K/6147K bytes of memory.\nModel Number                       : ${pid}`;
     }
-    else if (/^sh(ow)? int(erfaces?)?$/.test(c) && s.highlight !== "huawei") {
+    else if (/^sh(ow)? int(erfaces?)?(?:\s+[a-z-]+\s*\d[\d/.:]*)?$/.test(c) && s.highlight !== "huawei") {
+      // "show interfaces Gig1/0/1": solo esa interfaz (tipo abreviado y mismo número).
+      const one = c.match(/\s([a-z-]+)\s*(\d[\d/.:]*)$/);
       // Contadores de las interfaces del equipo (los mismos que el agente SNMP simulado), como
       // "show interfaces" de IOS-XE: crecen con el tiempo, con la velocidad física y el BW.
       const ifs = SNMP_IFS[Object.keys(SNMP_NAMES).find((ip) => SNMP_NAMES[ip] === (hopOf(id).stack.at(-1) ?? s.name))] ?? [];
       body = ifs
         .map(([i, n, sp, inB, outB], k) => {
           const full = n.replace(/^Te/, "TenGigabitEthernet").replace(/^Gi/, "GigabitEthernet");
+          if (one && !(full.toLowerCase().startsWith(one[1]) && full.slice(full.search(/\d/)) === one[2])) return null;
           const pk = (o) => Math.round(Number(o) / 700);
           const io = octetsAt(inB, k), oo = octetsAt(outB, k + 1);
           return `${full} is up, line protocol is up (connected)\n  Hardware is Ten Gigabit Ethernet, address is 0011.2233.${i}\n  MTU 1500 bytes, BW ${sp * 1000} Kbit/sec, DLY 10 usec,\n  Full-duplex, ${sp}Mb/s, media type is SFP-10GBase-LR\n  5 minute input rate 0 bits/sec, 0 packets/sec\n     ${pk(io)} packets input, ${io} bytes, 0 no buffer\n     ${pk(oo)} packets output, ${oo} bytes, 0 underruns`;
         })
+        .filter((x) => x !== null)
         .join("\n");
+      if (one && !body) body = "                ^\n% Invalid input detected at '^' marker.\n";
     }
     else if (/^sh(ow)? ip int(erface)? br/.test(c)) body = IPBRIEF;
     else if (chainOn && /^sh(ow)? cdp nei\w* detail/.test(c)) body = chainCdp(id);
@@ -1356,7 +1364,16 @@ if (new URLSearchParams(location.search).has("video")) {
     else if (c === "end") modes.delete(id);
     else if (c === "exit") modes.get(id) === "config" ? modes.delete(id) : modes.get(id) && modes.set(id, "config");
     else if (/^(write|wr)( mem)?/.test(c)) body = "Building configuration...\n[OK]";
-    if (filter) body = body.split("\n").filter((l) => l.includes(filter)).join("\n");
+    // "| include" de IOS es una expresión regular (admite alternativas con "|").
+    if (filter) {
+      let re = null;
+      try {
+        re = new RegExp(filter);
+      } catch {
+        /* literal */
+      }
+      body = body.split("\n").filter((l) => (re ? re.test(l) : l.includes(filter))).join("\n");
+    }
     body = body.replace(/\n/g, "\r\n");
     return body ? body + "\r\n" : "";
   };
@@ -1415,6 +1432,9 @@ if (new URLSearchParams(location.search).has("video")) {
         ? "Proceed with reload? [confirm]\r\n"
         : respond(args.conn, s, args.command);
     const output = `${prompt}${args.command}\r\n${body}${prompt}`;
+    // Medición: bytes y comandos que devuelve el equipo simulado (lectura de tráfico por consola).
+    window.__ntRunBytes = (window.__ntRunBytes ?? 0) + output.length;
+    (window.__ntRunLog ??= []).push({ conn: args.conn, command: args.command, bytes: output.length });
     setTimeout(() => {
       emit("tool-job", { job, kind: "result", text: "", data: { ok: !bad && !declined, output, declined } });
       emit("tool-job", { job, kind: "done", text: "" });

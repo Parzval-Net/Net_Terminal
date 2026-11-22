@@ -1564,6 +1564,7 @@ function Workspace({
                 tabs={tabBriefs}
                 onFocusTab={focusTab}
                 onReconnectTab={reconnectTab}
+                onRenameTab={h.renameTab}
                 onToast={toast}
                 sessions={sessions}
                 onScp={h.scp}

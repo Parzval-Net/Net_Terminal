@@ -4,7 +4,7 @@ import { runOnDeviceResult } from "../../lib/deviceRun";
 import { vendorFor } from "../../lib/commands";
 import { computeRisk } from "../../lib/packs";
 import { SnmpProfile, targetParams } from "../../lib/snmp";
-import { PortInfo, TopoNode, TopoVendor, Topology, canonPort, isCliError, knownAddrs, nodeId, promptName } from "../../lib/topology";
+import { PortInfo, TopoNode, TopoVendor, Topology, canonPort, isCliError, knownAddrs, nodeId, promptName, vendorFromPrompt } from "../../lib/topology";
 import { atPrompt } from "../../lib/cliText";
 import { OID, TopoRead, ifIndexByPort, ifNames, walksComplete } from "../../lib/topoSnmp";
 import {
@@ -18,10 +18,13 @@ import {
   parseCounterGets,
   portEntry,
   portRate,
+  isFilteredTraffic,
   trafficCommands,
+  trafficPlan,
 } from "../../lib/topoTraffic";
+import { pagerOffOnHop } from "../../lib/topoRun";
 import type { TerminalRef } from "./FileManager";
-import { promptIsDevice } from "../../lib/hopTab";
+import { promptIsDevice, routePosition, vendorOfPlatform } from "../../lib/hopTab";
 import type { TabRoute } from "../../lib/hopTab";
 
 export type TrafficInterval = 15 | 30 | 60;
@@ -54,14 +57,17 @@ const CLI_READ_SECS = 120;
 const IF_INDEX_RETRY_MS = 5 * 60_000;
 const NO_SECRETS = { community: "", authPass: "", privPass: "" };
 
-/** Interfaces del equipo con algún enlace en el diagrama (clave canonPort). */
-function linkedPorts(t: Topology, id: string): string[] {
-  const ports = new Set<string>();
+/**
+ * Interfaces del equipo con algún enlace en el diagrama: clave canonPort y nombre tal como lo anunció
+ * el vecino (para pedirlas una por una por consola).
+ */
+function linkedPorts(t: Topology, id: string): Map<string, string> {
+  const ports = new Map<string, string>();
   for (const l of t.links) {
-    if (l.a === id && l.aPort) ports.add(canonPort(l.aPort));
-    if (l.b === id && l.bPort) ports.add(canonPort(l.bPort));
+    if (l.a === id && l.aPort && !ports.has(canonPort(l.aPort))) ports.set(canonPort(l.aPort), l.aPort);
+    if (l.b === id && l.bPort && !ports.has(canonPort(l.bPort))) ports.set(canonPort(l.bPort), l.bPort);
   }
-  return [...ports].slice(0, MAX_TRAFFIC_IFACES);
+  return new Map([...ports].slice(0, MAX_TRAFFIC_IFACES));
 }
 
 /** Perfil SNMP del equipo (misma IP o mismo nombre), con secretos en la bóveda y GETBULK. */
@@ -193,26 +199,55 @@ export function useTopoTraffic({
       return out;
     };
 
-    const readCli = async (n: TopoNode, term: TerminalRef, ports: string[], state: Map<string, PortInfo>, note: { partial?: string }): Promise<Map<string, CounterSample>> => {
+    const readCli = async (n: TopoNode, term: TerminalRef, portNames: Map<string, string>, state: Map<string, PortInfo>, note: { partial?: string }): Promise<Map<string, CounterSample>> => {
+      const ports = [...portNames.keys()];
       const h = term.highlight && term.highlight !== "off" ? (vendorFor(term.highlight) as TopoVendor) : undefined;
-      // Nunca a ciegas: sin prompt en pantalla (paginador, contraseña, comando del usuario a medias)
-      // el primer carácter se pierde y el comando llega mutilado.
-      if (!atPrompt(term.screen?.(6))) throw new BusyTab();
+      // Nunca a ciegas: sin prompt en pantalla (paginador, contraseña, comando del usuario a medias o
+      // el usuario escribiendo en esa pestaña) el primer carácter se pierde y el comando llega mutilado.
+      const screen = term.screen?.(6);
+      if (!atPrompt(screen)) throw new BusyTab();
+      const route = term.tabId ? ctx.current.routes?.[term.tabId] : undefined;
+      // Y solo en el equipo esperado: tras un exec-timeout en un salto la pestaña vuelve al pivote y
+      // antes se le enviaba la lectura igual (se descartaba después, pero llenaba su pantalla).
+      const seen = screen === undefined ? null : promptName(screen.replace(/\r/g, "").trimEnd());
+      if (seen && !promptIsDevice(seen, n.id, n.aliases, route)) throw new Error(`su pestaña está ahora en ${seen}: no se envió la lectura`);
+      // Pestaña de salto de NetTerminal en el equipo: sin paginador en esa sesión vty (ver topoRun.ts).
+      const vendor = vendorOfPlatform(n.platform) ?? (h && screen && vendorFromPrompt(screen.replace(/\r/g, "")) === h ? h : undefined);
+      const atLast = !!route && screen !== undefined && routePosition(route, screen) === route.steps.length;
+      await pagerOffOnHop(route, atLast, vendor, (c) => runOnDeviceResult(term.connId, c, 20));
       const known = cliCmd.current.get(n.id);
       // Defensa en profundidad: solo se envían comandos de consulta.
       const cmds = (known ? [known] : trafficCommands(term.session.platform, h)).filter((c) => computeRisk(c) === "read");
       if (!cmds.length) throw new Error("sin comando de contadores para este fabricante");
+      /** Lee con un plan de comandos; las respuestas con error (una interfaz que no existe) se omiten. */
+      const runPlan = async (plan: string[]): Promise<{ out: string; cut?: string }> => {
+        const parts: string[] = [];
+        for (const [i, c] of plan.entries()) {
+          // Entre comandos el usuario pudo empezar a escribir en la pestaña: se deja para la próxima ronda.
+          if (i > 0 && !atPrompt(term.screen?.(6))) throw new BusyTab();
+          const r = await runOnDeviceResult(term.connId, c, CLI_READ_SECS);
+          parts.push(r.output);
+          if (r.cut) return { out: parts.join("\n"), cut: `${c}: ${r.cut}` };
+        }
+        const ok = parts.filter((p) => !isCliError(p));
+        return { out: ok.length ? ok.join("\n") : (parts.at(-1) ?? "") };
+      };
       let out = "";
       for (const cmd of cmds) {
-        const r = await runOnDeviceResult(term.connId, cmd, CLI_READ_SECS);
-        out = r.output;
+        // Solo las interfaces con enlace en el diagrama, una por una, si son pocas (trafficPlan).
+        const plan = trafficPlan(cmd, [...portNames.values()]).filter((c) => computeRisk(c) === "read");
+        let r = await runPlan(plan.length ? plan : [cmd]);
+        // Ninguna interfaz respondió por nombre: el mismo comando para todas.
+        if (!r.cut && plan.length > 1 && isCliError(r.out)) r = await runPlan([cmd]);
+        out = r.out;
         // Salida cortada (plazo, tope de páginas): trae solo parte de las interfaces. Se usan las que
         // alcanzaron a llegar, se avisa y el comando no se recuerda como bueno.
         if (r.cut) {
-          note.partial = `${cmd}: ${r.cut}`;
+          note.partial = r.cut;
           break;
         }
-        if (!isCliError(out)) {
+        // Un comando filtrado que no trae contadores (otro formato) no se da por bueno: sigue el completo.
+        if (!isCliError(out) && (!isFilteredTraffic(cmd) || parseCliCounters(out).size)) {
           cliCmd.current.set(n.id, cmd);
           break;
         }
@@ -252,7 +287,8 @@ export function useTopoTraffic({
       const jobs = t.nodes
         .filter((n) => n.explored)
         .map(async (n): Promise<[string, Map<string, PortRate>] | null> => {
-          const ports = linkedPorts(t, n.id);
+          const portNames = linkedPorts(t, n.id);
+          const ports = [...portNames.keys()];
           if (!ports.length) return null;
           const p = profileFor(n, ps);
           const term = !p && cli ? terminalFor(n, ts, tabRoutes) : undefined;
@@ -271,7 +307,7 @@ export function useTopoTraffic({
           try {
             const state = new Map<string, PortInfo>();
             const note: { partial?: string } = {};
-            const samples = p ? await readSnmp(n, p, ports) : await readCli(n, term!, ports, state, note);
+            const samples = p ? await readSnmp(n, p, ports) : await readCli(n, term!, portNames, state, note);
             if (state.size) liveNow.set(n.id, state);
             const before = prev.current.get(n.id) ?? new Map<string, CounterSample>();
             // Lectura cortada: las interfaces que no alcanzaron a llegar conservan su lectura anterior y su
