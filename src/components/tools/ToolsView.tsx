@@ -147,6 +147,12 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     setVisited((v) => (v.has(id) ? v : new Set(v).add(id)));
   };
 
+  // Transferencias ofrece Respaldos cuando el equipo no puede llegar a este PC (VPN, NAT, salto).
+  // `go` solo usa setters y persist: la acción es estable.
+  const backupOn = settings.modules.backup !== false;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const openBackup = useCallback(() => go("backup"), []);
+
   useEffect(() => {
     if (!enabled.some((n) => n.id === current) && enabled[0]) go(enabled[0].id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -215,9 +221,10 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         terminals={terminals}
         onConfirm={onConfirm}
         onScp={onScp}
+        onOpenBackup={backupOn ? openBackup : undefined}
       />
     ),
-    [settings, running, update, refreshRunning, terminals, onConfirm, onScp],
+    [settings, running, update, refreshRunning, terminals, onConfirm, onScp, backupOn, openBackup],
   );
   const syslogEl = useMemo(
     () => <SyslogTool settings={settings} running={running} onChange={update} refreshRunning={refreshRunning} />,

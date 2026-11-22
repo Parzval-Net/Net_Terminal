@@ -17,6 +17,7 @@ import {
   ruleKey,
   runs,
   schemes,
+  uniqueRules,
 } from "../lib/highlight";
 import { fontStack } from "../lib/theme";
 
@@ -72,7 +73,10 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
   const customize = (schemeId: string) => {
     const sc = schemes.find((x) => x.id === schemeId);
     if (!sc) return;
-    setRules([...rules, ...sc.rules.map((r) => ({ ...r, id: newId(), name: `${sc.name}: ${r.name}` }))]);
+    // Copiar dos veces el mismo esquema no duplica reglas: solo se agregan las que aún no están.
+    const add = uniqueRules(sc.rules, rules);
+    if (!add.length) return flash(`Las reglas de ${sc.name} ya están copiadas abajo`);
+    setRules([...rules, ...add.map((r) => ({ ...r, id: newId(), name: `${sc.name}: ${r.name}` }))]);
     flash(`Reglas de ${sc.name} copiadas abajo: edítalas y tendrán prioridad`);
   };
 
@@ -94,8 +98,11 @@ export function HighlightSettings({ settings: s, theme, onChange }: Props) {
           r && typeof r.pattern === "string" && !!r.style && typeof r.style === "object" && !regexError(r.pattern) && !riskyRegex(r.pattern, !!r.ignoreCase),
       );
       if (!list.length) throw new Error();
-      setRules([...rules, ...list.map((r) => ({ ...r, id: newId(), name: r.name || r.pattern }))]);
-      flash(`${plural(list.length, "regla importada", "reglas importadas")}`);
+      const add = uniqueRules(list, rules);
+      if (!add.length) return flash("Esas reglas ya están en la lista");
+      setRules([...rules, ...add.map((r) => ({ ...r, id: newId(), name: r.name || r.pattern }))]);
+      const skipped = list.length - add.length;
+      flash(`${plural(add.length, "regla importada", "reglas importadas")}${skipped ? ` (${plural(skipped, "repetida omitida", "repetidas omitidas")})` : ""}`);
     } catch {
       flash("El portapapeles no contiene reglas válidas (JSON)");
     }

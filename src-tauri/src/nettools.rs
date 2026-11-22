@@ -330,6 +330,9 @@ pub struct LocalIf {
     ip: String,
     /// Interfaz que el sistema usa para la ruta por defecto.
     default: bool,
+    /// Máscara de la red de la interfaz (vacía si el sistema no la informa): permite ver si un
+    /// equipo está en una red local de este PC o se llega a él por un router, VPN o NAT.
+    mask: String,
 }
 
 /// Orden de preferencia por nombre: físicas primero (en*, eth*, Ethernet, Wi-Fi, wlan) y
@@ -373,7 +376,11 @@ pub fn local_ips() -> Vec<LocalIf> {
         .filter(|i| !i.is_loopback() && i.ip().is_ipv4())
         .map(|i| {
             let ip = i.ip().to_string();
-            LocalIf { default: default.as_deref() == Some(ip.as_str()), name: i.name.clone(), ip }
+            let mask = match &i.addr {
+                if_addrs::IfAddr::V4(a) => a.netmask.to_string(),
+                _ => String::new(),
+            };
+            LocalIf { default: default.as_deref() == Some(ip.as_str()), name: i.name.clone(), ip, mask }
         })
         .collect();
     sort_ifs(&mut list);
@@ -553,7 +560,7 @@ mod tests {
 
     #[test]
     fn ranks_physical_interfaces_before_virtual_ones() {
-        let mk = |name: &str, default: bool| LocalIf { name: name.into(), ip: String::new(), default };
+        let mk = |name: &str, default: bool| LocalIf { name: name.into(), ip: String::new(), default, mask: String::new() };
         let mut l = vec![mk("bridge100", false), mk("utun3", false), mk("en0", false), mk("vEthernet (WSL)", false), mk("Wi-Fi", false), mk("Ethernet 2", false)];
         sort_ifs(&mut l);
         let names: Vec<_> = l.iter().map(|i| i.name.as_str()).collect();
@@ -572,6 +579,8 @@ mod tests {
         for i in &list {
             let ip: std::net::IpAddr = i.ip.parse().unwrap();
             assert!(ip.is_ipv4() && !ip.is_loopback() && !i.name.is_empty(), "{}", i.ip);
+            // La máscara viene en notación punteada (para ver si un equipo está en la misma red).
+            assert!(i.mask.parse::<std::net::Ipv4Addr>().is_ok(), "{}: máscara {:?}", i.name, i.mask);
         }
         // "default" marca solo la IP de origen de la ruta por defecto, y esa va primero.
         let route = route_source(([192, 0, 2, 1], 9).into());

@@ -137,6 +137,10 @@ const preview = (over = {}) => ({
   assert.equal(rules[0].name, "VLAN (importado)");
   assert.notEqual(rules[0].id, "c1");
   assert.deepEqual(rules[0].style, { color: "red" }, "estilo sin campos desconocidos");
+  // Importar de nuevo las mismas reglas (misma expresión, flags y estilo) no las duplica.
+  const held = [{ id: "c1", name: "VLAN", pattern: "\\bvlan\\b", style: { color: "red" } }];
+  const again = B.validRules([{ id: "z9", name: "Otra", pattern: "\\bvlan\\b", style: { color: "red" } }, { id: "z8", name: "Otra", pattern: "\\bvlan\\b", style: { color: "blue" } }]);
+  assert.deepEqual(B.planRules(held, again).map((r) => r.style.color), ["blue"], "solo la que cambia de estilo");
   // Packs: un id que ya existe (o de un pack incluido) se renombra.
   const pk = (id) => ({ format: "netterminal-commands", formatVersion: 1, id, name: id, vendor: "cisco", vendorName: "Cisco", commands: [{ cmd: "reload", desc: "x", cat: "Sistema", risk: "read" }] });
   const planned = B.planPacks(["user-cisco"], [pk("user-cisco"), pk("builtin-cisco"), pk("nuevo")]);
