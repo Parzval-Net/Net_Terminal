@@ -300,7 +300,7 @@ function cleanTopology(v: unknown): Settings["topology"] | null {
     return (v === undefined ? rest : { ...rest, [k]: v }) as T;
   };
   return {
-    nodes: nodes.map((n) => opt(n, "aliases", strs(n.aliases))),
+    nodes: nodes.map((n) => opt(opt(n, "aliases", strs(n.aliases)), "readAt", typeof n.readAt === "number" && Number.isFinite(n.readAt) ? n.readAt : undefined)),
     links: links.map((l) => opt(opt(l, "seenBy", strs(l.seenBy)), "staleSince", typeof l.staleSince === "number" && Number.isFinite(l.staleSince) ? l.staleSince : undefined)),
   };
 }
