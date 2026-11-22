@@ -33,6 +33,7 @@ import {
   vendorOfPlatform,
 } from "../../../lib/hopTab";
 import { HopCredInfo, hopCredKey, isIpLiteral } from "../../../lib/hopCred";
+import { reachRisk } from "../../../lib/transferCmds";
 import { TopoNode, TopoVendor, Topology, backCommand, hopCommand, knownAddrs, nodeId, vendorFromPrompt } from "../../../lib/topology";
 import type { Session } from "../../../types";
 import type { MenuItem } from "../../tabMenu";
@@ -502,6 +503,16 @@ export function useTopoHops({
     return cmd ? { cmd, user: proto === "ssh" && v !== "huawei" ? user : "" } : null;
   };
 
+  // Redes de este PC (IP y máscara): un equipo fuera de todas ellas se abre por su ruta de salto, si la hay.
+  const localIfs = useRef<{ ip: string; mask?: string }[]>([]);
+  /** Equipos que el usuario eligió abrir directo: la preferencia por el pivote ya no se aplica. */
+  const directChosen = useRef(new Set<string>());
+  useEffect(() => {
+    invoke<{ ip: string; mask?: string }[]>("local_ips")
+      .then((l) => (localIfs.current = l ?? []))
+      .catch(() => {});
+  }, []);
+
   /** Plan de "Abrir terminal" para un equipo con el estado de este momento (pestañas, rutas, sesiones guardadas). */
   const computePlan = (n: TopoNode) => {
     const { terminals: terms, tabs: briefs } = liveRef.current;
@@ -535,7 +546,10 @@ export function useTopoHops({
       tabs: planTabs,
       saved,
       cameFrom: cameFromRef.current,
-      needsPivot: !!pivot[n.id],
+      // Sin sesión guardada y con su IP fuera de las redes de este PC (laboratorio tras un pivote, NAT o
+      // VPN): se prefiere la ruta por el pivote; "Conectar directo" sigue en el menú. Antes se intentaba
+      // directo y la pestaña quedaba en "Conectando a…" sin llegar.
+      needsPivot: !!pivot[n.id] || (!saved.get(n.id) && !directChosen.current.has(n.id) && !!n.ip && reachRisk({ host: n.ip, ifs: localIfs.current }) === "routed"),
       directOk,
       cmdFor,
     });
@@ -545,6 +559,7 @@ export function useTopoHops({
   const runChoice = (c: OpenChoice, n: TopoNode) => {
     if (c.kind === "focus" && c.tabId) return onFocusTab(c.tabId);
     if (c.kind === "direct") {
+      directChosen.current.add(n.id);
       setUi((u) => (u.pivot[n.id] ? { ...u, pivot: Object.fromEntries(Object.entries(u.pivot).filter(([k]) => k !== n.id)) } : u));
       return follow(n);
     }
