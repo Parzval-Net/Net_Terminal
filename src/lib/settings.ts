@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { HlRule } from "./highlight";
+import { type HlRule, uniqueRules } from "./highlight";
 import { type AlertRule, exampleAlerts } from "./alerts";
 import type { MonitorTarget } from "./monitors";
 import type { DeviceInfoMap } from "./lifecycle";
@@ -271,6 +271,8 @@ export function mergeSettings(loaded: unknown): Settings {
         return s && topo && typeof s.id === "string" && typeof s.name === "string" ? [{ ...s, topo, ts: Number(s.ts) || 0 }] : [];
       })
     : [];
+  // Reglas propias duplicadas (un esquema copiado dos veces): se conserva la primera de cada una.
+  out.customRules = Array.isArray(out.customRules) ? uniqueRules((out.customRules as unknown[]).filter((r): r is HlRule => isObj(r) && typeof r.pattern === "string")) : [];
   out.deviceInfo = Object.fromEntries(
     Object.entries(isObj(out.deviceInfo) ? out.deviceInfo : {}).filter(([, v]) => isObj(v) && (v.model === undefined || typeof v.model === "string") && (v.version === undefined || typeof v.version === "string")),
   );

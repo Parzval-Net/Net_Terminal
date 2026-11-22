@@ -138,6 +138,7 @@ export const TopologyTool = memo(function TopologyTool({
   tabs,
   onFocusTab,
   onReconnectTab,
+  onRenameTab,
   onConfirm,
   lifecycle = false,
 }: {
@@ -160,6 +161,8 @@ export const TopologyTool = memo(function TopologyTool({
   /** Activa una pestaña: sale de Herramientas, a pedido del usuario. */
   onFocusTab: (tabId: string) => void;
   onReconnectTab: (tabId: string) => void;
+  /** Cambia el título de una pestaña: el de una pestaña de salto sigue a su ruta. */
+  onRenameTab?: (tabId: string, title: string | undefined) => void;
   /** Confirmación de la app (ConfirmDialog) para borrar o reemplazar el diagrama y los snapshots. */
   onConfirm: (req: ConfirmReq) => void;
   /** Ciclo de vida activado en Ajustes: muestra EoL y versión en el detalle del equipo. */
@@ -298,6 +301,7 @@ export const TopologyTool = memo(function TopologyTool({
     onOpenSession,
     onFocusTab,
     onReconnectTab,
+    onRenameTab,
     setMsg,
     setConnId,
   });

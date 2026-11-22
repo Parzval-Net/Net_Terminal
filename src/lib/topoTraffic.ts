@@ -6,7 +6,7 @@
  */
 import type { LinkTraffic, TopoLink, TopoVendor } from "./topology";
 import { plainCli, stripPager } from "./cliText";
-import { canonPort, isCliError, knownAddrs, withNoPager } from "./topology";
+import { canonPort, isCliError, isSafeIface, knownAddrs, withNoPager } from "./topology";
 import type { TopoNode } from "./topology";
 import { OID } from "./topoSnmp";
 import { tabAtDevice } from "./hopTab";
@@ -370,6 +370,11 @@ export function parseCounterGets(rows: GetRow[], ifIndexes: number[], hc: boolea
  *   Input bytes / Output bytes"), Juniper, "show interfaces extensive",
  *   https://juniper.net/documentation/en_US/junos13.1/topics/reference/command-summary/show-interfaces-extensive.html
  * FortiOS queda fuera (sin comando de consulta verificado con contadores por interfaz).
+ *
+ * En Cisco IOS/IOS-XE va primero filtrado (CISCO_TRAFFIC_FILTER): "show interfaces" completo de un
+ * 2960 de 48 puertos son ~30 líneas por interfaz (más de 50 KB por lectura en el scrollback). Con el
+ * filtro quedan las ~6 líneas que usa el cálculo (encabezado, BW, dúplex y velocidad, bytes de
+ * entrada y salida, errores), con los mismos contadores y la misma tasa.
  */
 export const TRAFFIC_COMMANDS: Record<TopoVendor, string | undefined> = {
   cisco: "show interfaces",
@@ -378,6 +383,37 @@ export const TRAFFIC_COMMANDS: Record<TopoVendor, string | undefined> = {
   fortinet: undefined,
 };
 export const TRAFFIC_FALLBACK: Record<string, string> = { "show interfaces": "show interface" };
+
+/**
+ * "show interfaces" de IOS/IOS-XE con solo las líneas que lee parseCliCounters. "include" de IOS
+ * acepta una expresión regular con alternativas ("|"), Cisco, "Using the Cisco IOS Command-Line
+ * Interface", Filtering Output / Regular Expressions. Si el equipo no lo reconoce (NX-OS, otra
+ * sintaxis) o no trae contadores, se sigue con el comando completo.
+ */
+export const CISCO_TRAFFIC_FILTER = "show interfaces | include line protocol|packets input|packets output|duplex|BW|CRC";
+/** Comandos filtrados: una respuesta sin contadores no los da por buenos (se prueba el siguiente). */
+export const isFilteredTraffic = (cmd: string) => cmd === CISCO_TRAFFIC_FILTER;
+
+/**
+ * Tope de interfaces que se leen una por una ("show interfaces Gi1/0/5 | include …", un comando cada
+ * una). Un switch de acceso suele tener uno a cuatro enlaces en el diagrama: así se lee solo lo que
+ * se dibuja. Con más enlaces va un solo comando filtrado (menos idas y vueltas por ronda).
+ */
+export const PER_PORT_MAX = 8;
+
+/**
+ * Comandos de una lectura de contadores: con el comando filtrado de IOS y hasta PER_PORT_MAX
+ * interfaces con enlace, uno por interfaz (nombre tal como lo anunció el vecino, sin espacios:
+ * "Gig 1/0/1" pasa a "Gig1/0/1", que IOS acepta); si no, el comando tal cual. Un nombre que no es
+ * de interfaz (podría traer "| algo") deja la lectura en el comando único.
+ */
+export function trafficPlan(cmd: string, ports: string[]): string[] {
+  if (!isFilteredTraffic(cmd) || !ports.length || ports.length > PER_PORT_MAX) return [cmd];
+  const names = [...new Set(ports.map((p) => p.replace(/\s+/g, "")))];
+  if (!names.every(isSafeIface)) return [cmd];
+  const filter = cmd.slice("show interfaces".length);
+  return names.map((n) => `show interfaces ${n}${filter}`);
+}
 
 /**
  * Comandos de contadores a probar para una sesión, en orden. Con la plataforma detectada (o
@@ -403,6 +439,8 @@ export function trafficCommands(platform: string | undefined, highlightVendor: T
   for (const v of vendors) {
     const c = TRAFFIC_COMMANDS[v];
     if (!c) continue;
+    // NX-OS no reconoce "show interfaces" y su formato no trae "line protocol": va directo al completo.
+    if (v === "cisco" && p !== "nxos") out.push(CISCO_TRAFFIC_FILTER);
     out.push(withNoPager(v, c), c);
     if (TRAFFIC_FALLBACK[c]) out.push(TRAFFIC_FALLBACK[c]);
   }

@@ -666,10 +666,11 @@ const handlers = {
   tftp_files: () => [["c9300-universalk9.17.12.04.SPA.bin", 1_163_845_632], ["AR6100-V300R022C10SPC100.cc", 168_820_736], ["FGT_200F-v7.4.5.out", 92_340_224]],
   // Como el backend: primero la de la ruta por defecto, luego físicas y al final virtuales.
   local_ips: () => [
-    { name: "en0", ip: "192.0.2.250", default: true },
-    { name: "en7", ip: "198.51.100.20", default: false },
-    { name: "bridge100", ip: "198.51.100.200", default: false },
-    { name: "utun4", ip: "203.0.113.9", default: false },
+    { name: "en0", ip: "192.0.2.250", default: true, mask: "255.255.255.0" },
+    { name: "en7", ip: "198.51.100.20", default: false, mask: "255.255.255.0" },
+    { name: "bridge100", ip: "198.51.100.200", default: false, mask: "255.255.255.0" },
+    // VPN punto a punto: 203.0.113.x (sucursales) no es una red local de este PC.
+    { name: "utun4", ip: "203.0.113.9", default: false, mask: "255.255.255.255" },
   ],
   // Solo lectura en el backend: el mock guarda las marcas (window.__roConns) y las llamadas (window.__roCalls) para revisarlas.
   set_read_only: ({ id, on }) => {
@@ -789,6 +790,19 @@ const handlers = {
   // MD5 de la copia del PC; el equipo devuelve el mismo en "verify /md5" (o ?md5bad, otro).
   tftp_md5: () => "3f2a9c1e5b7d4a6f8e0c2b4d6f8a1c3e",
   device_run: ({ conn, command }) => {
+    // Probar alcance (Transferencias): los equipos del sitio central llegan al PC; los de sucursales, no.
+    if (/^(execute )?ping /.test(command)) {
+      const job = `job-${nextId++}`;
+      const host = connSessions.get(conn)?.host ?? "";
+      const ok = !host.startsWith("203.0.113.");
+      const ip = command.split(" ").find((x) => /^\d+\.\d+\.\d+\.\d+$/.test(x));
+      setTimeout(() => {
+        const output = `${command}\r\nType escape sequence to abort.\r\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\r\n${ok ? "!!!!!\r\nSuccess rate is 100 percent (5/5)" : ".....\r\nSuccess rate is 0 percent (0/5)"}\r\n#`;
+        emit("tool-job", { job, kind: "result", text: "", data: { ok: true, output } });
+        emit("tool-job", { job, kind: "done", text: "" });
+      }, 500);
+      return job;
+    }
     // ?scpbusy: la sesión está tomada por un script en las dos primeras verificaciones.
     if (/^verify \/md5/.test(command) && location.search.includes("scpbusy") && busyVerifies++ < 2)
       throw "Un script está usando esta sesión. Espera a que termine o usa Detener script.";
@@ -1197,6 +1211,9 @@ if (TOPO_SNMP_SCENE) {
   if (tu) localStorage.setItem("topoUi", JSON.stringify({ ver: 4, panel: true, ...JSON.parse(localStorage.getItem("topoUi") ?? "{}"), ...JSON.parse(tu) }));
 }
 
+// ?nosnmp=1: sin perfiles SNMP (el tráfico de Topología se lee por consola; medición de bytes por ciclo).
+if (new URLSearchParams(location.search).has("nosnmp")) settings.snmpProfiles = [];
+
 // ---- Modo video (?video=1, scripts/video): la terminal responde a lo que se escribe o envía,
 // las sesiones nuevas se guardan y ?update=1 simula una versión nueva. Las capturas no lo usan.
 if (new URLSearchParams(location.search).has("video")) {
@@ -1316,7 +1333,7 @@ if (new URLSearchParams(location.search).has("video")) {
   };
   // Respuesta de ejemplo a un comando (texto con \r\n al final o vacío).
   const respond = (id, s, raw) => {
-    const [cmd, filter] = raw.trim().split(/\s*\|\s*(?:include|i)\s+/);
+    const [cmd, filter] = raw.trim().split(/\s*\|\s*(?:include|i)\s+(.*)$/);
     const c = cmd.toLowerCase();
     let body = "";
     if (s.type === "local") {
@@ -1332,18 +1349,23 @@ if (new URLSearchParams(location.search).has("video")) {
       const pid = /router|^rt-|^mx-borde/.test(s.name ?? "") ? "ISR4331/K9" : "C9500-24Y4C";
       body = `Cisco IOS XE Software, Version 17.12.04\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE)\n${s.name} uptime is 47 weeks, 17 hours, 30 minutes\ncisco ${pid} (1RU) processor with 1795999K/6147K bytes of memory.\nModel Number                       : ${pid}`;
     }
-    else if (/^sh(ow)? int(erfaces?)?$/.test(c) && s.highlight !== "huawei") {
+    else if (/^sh(ow)? int(erfaces?)?(?:\s+[a-z-]+\s*\d[\d/.:]*)?$/.test(c) && s.highlight !== "huawei") {
+      // "show interfaces Gig1/0/1": solo esa interfaz (tipo abreviado y mismo número).
+      const one = c.match(/\s([a-z-]+)\s*(\d[\d/.:]*)$/);
       // Contadores de las interfaces del equipo (los mismos que el agente SNMP simulado), como
       // "show interfaces" de IOS-XE: crecen con el tiempo, con la velocidad física y el BW.
       const ifs = SNMP_IFS[Object.keys(SNMP_NAMES).find((ip) => SNMP_NAMES[ip] === (hopOf(id).stack.at(-1) ?? s.name))] ?? [];
       body = ifs
         .map(([i, n, sp, inB, outB], k) => {
           const full = n.replace(/^Te/, "TenGigabitEthernet").replace(/^Gi/, "GigabitEthernet");
+          if (one && !(full.toLowerCase().startsWith(one[1]) && full.slice(full.search(/\d/)) === one[2])) return null;
           const pk = (o) => Math.round(Number(o) / 700);
           const io = octetsAt(inB, k), oo = octetsAt(outB, k + 1);
           return `${full} is up, line protocol is up (connected)\n  Hardware is Ten Gigabit Ethernet, address is 0011.2233.${i}\n  MTU 1500 bytes, BW ${sp * 1000} Kbit/sec, DLY 10 usec,\n  Full-duplex, ${sp}Mb/s, media type is SFP-10GBase-LR\n  5 minute input rate 0 bits/sec, 0 packets/sec\n     ${pk(io)} packets input, ${io} bytes, 0 no buffer\n     ${pk(oo)} packets output, ${oo} bytes, 0 underruns`;
         })
+        .filter((x) => x !== null)
         .join("\n");
+      if (one && !body) body = "                ^\n% Invalid input detected at '^' marker.\n";
     }
     else if (/^sh(ow)? ip int(erface)? br/.test(c)) body = IPBRIEF;
     else if (chainOn && /^sh(ow)? cdp nei\w* detail/.test(c)) body = chainCdp(id);
@@ -1356,7 +1378,16 @@ if (new URLSearchParams(location.search).has("video")) {
     else if (c === "end") modes.delete(id);
     else if (c === "exit") modes.get(id) === "config" ? modes.delete(id) : modes.get(id) && modes.set(id, "config");
     else if (/^(write|wr)( mem)?/.test(c)) body = "Building configuration...\n[OK]";
-    if (filter) body = body.split("\n").filter((l) => l.includes(filter)).join("\n");
+    // "| include" de IOS es una expresión regular (admite alternativas con "|").
+    if (filter) {
+      let re = null;
+      try {
+        re = new RegExp(filter);
+      } catch {
+        /* literal */
+      }
+      body = body.split("\n").filter((l) => (re ? re.test(l) : l.includes(filter))).join("\n");
+    }
     body = body.replace(/\n/g, "\r\n");
     return body ? body + "\r\n" : "";
   };
@@ -1415,6 +1446,9 @@ if (new URLSearchParams(location.search).has("video")) {
         ? "Proceed with reload? [confirm]\r\n"
         : respond(args.conn, s, args.command);
     const output = `${prompt}${args.command}\r\n${body}${prompt}`;
+    // Medición: bytes y comandos que devuelve el equipo simulado (lectura de tráfico por consola).
+    window.__ntRunBytes = (window.__ntRunBytes ?? 0) + output.length;
+    (window.__ntRunLog ??= []).push({ conn: args.conn, command: args.command, bytes: output.length });
     setTimeout(() => {
       emit("tool-job", { job, kind: "result", text: "", data: { ok: !bad && !declined, output, declined } });
       emit("tool-job", { job, kind: "done", text: "" });
@@ -1689,14 +1723,14 @@ function typeInto(el, value) {
 }
 
 const scenes = {
-  terminal: async () => { await open("ar-wan01"); await open("core-sw01"); await click("Catálogo de comandos"); },
+  terminal: async () => { await open("ar-wan01"); await open("core-sw01"); await click("Comandos"); },
   notes: async () => { await open("core-sw01"); await open("ar-wan01"); await click("Notas"); await click("plantilla-vlan.txt"); },
   monitor: async () => { await open("core-sw01"); await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); },
   topology: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Topología"); await svgNode("core-sw01"); await click("Desde aquí"); await svgNode("sw-acceso-02"); await click("Hasta aquí"); },
   compare: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Topología"); await wait(300); const s = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.value === "s1")); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set; set.call(s, "s1"); s.dispatchEvent(new Event("change", { bubbles: true })); await wait(300); },
   subnet: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Subredes"); },
   speed: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Velocidad"); },
-  oscmds: async () => { await open("Shell local"); await click("Catálogo de comandos"); },
+  oscmds: async () => { await open("Shell local"); await click("Comandos"); },
   about: async () => { await click("Ajustes"); await click("Acerca de"); },
   settings: async () => { await open("core-sw01"); await click("Ajustes"); },
   logs: async () => { await open("core-sw01"); await click("Ajustes"); await click("Logs"); },
@@ -1704,7 +1738,7 @@ const scenes = {
   quickserial: async () => { key("o"); await wait(300); await click("Serial"); },
   // Pestaña abierta por conexión rápida: "Guardar como sesión…" en la barra de estado.
   quicktab: async () => { key("o"); await wait(300); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); await click("Conectar"); },
-  packs: async () => { await open("core-sw01"); await click("Catálogo de comandos"); await click("Packs de comandos"); },
+  packs: async () => { await open("core-sw01"); await click("Comandos"); await click("Packs de comandos"); },
   split: async () => { await open("core-sw01"); await open("ar-wan01"); await open("dist-sw01"); await open("sw-acceso-sur"); await click("Vista dividida: ver 2 o 4 pestañas a la vez"); await click("4 en cuadrícula (2x2)"); },
   backup: async () => { await open("core-sw01"); await open("ar-wan01"); await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Respaldos"); await click("Comparar A y B"); },
   legacy: async () => { await open("router-antiguo"); },
@@ -1754,6 +1788,54 @@ const scenes = {
     document.querySelector("[aria-label='Iniciar TFTP']")?.click();
     await wait(300);
     demoTransfers();
+  },
+  // Asistente con la sesión de una sucursal (por VPN): aviso de alcance, Probar alcance y Respaldos.
+  "transfer-reach": async () => {
+    await open("sw-acceso-norte");
+    await wait(300);
+    await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins");
+    await click("Transferencias");
+    await wait(400);
+    const sel = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.textContent.startsWith("sw-acceso-norte")));
+    const opt = [...(sel?.options ?? [])].find((o) => o.textContent.startsWith("sw-acceso-norte"));
+    if (sel && opt) {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(sel, opt.value);
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await wait(200);
+    [...document.querySelectorAll("[role=radio]")].find((b) => b.textContent.startsWith("Respaldar"))?.click();
+    await wait(300);
+    if (location.search.includes("ping")) [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Probar alcance"))?.click();
+    await wait(900);
+    document.querySelector("[aria-label='Lista de verificación']")?.scrollIntoView({ block: "start" });
+  },
+  // Asistente con la pestaña del FortiGate y la tarea "Recuperar desde el arranque" (menú del BIOS por consola).
+  "transfer-recover": async () => {
+    await open("fw-perimetro");
+    await wait(300);
+    await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins");
+    await click("Transferencias");
+    await wait(400);
+    const sel = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.textContent.startsWith("fw-perimetro")));
+    const opt = [...(sel?.options ?? [])].find((o) => o.textContent.startsWith("fw-perimetro"));
+    if (sel && opt) setVal(sel, opt.value);
+    await wait(200);
+    const vend = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.value === "fortigate"));
+    if (vend && vend.value !== "fortigate") setVal(vend, "fortigate");
+    await wait(200);
+    [...document.querySelectorAll("[role=radio]")].find((b) => b.textContent.startsWith("Recuperar desde el arranque"))?.click();
+    await wait(600);
+  },
+  // Medidor de fluidez abierto desde la paleta de comandos sobre una terminal.
+  perf: async () => {
+    await open("ar-wan01"); await open("core-sw01");
+    await wait(400);
+    key("k"); await wait(300);
+    const input = document.querySelector('[role="dialog"] input, .fixed input');
+    typeInto(input, "Medidor de fluidez");
+    await wait(300);
+    input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+    await wait(1500);
   },
   // ---- Escenas de QA visual del contenedor de la app ----
   empty: async () => {},
@@ -1865,7 +1947,7 @@ Object.assign(scenes, {
   },
   "s-ai-mcp": settingsAt("Agentes IA"),
   macro: async () => { await open("core-sw01"); await click("Nuevo botón"); },
-  "cmd-editor": async () => { await open("core-sw01"); await click("Catálogo de comandos"); await click("Agregar un comando propio"); },
+  "cmd-editor": async () => { await open("core-sw01"); await click("Comandos"); await click("Agregar un comando propio"); },
   // Nueva sesión con túneles, contraseña guardada y un error de validación visibles.
   "session-full": async () => {
     await click("Nueva sesión");
@@ -2052,18 +2134,19 @@ Object.assign(scenes, {
   "new-servers": async () => {
     await open("core-sw01");
     await tool("Transferencias")(); await wait(500);
-    // Primer ancestro del título que tiene su botón Iniciar (el de la tarjeta TFTP).
-    let card = [...document.querySelectorAll("h3")].find((h) => h.textContent === "Servidor TFTP");
-    while (card && ![...card.querySelectorAll("button")].some((b) => b.textContent.trim() === "Iniciar")) card = card.parentElement;
     // Inicia TFTP y simula orígenes rechazados por la lista de clientes permitidos.
-    [...(card?.querySelectorAll("button") ?? [])].find((b) => b.textContent.trim() === "Iniciar")?.click();
+    document.querySelector("[aria-label='Iniciar TFTP']")?.click();
     await wait(600);
     window.__mock.guardStats.set("tftp", { rejected: 3, last: "203.0.113.45" });
     emit("server-guard", { kind: "tftp", rejected: 3, last: "203.0.113.45" });
     await wait(300);
+    // "Opciones del servidor" abierto: interfaz de escucha, clientes permitidos e inactividad de TFTP y HTTP.
+    const head = [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Opciones del servidor"));
+    head?.click();
+    await wait(400);
     [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Acceso y seguridad"))?.click();
-    await wait(300);
-    [...document.querySelectorAll("h3")].find((h) => h.textContent === "Servidor TFTP")?.scrollIntoView({ block: "start" });
+    await wait(400);
+    head?.scrollIntoView({ block: "start" });
   },
 });
 window.__newScene = {
@@ -2277,11 +2360,17 @@ Object.assign(scenes, {
     await auditPick("fw-perimetro");
     document.querySelector("ol[aria-label^='Auditar'] li:nth-child(2) ul button[aria-expanded]")?.click();
     await wait(300);
+    // Resumen del paso 2 completo arriba (puntaje y riesgo), sin cortar su encabezado.
+    document.querySelector("ol[aria-label^='Auditar'] > li:nth-child(2)")?.scrollIntoView({ block: "start" });
+    await wait(200);
   },
   "audit-cisco": async () => {
     await auditPick("rt-borde01");
     document.querySelector("ol[aria-label^='Auditar'] li:nth-child(2) ul button[aria-expanded]")?.click();
     await wait(300);
+    // Resumen del paso 2 completo arriba (puntaje y riesgo), sin cortar su encabezado.
+    document.querySelector("ol[aria-label^='Auditar'] > li:nth-child(2)")?.scrollIntoView({ block: "start" });
+    await wait(200);
   },
   "audit-plan": async () => {
     await auditPick("fw-perimetro");

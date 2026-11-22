@@ -454,6 +454,30 @@ export const isSlowRule = (key: string) => slowRules.has(key);
 const ruleFlags = (rule: HlRule) => `gm${rule.group ? "d" : ""}${rule.ignoreCase ? "i" : ""}`;
 export const ruleKey = (rule: HlRule) => `${ruleFlags(rule)}/${rule.pattern}`;
 
+/**
+ * Identidad de una regla para no duplicarla: expresión, flags, grupo y estilo. No cuentan el id, el
+ * nombre ni si está activa (copiar dos veces un esquema genera ids y a veces nombres distintos).
+ */
+export function ruleIdentity(rule: HlRule): string {
+  const st = (rule.style ?? {}) as Record<string, unknown>;
+  const style = Object.keys(st)
+    .filter((k) => st[k] !== undefined)
+    .sort()
+    .map((k) => [k, st[k]]);
+  return JSON.stringify([ruleKey(rule), rule.group ?? 0, style]);
+}
+
+/** `incoming` sin las reglas idénticas a otra de `existing` o a una anterior de la misma lista (se conserva la primera). */
+export function uniqueRules(incoming: HlRule[], existing: HlRule[] = []): HlRule[] {
+  const seen = new Set(existing.map(ruleIdentity));
+  return incoming.filter((r) => {
+    const k = ruleIdentity(r);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 /** Tiempo de una ejecución de regla del usuario: la desactiva si se pasó del presupuesto. */
 function chargeTime(rule: Compiled, ms: number) {
   if (ms > SLOW_LINE_MS) rule.strikes = SLOW_STRIKES;

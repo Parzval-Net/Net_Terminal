@@ -91,6 +91,8 @@ interface Props {
   /** Activa una pestaña (sale de Herramientas). */
   onFocusTab: (tabId: string) => void;
   onReconnectTab: (tabId: string) => void;
+  /** Cambia el título de una pestaña (Topología: el de una pestaña de salto cuando su ruta cambia). */
+  onRenameTab?: (tabId: string, title: string | undefined) => void;
   onConfirm: (req: { title: string; message: string; label: string; danger?: boolean; action: () => void }) => void;
   /** Aviso breve (por ejemplo, un servidor que se detuvo por inactividad). */
   onToast?: (text: string, kind?: "info" | "error") => void;
@@ -100,7 +102,7 @@ interface Props {
  * Pestaña de herramientas. Cada módulo se monta al visitarlo y luego se mantiene
  * vivo oculto, para no perder servidores, logs ni mediciones al cambiar de sección.
  */
-export const ToolsView = memo(function ToolsView({ active, onBack, onClose, settings, update, monitors, connId, terminals, tabs, sessions, onConfirm, onScp, onOpenSession, onFocusTab, onReconnectTab, onToast }: Props) {
+export const ToolsView = memo(function ToolsView({ active, onBack, onClose, settings, update, monitors, connId, terminals, tabs, sessions, onConfirm, onScp, onOpenSession, onFocusTab, onReconnectTab, onRenameTab, onToast }: Props) {
   const enabled = NAV.filter((n) => settings.modules[n.id] !== false);
   const [current, setCurrent] = useState<ModuleId>(() => {
     const last = stored<ModuleId | null>(LAST_KEY, null);
@@ -146,6 +148,12 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
     setCurrent(id);
     setVisited((v) => (v.has(id) ? v : new Set(v).add(id)));
   };
+
+  // Transferencias ofrece Respaldos cuando el equipo no puede llegar a este PC (VPN, NAT, salto).
+  // `go` solo usa setters y persist: la acción es estable.
+  const backupOn = settings.modules.backup !== false;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const openBackup = useCallback(() => go("backup"), []);
 
   useEffect(() => {
     if (!enabled.some((n) => n.id === current) && enabled[0]) go(enabled[0].id);
@@ -194,11 +202,12 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         tabs={tabs}
         onFocusTab={onFocusTab}
         onReconnectTab={onReconnectTab}
+        onRenameTab={onRenameTab}
         onConfirm={onConfirm}
         lifecycle={settings.lifecycleInfo}
       />
     ),
-    [terminals, sessions, settings.topology, settings.topoSnapshots, onTopo, onSnapshots, settings.topoSources, onSources, settings.snmpProfiles, topoVisible, onOpenSession, tabs, onFocusTab, onReconnectTab, onConfirm, settings.lifecycleInfo],
+    [terminals, sessions, settings.topology, settings.topoSnapshots, onTopo, onSnapshots, settings.topoSources, onSources, settings.snmpProfiles, topoVisible, onOpenSession, tabs, onFocusTab, onReconnectTab, onRenameTab, onConfirm, settings.lifecycleInfo],
   );
   const subnetEl = useMemo(() => <SubnetTool />, []);
   const perfEl = useMemo(
@@ -215,9 +224,10 @@ export const ToolsView = memo(function ToolsView({ active, onBack, onClose, sett
         terminals={terminals}
         onConfirm={onConfirm}
         onScp={onScp}
+        onOpenBackup={backupOn ? openBackup : undefined}
       />
     ),
-    [settings, running, update, refreshRunning, terminals, onConfirm, onScp],
+    [settings, running, update, refreshRunning, terminals, onConfirm, onScp, backupOn, openBackup],
   );
   const syslogEl = useMemo(
     () => <SyslogTool settings={settings} running={running} onChange={update} refreshRunning={refreshRunning} />,

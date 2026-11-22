@@ -179,3 +179,55 @@ sw-a#`;
 }
 
 console.log("topoRun: ok");
+
+// Paginador apagado solo en el equipo de un salto de NetTerminal, una vez por ruta, y nunca en la
+// sesión del usuario (ruta sin pasos), sin fabricante identificado o fuera del último equipo.
+{
+  const route = { origin: "core-sw01", steps: [{ name: "acc-sw01" }] };
+  const ok = device({ "terminal length 0": "acc-sw01#" });
+  assert.equal(await U.pagerOffOnHop(route, true, "cisco", ok.exec), "terminal length 0");
+  assert.equal(await U.pagerOffOnHop(route, true, "cisco", ok.exec), undefined, "una vez por ruta");
+  assert.deepEqual(ok.sent, ["terminal length 0"]);
+  const vrp = device({});
+  assert.equal(await U.pagerOffOnHop({ origin: "core-sw01", steps: [{ name: "ar-01" }] }, true, "huawei", vrp.exec), "screen-length 0 temporary");
+  const none = device({});
+  assert.equal(await U.pagerOffOnHop({ origin: "core-sw01", steps: [] }, true, "cisco", none.exec), undefined, "pestaña del usuario");
+  assert.equal(await U.pagerOffOnHop(undefined, true, "cisco", none.exec), undefined);
+  assert.equal(await U.pagerOffOnHop({ origin: "a", steps: [{ name: "b" }] }, false, "cisco", none.exec), undefined, "no está en el último equipo");
+  assert.equal(await U.pagerOffOnHop({ origin: "a", steps: [{ name: "b" }] }, true, undefined, none.exec), undefined, "fabricante sin identificar");
+  assert.equal(await U.pagerOffOnHop({ origin: "a", steps: [{ name: "b" }] }, true, "juniper", none.exec), undefined, "Junos usa | no-more");
+  assert.deepEqual(none.sent, []);
+  // Rechazado o con error: se sigue igual.
+  const bad = { exec: async () => { throw new Error("sesión cerrada"); } };
+  assert.equal(await U.pagerOffOnHop({ origin: "a", steps: [{ name: "b" }] }, true, "cisco", bad.exec), "terminal length 0");
+  for (const c of Object.values(U.PAGER_OFF)) assert.equal(computeRisk(c), "read", c);
+}
+
+// Lectura de tráfico: solo las interfaces con enlace, una por una si son pocas; con muchas, un comando.
+{
+  const R = await import("../../src/lib/topoTraffic.ts");
+  const f = R.CISCO_TRAFFIC_FILTER;
+  assert.deepEqual(R.trafficPlan(f, ["Gig 1/0/1", "Gi1/0/1", "Te1/1/1"]), [
+    `show interfaces Gig1/0/1 ${f.slice("show interfaces ".length)}`,
+    `show interfaces Gi1/0/1 ${f.slice("show interfaces ".length)}`,
+    `show interfaces Te1/1/1 ${f.slice("show interfaces ".length)}`,
+  ]);
+  assert.deepEqual(R.trafficPlan("show interfaces", ["Gi1/0/1"]), ["show interfaces"], "el completo no se divide");
+  assert.deepEqual(R.trafficPlan(f, Array.from({ length: R.PER_PORT_MAX + 1 }, (_, i) => `Gi1/0/${i + 1}`)), [f], "muchas interfaces: un comando");
+  assert.deepEqual(R.trafficPlan(f, ["Gi1/0/1 | save"]), [f], "nombre que no es de interfaz");
+  assert.deepEqual(R.trafficPlan(f, []), [f]);
+  for (const c of R.trafficPlan(f, ["Gi1/0/1", "Po1"])) assert.equal(computeRisk(c), "read", c);
+}
+
+// Título de una pestaña de salto tras un exec-timeout: el prompt volvió al pivote y la ruta (y su título) se acortan.
+{
+  const H = await import("../../src/lib/hopTab.ts");
+  const route = { origin: "pivot-lab-01", session: {}, steps: [{ name: "agg-sw01" }, { name: "acc_sw_02" }] };
+  assert.equal(H.routeTitle(route), "acc_sw_02 vía agg-sw01");
+  const screen = "acc_sw_02#\n\n[Connection to 192.0.2.20 closed by foreign host]\nagg-sw01#\n\n[Connection to 192.0.2.10 closed by foreign host]\npivot-lab-01#";
+  const back = H.reconcileRoute(route, screen);
+  assert.deepEqual(H.routeNames(back), ["pivot-lab-01"]);
+  assert.equal(H.routeTitle(back), "pivot-lab-01");
+  assert.equal(H.routeTitle(H.reconcileRoute(route, "Connection to 192.0.2.20 closed.\nagg-sw01#")), "agg-sw01 vía pivot-lab-01");
+}
+console.log("topoRun salto y tráfico: ok");

@@ -2,8 +2,8 @@ import { Dispatch, MutableRefObject, SetStateAction, useRef, useState } from "re
 import { invoke } from "@tauri-apps/api/core";
 import { runOnDeviceResult } from "../../../lib/deviceRun";
 import { plural } from "../../../lib/plural";
-import { commandReader, partialNote } from "../../../lib/topoRun";
-import { CameFrom, TabRoute, discoveryIdentity, newCameFrom } from "../../../lib/hopTab";
+import { commandReader, pagerOffOnHop, partialNote } from "../../../lib/topoRun";
+import { CameFrom, TabRoute, discoveryIdentity, newCameFrom, routeHere, routePosition, vendorOfPlatform } from "../../../lib/hopTab";
 import { SnmpProfile, targetParams } from "../../../lib/snmp";
 import { TopoScope, scopeNeighbors } from "../../../lib/topoInsights";
 import {
@@ -167,7 +167,18 @@ export function useTopoDiscovery({
     const reader = readerFor(conn, vendor);
     const run = reader.run;
     // El prompt a la vista antes de enviar nada: identifica al equipo si la primera salida se corta.
-    const startPrompt = promptName((tab.screen?.(4) ?? "").replace(/\r/g, "").trimEnd());
+    const screen = tab.screen?.(4);
+    const startPrompt = promptName((screen ?? "").replace(/\r/g, "").trimEnd());
+    // Pestaña de salto de NetTerminal verificada en su último equipo: sin paginador en esa sesión vty
+    // (una vez por salto; ver topoRun.ts). Fabricante por la plataforma del diagrama o, si no se
+    // conoce, el elegido cuando el prompt tiene su forma. La pestaña del usuario no se toca.
+    const hopRoute = tab.tabId ? routesRef.current[tab.tabId] : undefined;
+    if (hopRoute?.steps.length && screen !== undefined && routePosition(hopRoute, screen) === hopRoute.steps.length) {
+      const here = topoRef.current.nodes.find((x) => x.id === nodeId(routeHere(hopRoute)));
+      const v = vendorOfPlatform(here?.platform) ?? (vendorFromPrompt(screen.replace(/\r/g, "")) === vendor ? vendor : undefined);
+      const sent = await pagerOffOnHop(hopRoute, true, v, (cmd) => runOnDeviceResult(conn, cmd, 20));
+      if (sent) setMsg(`Ejecutando: ${sent} (solo en esta sesión del salto)`);
+    }
     try {
       const outputs: string[] = [];
       /** Salidas de los comandos de vecinos, para saber qué protocolo se leyó completo. */

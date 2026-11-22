@@ -125,3 +125,26 @@ assert.match(net({ vendor: "cisco", gateway: "10.0.0.6" }).join(), /DEFAULT_GATE
 assert.deepEqual(net({ gateway: "10.0.0.6" }), [], "FortiGate no usa gateway en el menú");
 assert.match(net({ deviceIp: "x" }).join(), /no es una IPv4/);
 console.log("transferCmds nombres y red: ok");
+
+// ---- Alcance del equipo hacia este PC ----
+assert.equal(T.pingCommand("cisco", "192.0.2.10"), "ping 192.0.2.10");
+assert.equal(T.pingCommand("huawei", "192.0.2.10"), "ping 192.0.2.10");
+assert.equal(T.pingCommand("fortigate", "192.0.2.10"), "execute ping 192.0.2.10");
+assert.equal(T.pingCommand("juniper", "192.0.2.10"), "ping 192.0.2.10 count 3");
+assert.equal(T.pingCommand("nxos", "192.0.2.10"), "ping 192.0.2.10 vrf management", "misma VRF que el copy de NX-OS");
+assert.equal(T.pingResult("Sending 5, 100-byte ICMP Echos to 192.0.2.10\n!!!!!\nSuccess rate is 100 percent (5/5)"), "ok");
+assert.equal(T.pingResult("Sending 5, 100-byte ICMP Echos to 192.0.2.10\n.....\nSuccess rate is 0 percent (0/5)"), "fail");
+assert.equal(T.pingResult(".!!!!\nSuccess rate is 80 percent (4/5)"), "ok", "la primera se pierde por ARP");
+assert.equal(T.pingResult("64 bytes from 192.0.2.10: icmp_seq=0 ttl=64 time=0.5 ms\n5 packets transmitted, 5 packets received, 0% packet loss"), "ok");
+assert.equal(T.pingResult("5 packets transmitted, 0 packets received, 100% packet loss"), "fail", "100% no se confunde con 0%");
+assert.equal(T.pingResult("Reply from 192.0.2.10: bytes=56 Sequence=1 ttl=64 time=1 ms\n0.00% packet loss"), "ok", "Huawei");
+assert.equal(T.pingResult("Request time out\nRequest time out\n100.00% packet loss"), "fail", "Huawei sin respuesta");
+assert.equal(T.pingResult("% Invalid input detected at '^' marker."), "unknown");
+// Riesgo de que el equipo no llegue: salto, o host fuera de las redes locales del PC.
+const lan = [{ ip: "192.0.2.10", mask: "255.255.255.0" }, { ip: "198.51.100.7", mask: "255.255.255.0" }];
+assert.equal(T.reachRisk({ host: "192.0.2.50", ifs: lan }), null, "misma red local");
+assert.equal(T.reachRisk({ host: "203.0.113.20", ifs: lan }), "routed", "por router, VPN o NAT");
+assert.equal(T.reachRisk({ host: "192.0.2.50", jump: "bastion", ifs: lan }), "jump", "un salto manda aunque esté en la red");
+assert.equal(T.reachRisk({ host: "sw-core", ifs: lan }), null, "nombre: no se puede saber");
+assert.equal(T.reachRisk({ host: "203.0.113.20", ifs: [{ ip: "192.0.2.10" }] }), null, "sin máscara no se adivina");
+console.log("transferCmds alcance: ok");

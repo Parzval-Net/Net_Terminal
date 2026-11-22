@@ -66,6 +66,7 @@ export function useTopoHops({
   onOpenSession,
   onFocusTab,
   onReconnectTab,
+  onRenameTab,
   setMsg,
   setConnId,
 }: {
@@ -90,6 +91,7 @@ export function useTopoHops({
   onOpenSession: (s: Session, opts?: { background?: boolean; title?: string }) => string | void;
   onFocusTab: (tabId: string) => void;
   onReconnectTab: (tabId: string) => void;
+  onRenameTab?: (tabId: string, title: string | undefined) => void;
   setMsg: (m: string) => void;
   setConnId: (id: string) => void;
 }) {
@@ -101,6 +103,12 @@ export function useTopoHops({
   const [routes, setRoutes] = useState<Record<string, TabRoute>>({});
   const routesRef = useRef(routes);
   routesRef.current = routes;
+  /**
+   * Título que puso Topología a cada pestaña de salto que abrió (por id). Mientras la pestaña conserve
+   * ese título, sigue a su ruta: tras un exec-timeout o un "exit" el prompt vuelve a un equipo anterior,
+   * la ruta se acorta (reconcileRoute) y el título también. Uno cambiado a mano no se toca.
+   */
+  const titledRef = useRef(new Map<string, string>());
   /**
    * De dónde salió cada equipo descubierto (id): el equipo que lo descubrió y la ruta de la pestaña que estaba en él.
    * "Abrir terminal" salta con esa ruta más un paso, no con otra por el diagrama. No se persiste (las pestañas tampoco).
@@ -239,6 +247,7 @@ export function useTopoHops({
         return;
       }
       tabId = id;
+      titledRef.current.set(id, routeTitle(full));
       setRoutes((m) => ({ ...m, [id]: truncateRoute(full, 0) }));
     }
     const job = newHopChain({ steps, pivot, now: Date.now() });
@@ -432,6 +441,28 @@ export function useTopoHops({
     }, 3000);
     return () => window.clearInterval(timer);
   }, []);
+
+  // El título de las pestañas de salto sigue a su ruta (solo las que abrió Topología y con su título intacto).
+  useEffect(() => {
+    if (!onRenameTab) return;
+    const titled = titledRef.current;
+    for (const [tabId, set] of [...titled]) {
+      const brief = tabs.find((b) => b.tabId === tabId);
+      if (!brief) {
+        titled.delete(tabId);
+        continue;
+      }
+      const route = routes[tabId];
+      // Durante el salto la ruta crece paso a paso: el título del destino se mantiene hasta que termine.
+      if (!route || hopRuns.current.has(tabId) || brief.name !== set) continue;
+      const want = routeTitle(route);
+      if (want === set) continue;
+      titled.set(tabId, want);
+      onRenameTab(tabId, want);
+    }
+    // hopRunning: al terminar un salto que falló a mitad de ruta, el título pasa al último equipo alcanzado.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routes, tabs, hopRunning.length, onRenameTab]);
 
   // Los avisos de saltos terminados se quitan solos (los que fallaron duran más).
   useEffect(() => {

@@ -1479,8 +1479,54 @@ assert.deepEqual(T.parseDismissed([1, 2]), {});
   assert.deepEqual(R.trafficCommands("yunshan", "cisco"), ["display interface | no-more", "display interface"], "la plataforma manda sobre el resaltado");
   assert.deepEqual(R.trafficCommands("nxos", undefined), ["show interfaces", "show interface"]);
   assert.deepEqual(R.trafficCommands(undefined, "juniper"), ["show interfaces extensive | no-more", "show interfaces extensive"]);
-  assert.deepEqual(R.trafficCommands(undefined, undefined), ["show interfaces", "show interface", "display interface | no-more", "display interface"]);
+  assert.deepEqual(R.trafficCommands(undefined, undefined), [R.CISCO_TRAFFIC_FILTER, "show interfaces", "show interface", "display interface | no-more", "display interface"]);
+  assert.deepEqual(R.trafficCommands("ios", undefined), [R.CISCO_TRAFFIC_FILTER, "show interfaces", "show interface"], "IOS: primero filtrado");
   assert.deepEqual(R.trafficCommands("fos72", undefined), [], "FortiOS sin comando de contadores verificado");
+  // El filtro de IOS deja lo mismo que lee el cálculo: contadores, velocidad, estado y errores iguales
+  // al "show interfaces" completo de un 2960, con una fracción de las líneas.
+  {
+    const full = (name, st, dup, inB, outB, crc) => `${name} is ${st}
+  Hardware is Gigabit Ethernet, address is 0000.5e00.5301 (bia 0000.5e00.5301)
+  Description: enlace de prueba
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation ARPA, loopback not set
+  Keepalive set (10 sec)
+  ${dup}, media type is 10/100/1000BaseTX
+  input flow-control is off, output flow-control is unsupported
+  ARP type: ARPA, ARP Timeout 04:00:00
+  Last input never, output 00:00:01, output hang never
+  Last clearing of "show interface" counters never
+  Input queue: 0/75/0/0 (size/max/drops/flushes); Total output drops: 0
+  Queueing strategy: fifo
+  Output queue: 0/40 (size/max)
+  5 minute input rate 1000 bits/sec, 1 packets/sec
+  5 minute output rate 2000 bits/sec, 2 packets/sec
+     1000 packets input, ${inB} bytes, 0 no buffer
+     Received 10 broadcasts (5 multicasts)
+     0 runts, 0 giants, 0 throttles
+     ${crc} input errors, ${crc} CRC, 0 frame, 0 overrun, 0 ignored
+     0 watchdog, 5 multicast, 0 pause input
+     0 input packets with dribble condition detected
+     2000 packets output, ${outB} bytes, 0 underruns
+     0 output errors, 0 collisions, 1 interface resets
+     0 unknown protocol drops
+     0 babbles, 0 late collision, 0 deferred
+     0 lost carrier, 0 no carrier, 0 pause output
+     0 output buffer failures, 0 output buffers swapped out`;
+    const all = [
+      full("GigabitEthernet1/0/1", "up, line protocol is up (connected)", "Full-duplex, 1000Mb/s", 123456789, 987654321, 0),
+      full("GigabitEthernet1/0/2", "down, line protocol is down (notconnect)", "Auto-duplex, Auto-speed", 0, 0, 0),
+      full("GigabitEthernet1/0/3", "up, line protocol is up (connected)", "Half-duplex, 100Mb/s", 42, 43, 7),
+    ].join("\n") + "\nsw-acc-01#";
+    const re = new RegExp(R.CISCO_TRAFFIC_FILTER.split("| include ")[1]);
+    const filtered = all.split("\n").filter((l) => re.test(l)).join("\n") + "\nsw-acc-01#";
+    assert.ok(filtered.length * 4 < all.length, "el filtro deja menos de un cuarto de la salida");
+    assert.deepEqual(R.parseCliCounters(filtered), R.parseCliCounters(all));
+    assert.equal(R.parseCliCounters(filtered).get(T.canonPort("Gi1/0/3")).crc, "7");
+    assert.equal(R.isFilteredTraffic(R.CISCO_TRAFFIC_FILTER), true);
+    assert.equal(R.isFilteredTraffic("show interfaces"), false);
+  }
   for (const p of [undefined, "vrp8", "junos", "nxos", "iosxe"]) for (const c of R.trafficCommands(p, undefined)) assert.equal(computeRisk(c), "read", c);
 
   // De punta a punta: enlace con el nombre de "show cdp neighbors" y dos lecturas de show interfaces.
@@ -1625,4 +1671,47 @@ console.log("topology: ok");
   assert.deepEqual(T.parseCdp(C.stripPager(raw)).map((n) => n.name), ["sw1", "sw2", "sw3"], "CDP: el vecino al inicio de página no se pierde");
   assert.equal(C.stripPager("  ---- More ----" + " ".repeat(42) + "GE0/0/2"), "GE0/0/2", "VRP");
   assert.equal(C.stripPager("---(more 45%)---   ge-0/0/1"), "ge-0/0/1", "Junos");
+}
+
+// "show interfaces status" de Catalyst 2960/2960S/2960G (IOS 12.2 y 15.0): columnas ancladas desde la
+// derecha. Una fila corrida respecto del encabezado dejaba "notconnect   1" como descripción.
+{
+  const out = `sw-acc-01#show interfaces status
+
+Port      Name               Status       Vlan       Duplex  Speed Type
+Gi1/0/1   uplink-core        connected    trunk      a-full a-1000 10/100/1000BaseTX
+Gi1/0/2   impresora piso 2   connected    10         a-full  a-100 10/100/1000BaseTX
+Gi1/0/3                      notconnect   1            auto   auto 10/100/1000BaseTX
+Gi1/0/4   servidor apagado   disabled     20           auto   auto 10/100/1000BaseTX
+Gi1/0/5   camara             err-disabled 30           auto   auto 10/100/1000BaseTX
+Gi1/0/28             notconnect   1            auto   auto 10/100/1000BaseTX
+Gi1/0/49                     notconnect   1            auto   auto Not Present
+Gi1/0/50  enlace fibra       connected    trunk        full   1000 1000BaseSX SFP
+Fa0/1     disabled 1 auto    connected    5          a-full  a-100 10/100BaseTX
+Po1       agregado core      connected    trunk      a-full a-1000
+Vl1                          connected    routed       auto   auto
+sw-acc-01#`;
+  const p = T.parsePortInfo([out]);
+  const get = (k) => p[T.canonPort(k)];
+  assert.deepEqual(get("Gi1/0/1"), { status: "connected", speed: "a-1000", desc: "uplink-core", vlan: "trunk", duplex: "a-full" });
+  assert.equal(get("Gi1/0/2").desc, "impresora piso 2", "descripción con espacios");
+  assert.equal(get("Gi1/0/2").speed, "a-100");
+  assert.deepEqual(get("Gi1/0/3"), { status: "notconnect", speed: "auto", vlan: "1", duplex: "auto" }, "sin descripción");
+  assert.equal(get("Gi1/0/4").status, "disabled");
+  assert.equal(get("Gi1/0/4").desc, "servidor apagado");
+  assert.equal(get("Gi1/0/5").status, "err-disabled");
+  assert.equal(get("Gi1/0/5").vlan, "30");
+  // La fila corrida del hallazgo: ni el estado ni la VLAN quedan en la descripción.
+  assert.deepEqual(get("Gi1/0/28"), { status: "notconnect", speed: "auto", vlan: "1", duplex: "auto" }, "fila corrida");
+  assert.deepEqual(get("Gi1/0/49"), { status: "notconnect", speed: "auto", vlan: "1", duplex: "auto" }, "Type Not Present");
+  assert.equal(get("Gi1/0/50").desc, "enlace fibra");
+  assert.equal(get("Gi1/0/50").speed, "1000");
+  // Una descripción con palabras de las columnas no las corre: vale el último grupo de la fila.
+  assert.deepEqual(get("Fa0/1"), { status: "connected", speed: "a-100", desc: "disabled 1 auto", vlan: "5", duplex: "a-full" });
+  assert.equal(get("Po1").vlan, "trunk", "sin Type");
+  assert.equal(get("Vl1").vlan, "routed");
+  for (const v of Object.values(p)) assert.ok(!/notconnect|connected/.test(v.desc ?? ""), `desc ${v.desc}`);
+  // Línea enorme con palabras de las columnas: lineal.
+  fast("status con muchas palabras", 300, () => T.parsePortInfo([`Port Name Status Vlan\nGi1/0/1 ${"full ".repeat(20000)}`]));
+  console.log("show interfaces status: ok");
 }

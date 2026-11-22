@@ -172,3 +172,29 @@ assert.equal(styleOf("cisco", "198.51.100.2    4 65002     120     118        0 
 expectPlain("cisco", "Vl10        1    100 P Active  local           192.0.2.3       192.0.2.1", "Active");
 console.log("highlight bgp: ok");
 
+// ---- Reglas propias repetidas: no se agregan ni sobreviven al cargar los ajustes ----
+{
+  const { uniqueRules, ruleIdentity } = await import("../../src/lib/highlight.ts");
+  const { loadSettings } = await import("../../src/lib/settings.ts");
+  const cisco = schemes.find((s) => s.id === "cisco").rules;
+  const copy = (tag) => cisco.map((r, i) => ({ ...r, id: `${tag}${i}`, name: `Cisco / Arista: ${r.name}` }));
+  // Caso real: el esquema Cisco/Arista copiado dos veces (ids distintos, misma expresión y estilo).
+  const doubled = [...copy("a"), ...copy("b")];
+  const once = uniqueRules(doubled);
+  assert.equal(once.length, cisco.length);
+  assert.deepEqual(once.map((r) => r.id), copy("a").map((r) => r.id), "se conserva la primera de cada una");
+  assert.equal(uniqueRules(cisco, copy("a")).length, 0, "copiar de nuevo el esquema no agrega nada");
+  // Distinto estilo, flags o grupo: es otra regla. El orden de las claves del estilo no cuenta.
+  const base = { id: "x", name: "x", pattern: "\\bdown\\b", style: { fg: "red", bold: true } };
+  assert.equal(ruleIdentity(base), ruleIdentity({ ...base, id: "y", name: "otra", enabled: false, style: { bold: true, fg: "red" } }));
+  assert.equal(uniqueRules([base, { ...base, style: { fg: "yellow", bold: true } }]).length, 2);
+  assert.equal(uniqueRules([base, { ...base, ignoreCase: true }]).length, 2);
+  assert.equal(uniqueRules([base, { ...base, group: 1 }]).length, 2);
+  // Al cargar settings.json se limpian las repetidas existentes.
+  const loaded = loadSettings({ customRules: doubled }).settings.customRules;
+  assert.equal(loaded.length, cisco.length);
+  assert.equal(loaded[0].id, "a0");
+  assert.deepEqual(loadSettings({ customRules: "x" }).settings.customRules, [], "forma inválida: lista vacía");
+  console.log("highlight reglas repetidas: ok");
+}
+
