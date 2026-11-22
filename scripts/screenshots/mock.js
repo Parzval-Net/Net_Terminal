@@ -1723,14 +1723,14 @@ function typeInto(el, value) {
 }
 
 const scenes = {
-  terminal: async () => { await open("ar-wan01"); await open("core-sw01"); await click("Catálogo de comandos"); },
+  terminal: async () => { await open("ar-wan01"); await open("core-sw01"); await click("Comandos"); },
   notes: async () => { await open("core-sw01"); await open("ar-wan01"); await click("Notas"); await click("plantilla-vlan.txt"); },
   monitor: async () => { await open("core-sw01"); await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); },
   topology: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Topología"); await svgNode("core-sw01"); await click("Desde aquí"); await svgNode("sw-acceso-02"); await click("Hasta aquí"); },
   compare: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Topología"); await wait(300); const s = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.value === "s1")); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set; set.call(s, "s1"); s.dispatchEvent(new Event("change", { bubbles: true })); await wait(300); },
   subnet: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Subredes"); },
   speed: async () => { await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Velocidad"); },
-  oscmds: async () => { await open("Shell local"); await click("Catálogo de comandos"); },
+  oscmds: async () => { await open("Shell local"); await click("Comandos"); },
   about: async () => { await click("Ajustes"); await click("Acerca de"); },
   settings: async () => { await open("core-sw01"); await click("Ajustes"); },
   logs: async () => { await open("core-sw01"); await click("Ajustes"); await click("Logs"); },
@@ -1738,7 +1738,7 @@ const scenes = {
   quickserial: async () => { key("o"); await wait(300); await click("Serial"); },
   // Pestaña abierta por conexión rápida: "Guardar como sesión…" en la barra de estado.
   quicktab: async () => { key("o"); await wait(300); const h = document.querySelector('input[placeholder="192.0.2.10 o hostname"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(h, "192.0.2.77"); h.dispatchEvent(new Event("input", { bubbles: true })); await click("Conectar"); },
-  packs: async () => { await open("core-sw01"); await click("Catálogo de comandos"); await click("Packs de comandos"); },
+  packs: async () => { await open("core-sw01"); await click("Comandos"); await click("Packs de comandos"); },
   split: async () => { await open("core-sw01"); await open("ar-wan01"); await open("dist-sw01"); await open("sw-acceso-sur"); await click("Vista dividida: ver 2 o 4 pestañas a la vez"); await click("4 en cuadrícula (2x2)"); },
   backup: async () => { await open("core-sw01"); await open("ar-wan01"); await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins"); await click("Respaldos"); await click("Comparar A y B"); },
   legacy: async () => { await open("router-antiguo"); },
@@ -1808,6 +1808,34 @@ const scenes = {
     if (location.search.includes("ping")) [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Probar alcance"))?.click();
     await wait(900);
     document.querySelector("[aria-label='Lista de verificación']")?.scrollIntoView({ block: "start" });
+  },
+  // Asistente con la pestaña del FortiGate y la tarea "Recuperar desde el arranque" (menú del BIOS por consola).
+  "transfer-recover": async () => {
+    await open("fw-perimetro");
+    await wait(300);
+    await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins");
+    await click("Transferencias");
+    await wait(400);
+    const sel = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.textContent.startsWith("fw-perimetro")));
+    const opt = [...(sel?.options ?? [])].find((o) => o.textContent.startsWith("fw-perimetro"));
+    if (sel && opt) setVal(sel, opt.value);
+    await wait(200);
+    const vend = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.value === "fortigate"));
+    if (vend && vend.value !== "fortigate") setVal(vend, "fortigate");
+    await wait(200);
+    [...document.querySelectorAll("[role=radio]")].find((b) => b.textContent.startsWith("Recuperar desde el arranque"))?.click();
+    await wait(600);
+  },
+  // Medidor de fluidez abierto desde la paleta de comandos sobre una terminal.
+  perf: async () => {
+    await open("ar-wan01"); await open("core-sw01");
+    await wait(400);
+    key("k"); await wait(300);
+    const input = document.querySelector('[role="dialog"] input, .fixed input');
+    typeInto(input, "Medidor de fluidez");
+    await wait(300);
+    input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+    await wait(1500);
   },
   // ---- Escenas de QA visual del contenedor de la app ----
   empty: async () => {},
@@ -1919,7 +1947,7 @@ Object.assign(scenes, {
   },
   "s-ai-mcp": settingsAt("Agentes IA"),
   macro: async () => { await open("core-sw01"); await click("Nuevo botón"); },
-  "cmd-editor": async () => { await open("core-sw01"); await click("Catálogo de comandos"); await click("Agregar un comando propio"); },
+  "cmd-editor": async () => { await open("core-sw01"); await click("Comandos"); await click("Agregar un comando propio"); },
   // Nueva sesión con túneles, contraseña guardada y un error de validación visibles.
   "session-full": async () => {
     await click("Nueva sesión");
@@ -2106,18 +2134,19 @@ Object.assign(scenes, {
   "new-servers": async () => {
     await open("core-sw01");
     await tool("Transferencias")(); await wait(500);
-    // Primer ancestro del título que tiene su botón Iniciar (el de la tarjeta TFTP).
-    let card = [...document.querySelectorAll("h3")].find((h) => h.textContent === "Servidor TFTP");
-    while (card && ![...card.querySelectorAll("button")].some((b) => b.textContent.trim() === "Iniciar")) card = card.parentElement;
     // Inicia TFTP y simula orígenes rechazados por la lista de clientes permitidos.
-    [...(card?.querySelectorAll("button") ?? [])].find((b) => b.textContent.trim() === "Iniciar")?.click();
+    document.querySelector("[aria-label='Iniciar TFTP']")?.click();
     await wait(600);
     window.__mock.guardStats.set("tftp", { rejected: 3, last: "203.0.113.45" });
     emit("server-guard", { kind: "tftp", rejected: 3, last: "203.0.113.45" });
     await wait(300);
+    // "Opciones del servidor" abierto: interfaz de escucha, clientes permitidos e inactividad de TFTP y HTTP.
+    const head = [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Opciones del servidor"));
+    head?.click();
+    await wait(400);
     [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Acceso y seguridad"))?.click();
-    await wait(300);
-    [...document.querySelectorAll("h3")].find((h) => h.textContent === "Servidor TFTP")?.scrollIntoView({ block: "start" });
+    await wait(400);
+    head?.scrollIntoView({ block: "start" });
   },
 });
 window.__newScene = {
@@ -2331,11 +2360,17 @@ Object.assign(scenes, {
     await auditPick("fw-perimetro");
     document.querySelector("ol[aria-label^='Auditar'] li:nth-child(2) ul button[aria-expanded]")?.click();
     await wait(300);
+    // Resumen del paso 2 completo arriba (puntaje y riesgo), sin cortar su encabezado.
+    document.querySelector("ol[aria-label^='Auditar'] > li:nth-child(2)")?.scrollIntoView({ block: "start" });
+    await wait(200);
   },
   "audit-cisco": async () => {
     await auditPick("rt-borde01");
     document.querySelector("ol[aria-label^='Auditar'] li:nth-child(2) ul button[aria-expanded]")?.click();
     await wait(300);
+    // Resumen del paso 2 completo arriba (puntaje y riesgo), sin cortar su encabezado.
+    document.querySelector("ol[aria-label^='Auditar'] > li:nth-child(2)")?.scrollIntoView({ block: "start" });
+    await wait(200);
   },
   "audit-plan": async () => {
     await auditPick("fw-perimetro");
