@@ -84,6 +84,8 @@ export interface TopoNode {
    * que anuncian sus vecinos por CDP/LLDP ("mx-edge-re0" y "mx-edge"). Evita un equipo duplicado.
    */
   aliases?: string[];
+  /** Momento (ms) de la última lectura de sus vecinos; falta en diagramas de versiones anteriores. */
+  readAt?: number;
 }
 
 export interface TopoLink {
@@ -1091,6 +1093,7 @@ export function mergeNeighbors(
   // La tabla MAC es una foto del momento: una lectura nueva reemplaza la anterior.
   if (device.macs) self.macs = device.macs;
   if (device.addrs?.length) self.addrs = unionAddrs(self.addrs, device.addrs);
+  self.readAt = opts.now ?? Date.now();
   absorb(self, [device.ip, ...(device.addrs ?? [])]);
   const selfAddrs = new Set(knownAddrs(self));
 
