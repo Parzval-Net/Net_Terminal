@@ -1,6 +1,8 @@
 // Genera las capturas del README con datos ficticios, controlando Chrome por DevTools Protocol.
 // Uso: `npx vite --port 1430` en otra terminal y luego `node scripts/screenshots/shoot.mjs`.
 // Variables opcionales: PORT (puerto de vite), OUT (carpeta de salida), CHROME (binario).
+// Chrome guarda PNG sin optimizar: después conviene reducirlos a 256 colores (pngquant, o PIL quantize con
+// MEDIANCUT y kmeans) para que docs/ no crezca; la diferencia no se nota en la interfaz.
 // Cada captura: [archivo, escena, tema, { query?, hover?, type?, keys?, wait?, motion? }]; `hover` es un selector CSS
 // sobre el que se deja el mouse antes de capturar (estados hover, p. ej. la X de una pestaña);
 // `type` se escribe tecla por tecla en la terminal ("\n" es Enter), `keys` son teclas especiales ("ctrl+period") y
@@ -75,6 +77,19 @@ const SHOTS = [
   ["solo-lectura", "new-readonly", "light"],
   ["solo-lectura-oscuro", "new-readonly", "dark"],
   ["servidores-acceso", "new-servers", "light", { wait: 6000 }],
+  // Auditoría de seguridad: hallazgos de FortiGate y Cisco, plan de corrección y biblioteca de reglas.
+  ["auditoria", "audit", "light"],
+  ["auditoria-cisco", "audit-cisco", "light"],
+  ["auditoria-plan", "audit-plan", "light"],
+  ["auditoria-biblioteca", "audit-library", "light"],
+  ["auditoria-oscuro", "audit", "dark"],
+  // Transferencias: prueba de alcance hacia una sucursal y recuperación de un FortiGate desde el arranque.
+  ["transferencias-alcance", "transfer-reach", "light", { query: "&ping=1", wait: 6500 }],
+  ["transferencias-recuperacion", "transfer-recover", "light"],
+  // Paleta de comandos, pantalla de inicio "Conectar a…" y medidor de fluidez (FPS).
+  ["paleta", "palette", "light"],
+  ["conectar-a", "empty", "light"],
+  ["medidor-fluidez", "perf", "light", { wait: 6500, motion: true }],
 ];
 /** Teclas especiales para `keys`: [key, code, keyCode, modificadores CDP (2 = Ctrl)]. */
 const KEYS = { enter: ["Enter", "Enter", 13, 0], "ctrl+space": [" ", "Space", 32, 2], "ctrl+period": [".", "Period", 190, 2], right: ["ArrowRight", "ArrowRight", 39, 0], down: ["ArrowDown", "ArrowDown", 40, 0], tab: ["Tab", "Tab", 9, 0], esc: ["Escape", "Escape", 27, 0] };
@@ -84,7 +99,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const profile = mkdtempSync(join(tmpdir(), "nt-shots-"));
 // Puerto de DevTools propio por ejecución: dos scripts a la vez no se pisan la misma pestaña.
 const port = Number(process.env.CDP_PORT ?? 9333);
-const chrome = spawn(CHROME, ["--headless=new", "--hide-scrollbars", "--window-size=1440,880", "--force-device-scale-factor=2", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
+// Como root (contenedores Linux) Chrome exige desactivar el sandbox; en macOS no cambia nada.
+const sandbox = process.getuid?.() === 0 ? ["--no-sandbox"] : [];
+const chrome = spawn(CHROME, [...sandbox, "--headless=new", "--hide-scrollbars", "--window-size=1440,880", "--force-device-scale-factor=2", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
 
 try {
   let target;
@@ -103,6 +120,9 @@ try {
   const send = (method, params = {}) => new Promise((r) => { const id = ++seq; pending.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
 
   await send("Page.enable");
+  // Área visible fija (1440x793 a 2x = 2880x1586, lo que declara docs/index.html): el alto de la ventana
+  // headless cambia entre versiones de Chrome. HEIGHT permite otro alto.
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: Number(process.env.HEIGHT ?? 793), deviceScaleFactor: 2, mobile: false });
   // Sin foco real la terminal no recibe teclas en headless.
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
   await send("Runtime.enable");
