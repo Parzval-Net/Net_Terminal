@@ -77,7 +77,9 @@ export function toDrawioIcons(topo: Topology, opts: DrawioIconOptions = {}): str
   const byId = new Map(t.nodes.map((n) => [n.id, n]));
   const checks = linkChecks(t);
   const zones: string[] = [];
-  // Enlaces antes que equipos: el nombre (con fondo blanco) queda sobre las líneas que lo cruzan.
+  // Dos capas: "Enlaces" (zonas, líneas y sus rótulos) debajo de "Equipos". Los equipos se escriben
+  // antes que los enlaces que los unen: un lector que no resuelve referencias hacia adelante (visores,
+  // importadores) dejaba el diagrama en blanco. El orden de dibujo lo dan las capas, no el documento.
   const edges: string[] = [];
   const cells: string[] = [];
 
@@ -120,7 +122,7 @@ export function toDrawioIcons(topo: Topology, opts: DrawioIconOptions = {}): str
     const w = ic?.w ?? 60;
     const h = ic?.h ?? 40;
     cells.push(
-      `<mxCell id="${ids.get(n.id)}" value="${value}" style="${style}" vertex="1" parent="1"><mxGeometry x="${Math.round(n.x - w / 2)}" y="${Math.round(n.y - h / 2)}" width="${w}" height="${h}" as="geometry"/></mxCell>`,
+      `<mxCell id="${ids.get(n.id)}" value="${value}" style="${style}" vertex="1" parent="2"><mxGeometry x="${Math.round(n.x - w / 2)}" y="${Math.round(n.y - h / 2)}" width="${w}" height="${h}" as="geometry"/></mxCell>`,
     );
   }
 
@@ -184,7 +186,7 @@ export function toDrawioIcons(topo: Topology, opts: DrawioIconOptions = {}): str
       const x = n.x + ux * 140;
       const y = n.y + uy * 110;
       cells.push(
-        `<mxCell id="${cid}" value="${xmlEsc(`L2 desconocido<br>${info.ports.length} puertos${info.macs ? ` · ${info.macs} MAC` : ""}`)}" style="${BASE}fillColor=#9aa1ab;shape=${CLOUD.shape};fontSize=10;" vertex="1" parent="1"><mxGeometry x="${Math.round(x - CLOUD.w / 2)}" y="${Math.round(y - CLOUD.h / 2)}" width="${CLOUD.w}" height="${CLOUD.h}" as="geometry"/></mxCell>`,
+        `<mxCell id="${cid}" value="${xmlEsc(`L2 desconocido<br>${info.ports.length} puertos${info.macs ? ` · ${info.macs} MAC` : ""}`)}" style="${BASE}fillColor=#9aa1ab;shape=${CLOUD.shape};fontSize=10;" vertex="1" parent="2"><mxGeometry x="${Math.round(x - CLOUD.w / 2)}" y="${Math.round(y - CLOUD.h / 2)}" width="${CLOUD.w}" height="${CLOUD.h}" as="geometry"/></mxCell>`,
         `<mxCell id="${cid}e" value="" style="endArrow=none;dashed=1;dashPattern=2 4;strokeColor=#9aa1ab;html=0;" edge="1" parent="1" source="${src}" target="${cid}"><mxGeometry relative="1" as="geometry"/></mxCell>`,
       );
       i++;
@@ -195,7 +197,7 @@ export function toDrawioIcons(topo: Topology, opts: DrawioIconOptions = {}): str
     '<mxfile host="NetTerminal">',
     '<diagram name="Topologia" id="topologia">',
     '<mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">',
-    `<root><mxCell id="0"/><mxCell id="1" parent="0"/>${zones.join("")}${edges.join("")}${cells.join("")}</root>`,
+    `<root><mxCell id="0"/><mxCell id="1" value="Enlaces" parent="0"/><mxCell id="2" value="Equipos" parent="0"/>${zones.join("")}${cells.join("")}${edges.join("")}</root>`,
     "</mxGraphModel>",
     "</diagram>",
     "</mxfile>",

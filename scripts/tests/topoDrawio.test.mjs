@@ -65,4 +65,28 @@ for (let i = 0; i < 2000; i++) {
 }
 fastEnough("draw.io con íconos, 2000 equipos", 150, () => D.toDrawioIcons(big, { l2: true }));
 
+// Estructura que cualquier lector de draw.io puede abrir: ids únicos y cada referencia (parent,
+// source, target) a una celda ya escrita. Antes los enlaces iban antes que sus equipos y algunos
+// visores e importadores mostraban el diagrama en blanco.
+{
+  const T = await import("../../src/lib/topology.ts");
+  const check = (label, doc) => {
+    const seen = new Set();
+    for (const m of doc.matchAll(/<mxCell\b([^>]*?)\/?>/g)) {
+      const attr = (k) => m[1].match(new RegExp(`\\b${k}="([^"]*)"`))?.[1];
+      const id = attr("id");
+      assert.ok(id && !seen.has(id), `${label}: id único (${id})`);
+      for (const k of ["parent", "source", "target"]) {
+        const ref = attr(k);
+        if (ref !== undefined) assert.ok(seen.has(ref), `${label}: ${k}="${ref}" de ${id} se refiere a una celda ya escrita`);
+      }
+      seen.add(id);
+    }
+    assert.ok(seen.size > 2, `${label}: tiene celdas`);
+  };
+  check("íconos con zonas y L2", xml);
+  check("íconos simple", plain);
+  check("cajas", T.toDrawio(topo));
+}
+
 console.log("topoDrawio: ok");
