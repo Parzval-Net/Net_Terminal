@@ -72,7 +72,7 @@ const CLI_ERROR =
  * " --More-- " de Cisco, "  ---- More ----" de Huawei VRP y "---(more)---"/"---(more 45%)---" de
  * Junos, con lo que el equipo envía para borrarlo (\r, retrocesos o ESC[K) o los espacios que lo tapan.
  */
-export const PAGER = /[ \t]*-{2,}[ \t]*\(?more(?: \d+%)?\)?[ \t]*-{2,}[ \t]*(?:\r[ \t]*\r|\x08+[ \t]*\x08+|\x1b\[K)?/gi;
+export const PAGER = /[ \t]*-{2,4}[ \t]*\(?more(?: \d+%)?\)?[ \t]*-{2,4}[ \t]*(?:\r[ \t]*\r|\x08+[ \t]*\x08+|\x1b\[K)?/gi;
 
 /** Quita los restos del paginador antes de leer la salida con los parsers. */
 export const stripPager = (text: string) => text.replace(PAGER, "");

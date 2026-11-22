@@ -706,8 +706,20 @@ noc@mx1>`]);
   ]);
   const bs = "\b".repeat(9);
   const pagers = [` --More-- ${bs}         ${bs}`, " --More-- \r          \r", " --More-- "];
-  for (const pg of pagers) {
-    const r10 = C.stripPager(r10raw.replace("Device ID: SW_1_RACK_11", `${pg}Device ID: SW_1_RACK_11`));
+  // Leída desde la pantalla (retrocesos ya aplicados): el paginador queda pegado al separador del bloque
+  // siguiente. Antes, el separador se borraba con el paginador y el vecino se perdía en el bloque anterior.
+  const glued = r10raw.replace("-------------------------\nDevice ID: SW_1_RACK_11", " --More---------------------------\nDevice ID: SW_1_RACK_11");
+  assert.ok(glued.includes("--More-----"), "variante pegada armada");
+  for (const out of [glued, C.stripPager(glued)]) {
+    const names = T.parseCdp(out).map((n) => `${n.name} ${n.remotePort}`);
+    assert.deepEqual(names, ["SW_1_MESON_01.lab.example.net GigabitEthernet0/2", "SW_1_RACK_11.lab.example.net GigabitEthernet0/5"], "cada vecino con su puerto");
+  }
+  // Huawei ("  ---- More ----") y Junos ("---(more 45%)---") se siguen limpiando.
+  assert.equal(C.stripPager("a\n  ---- More ----\x1b[Kb"), "a\nb");
+  assert.equal(C.stripPager("a\n---(more 45%)---\rb").replace("\r", ""), "a\nb");
+  for (const pg of [...pagers, null]) {
+    const src = pg === null ? glued : r10raw.replace("Device ID: SW_1_RACK_11", `${pg}Device ID: SW_1_RACK_11`);
+    const r10 = C.stripPager(src);
     for (const order of [
       [["SW_1_RACK_11", "192.0.2.16", r11], ["SW1_RACK_10", "192.0.2.17", r10]],
       [["SW1_RACK_10", "192.0.2.17", r10], ["SW_1_RACK_11", "192.0.2.16", r11]],

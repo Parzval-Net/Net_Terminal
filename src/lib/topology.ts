@@ -373,10 +373,17 @@ function field(block: string, re: RegExp): string | undefined {
 
 const usableIp = (ip?: string) => (ip && ip !== "0.0.0.0" ? ip : undefined);
 
+/**
+ * Separador de bloques de "show cdp neighbors detail": una línea que termina en 5 o más guiones. No se
+ * exige que empiece con ellos: leída desde la pantalla, la línea del paginador queda pegada al separador
+ * (" --More---------------------------") y el bloque del vecino siguiente se perdía dentro del anterior.
+ */
+const CDP_SEP = /^[^\n]*?-{5,}[ \t]*$/m;
+
 /** Cisco "show cdp neighbors detail" (IOS, IOS-XE, NX-OS). */
 export function parseCdp(out: string): Neighbor[] {
   return out
-    .split(/^-{5,}\s*$/m)
+    .split(CDP_SEP)
     .flatMap((b): Neighbor[] => {
       const name = field(b, /Device ID:\s*(\S+)/);
       const local = field(b, /Interface:\s*([^,\n]+),/);
@@ -408,7 +415,7 @@ const mgmtAt = (b: string) => b.indexOf("Management Addresses:");
  */
 export function parseCiscoLldp(out: string): Neighbor[] {
   return out
-    .split(/^-{5,}\s*$/m)
+    .split(CDP_SEP)
     // Solo los bloques sin "Local Intf:" (NX-OS) se parten por "Chassis id:": en IOS va después del puerto local.
     .flatMap((b) => (/^\s*Local Intf:/m.test(b) || !/^\s*Local Port id:/m.test(b) ? [b] : b.split(/^(?=[ \t]*Chassis id:)/m)))
     .flatMap((b): Neighbor[] => {
