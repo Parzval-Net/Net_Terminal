@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, ExternalLink, FilePlus, FolderOpen, RefreshCw, SquareTerminal, Trash2, X } from "lucide-react";
+import { Check, DatabaseBackup, ExternalLink, FilePlus, FolderOpen, Radar, RefreshCw, SquareTerminal, Trash2, X } from "lucide-react";
 import { Settings } from "../../lib/settings";
 import { stored, persist } from "../../lib/prefs";
 import {
@@ -24,7 +24,10 @@ import {
   ipAllowed,
   isLinkLocal,
   osTips,
+  pingCommand,
+  pingResult,
   protocolsFor,
+  reachRisk,
   rate,
   recipe,
   recoveryGuide,
@@ -34,7 +37,8 @@ import {
 } from "../../lib/transferCmds";
 import { Segmented } from "../controls";
 import { Btn, Collapsible, CopyText, IpSelect, Label, Section, StatusPill, Step, Toggle, fmtBytes, ToolHeader } from "./ui";
-import { useLocalIp } from "./useLocalIp";
+import { type LocalIf, useLocalIp } from "./useLocalIp";
+import { runOnDeviceResult } from "../../lib/deviceRun";
 import { FileManager, ScpRequest, TerminalRef } from "./FileManager";
 import { FtpClientSection, FtpServerSection, SftpSection } from "./FtpPanels";
 import { ServerGuardPanel, commandIp, useGuardPrefs, useGuardStats } from "./ServerGuard";
@@ -78,6 +82,7 @@ export function TransferTool({
   terminals,
   onConfirm,
   onScp,
+  onOpenBackup,
 }: {
   settings: Settings;
   running: string[];
@@ -86,6 +91,8 @@ export function TransferTool({
   terminals: TerminalRef[];
   onConfirm: (req: { title: string; message: string; label: string; danger?: boolean; action: () => void }) => void;
   onScp: (req: ScpRequest) => void;
+  /** Abre Herramientas › Respaldos (lee la configuración por la misma sesión, sin que el equipo llegue a este PC). */
+  onOpenBackup?: () => void;
 }) {
   const [tab, setTab] = useState<Tab>(() => {
     const t = stored<string>(TAB_KEY, "send");
@@ -132,6 +139,7 @@ export function TransferTool({
           ips={ips}
           localIp={localIp}
           setIp={setIp}
+          onOpenBackup={onOpenBackup}
         />
       </div>
       <div role="tabpanel" hidden={tab !== "session"}>
@@ -166,7 +174,7 @@ function FtpTab({
   terminals: TerminalRef[];
   onScp: (req: ScpRequest) => void;
   ip: string;
-  ips: { name: string; ip: string; default?: boolean }[];
+  ips: LocalIf[];
 }) {
   const stats = useGuardStats(running);
   const { files, reload } = useSharedFiles();
@@ -214,6 +222,7 @@ function SendReceive({
   ips,
   localIp,
   setIp,
+  onOpenBackup,
 }: {
   settings: Settings;
   running: string[];
@@ -221,9 +230,10 @@ function SendReceive({
   refreshRunning: () => void;
   terminals: TerminalRef[];
   onConfirm: (req: { title: string; message: string; label: string; danger?: boolean; action: () => void }) => void;
-  ips: { name: string; ip: string; default?: boolean }[];
+  ips: LocalIf[];
   localIp: string;
   setIp: (ip: string) => void;
+  onOpenBackup?: () => void;
 }) {
   const guardT = useGuardPrefs("tftp", s, onChange, ips);
   const guardH = useGuardPrefs("http", s, onChange, ips);
@@ -451,6 +461,8 @@ function SendReceive({
         tftpAllow={guardT.prefs.allow ?? ""}
         listenOn={listenOn}
         onConfirm={onConfirm}
+        ifs={ips}
+        onOpenBackup={onOpenBackup}
         filesActions={
           <div className="flex gap-1">
             <Btn kind="ghost" title="Abrir la carpeta compartida" aria-label="Abrir la carpeta compartida" onClick={() => invoke("open_dir", { which: "tftp" }).catch((e) => setError(String(e)))}>
@@ -659,6 +671,8 @@ function Assistant({
   tftpAllow,
   listenOn,
   onConfirm,
+  ifs,
+  onOpenBackup,
   filesPanel,
   filesActions,
 }: {
@@ -682,6 +696,9 @@ function Assistant({
   tftpAllow: string;
   listenOn: (ip: string) => void;
   onConfirm: (req: { title: string; message: string; label: string; danger?: boolean; action: () => void }) => void;
+  /** Interfaces de este PC con su máscara: si el host de la pestaña no está en ninguna, se avisa. */
+  ifs: LocalIf[];
+  onOpenBackup?: () => void;
   /** Lista de la carpeta compartida (paso 2) y sus acciones de encabezado. */
   filesPanel: React.ReactNode;
   filesActions: React.ReactNode;
@@ -694,6 +711,8 @@ function Assistant({
   const [proto, setProto] = useState<Proto>(saved.proto ?? "tftp");
   const [remote, setRemote] = useState("");
   const [sent, setSent] = useState("");
+  // Prueba de alcance: ping del equipo a este PC por la sesión de la pestaña.
+  const [ping, setPing] = useState<{ state: "run" | "ok" | "fail" | "unknown"; text: string } | null>(null);
   const [mode, setMode] = useState<"command" | "recover">("command");
   // El paso 1 queda listo con una pestaña o una elección del usuario, no con los valores de inicio.
   const [touched, setTouched] = useState(false);
@@ -749,6 +768,8 @@ function Assistant({
   // Con espacios u otros caracteres el comando toma argumentos de más o la URL queda mal formada.
   if (name && !commandSafeName(name))
     checks.push({ ok: false, text: `"${name}" tiene espacios o caracteres especiales: renómbralo con letras, números, punto, guion o guion bajo` });
+  // Un ping que falló se suma a lo pendiente: el copy no va a llegar a este PC.
+  if (ping?.state === "fail") checks.push({ ok: false, text: `El equipo no responde el ping a ${pcIp}` });
   const ready = !!r && checks.every((c) => c.ok);
   // Paso 2 listo: hay archivo elegido, o el nombre del archivo que se trae del equipo (un respaldo
   // tiene nombre sugerido).
@@ -756,21 +777,56 @@ function Assistant({
 
   const write = () => {
     if (!r || !term) return;
+    const pending = checks.filter((c) => !c.ok);
     const go = () => {
       // Sin Enter: el comando queda escrito en la terminal para revisarlo y confirmarlo allí.
       invoke("write", { id: term.connId, data: r.command })
         .then(() => setSent(`Escrito en ${term.name}. Revisa la línea en la terminal y presiona Enter.`))
         .catch((e) => setSent(`No se pudo escribir: ${e}`));
     };
-    if (r.disruptive)
+    // Con verificaciones pendientes el comando suele fallar en el equipo (p. ej. "%Error opening ...
+    // (Timed out)" con el TFTP detenido): se pide confirmar antes de escribirlo.
+    const warn = pending.length ? `Aún falta:\n${pending.map((c) => `• ${c.text}`).join("\n")}\n\nEl comando probablemente fallará en el equipo.\n\n` : "";
+    if (r.disruptive || pending.length)
       onConfirm({
-        title: "Cargar firmware",
-        message: `Se escribirá en ${term.name}:\n${r.command}\n\n${r.note ?? ""}`,
-        label: "Escribir en la terminal",
+        title: r.disruptive ? "Cargar firmware" : "Verificación pendiente",
+        message: `${warn}Se escribirá en ${term.name}:\n${r.command}${r.note && r.disruptive ? `\n\n${r.note}` : ""}`,
+        label: pending.length ? "Escribir de todos modos" : "Escribir en la terminal",
         danger: true,
         action: go,
       });
     else go();
+  };
+
+  // El equipo debe llegar a este PC: por un salto o desde otra red (VPN, NAT) suele no poder.
+  const risk = term && pcIp ? reachRisk({ host: term.host ?? term.session.host, jump: term.session.jump_host, ifs }) : null;
+  const pingCmd = pcIp ? pingCommand(vendor, pcIp) : "";
+  // Otra pestaña, IP o fabricante: el resultado anterior ya no vale (y una respuesta tardía se ignora).
+  const pingKey = `${term?.connId ?? ""} ${pingCmd}`;
+  const pingFor = useRef(pingKey);
+  useEffect(() => {
+    pingFor.current = pingKey;
+    setPing(null);
+  }, [pingKey]);
+  const testReach = () => {
+    if (!term || !pingCmd) return;
+    const key = pingKey;
+    setPing({ state: "run", text: `Probando: ${pingCmd}` });
+    runOnDeviceResult(term.connId, pingCmd, 30)
+      .then((res) => {
+        if (pingFor.current !== key) return;
+        const v = pingResult(res.output);
+        setPing({
+          state: v,
+          text:
+            v === "ok"
+              ? `El equipo llega a ${pcIp}.`
+              : v === "fail"
+                ? `El equipo no llega a ${pcIp}: el copy fallará. Revisa la ruta, el firewall de este PC o usa otro método.`
+                : `No se reconoció la respuesta de "${pingCmd}". Revisa la salida en la terminal.`,
+        });
+      })
+      .catch((e) => pingFor.current === key && setPing({ state: "unknown", text: `No se pudo probar el alcance: ${e}` }));
   };
 
   const vendorLabel = VENDORS.find((v) => v.id === vendor)?.label ?? vendor;
@@ -927,6 +983,34 @@ function Assistant({
         ) : (
           <div className="space-y-3">
             <Checklist checks={checks} />
+            {risk && (
+              <div role="note" className="rounded-lg border border-warn/50 bg-warn/10 p-2.5 text-[12px] space-y-2">
+                <p className="text-warn">
+                  El equipo debe poder llegar a {pcIp}. {risk === "jump" ? "Esta sesión pasa por un salto" : `${term?.host ?? term?.session.host} no está en ninguna red local de este PC`}: si llegas por VPN, NAT o un salto, probablemente no pueda
+                  {act === "backup" ? "; usa Herramientas › Respaldos (lee la configuración por la misma sesión)." : ". Prueba el alcance antes de ejecutar el comando."}
+                </p>
+                {act === "backup" && onOpenBackup && (
+                  <Btn className="!h-6 !px-2 !text-[11.5px]" onClick={onOpenBackup}>
+                    <DatabaseBackup size={13} /> Abrir Respaldos
+                  </Btn>
+                )}
+              </div>
+            )}
+            {term && pingCmd && (
+              <div className="flex flex-wrap items-center gap-2 text-[12px]">
+                <Btn
+                  className="!h-6 !px-2 !text-[11.5px]"
+                  disabled={ping?.state === "run"}
+                  onClick={testReach}
+                  title={`Ejecuta "${pingCmd}" en ${term.name} y lee la respuesta`}
+                >
+                  <Radar size={13} /> Probar alcance
+                </Btn>
+                <span role="status" className={`min-w-0 flex-1 ${ping?.state === "ok" ? "text-ok" : ping?.state === "fail" ? "text-warn" : "text-muted"}`}>
+                  {ping ? ping.text : `El equipo hace ping a ${pcIp} por la sesión (${pingCmd}).`}
+                </span>
+              </div>
+            )}
             {r ? (
               <div className="rounded-lg border border-line p-2.5 space-y-2">
                 <CopyText text={r.command} />

@@ -666,10 +666,11 @@ const handlers = {
   tftp_files: () => [["c9300-universalk9.17.12.04.SPA.bin", 1_163_845_632], ["AR6100-V300R022C10SPC100.cc", 168_820_736], ["FGT_200F-v7.4.5.out", 92_340_224]],
   // Como el backend: primero la de la ruta por defecto, luego físicas y al final virtuales.
   local_ips: () => [
-    { name: "en0", ip: "192.0.2.250", default: true },
-    { name: "en7", ip: "198.51.100.20", default: false },
-    { name: "bridge100", ip: "198.51.100.200", default: false },
-    { name: "utun4", ip: "203.0.113.9", default: false },
+    { name: "en0", ip: "192.0.2.250", default: true, mask: "255.255.255.0" },
+    { name: "en7", ip: "198.51.100.20", default: false, mask: "255.255.255.0" },
+    { name: "bridge100", ip: "198.51.100.200", default: false, mask: "255.255.255.0" },
+    // VPN punto a punto: 203.0.113.x (sucursales) no es una red local de este PC.
+    { name: "utun4", ip: "203.0.113.9", default: false, mask: "255.255.255.255" },
   ],
   // Solo lectura en el backend: el mock guarda las marcas (window.__roConns) y las llamadas (window.__roCalls) para revisarlas.
   set_read_only: ({ id, on }) => {
@@ -789,6 +790,19 @@ const handlers = {
   // MD5 de la copia del PC; el equipo devuelve el mismo en "verify /md5" (o ?md5bad, otro).
   tftp_md5: () => "3f2a9c1e5b7d4a6f8e0c2b4d6f8a1c3e",
   device_run: ({ conn, command }) => {
+    // Probar alcance (Transferencias): los equipos del sitio central llegan al PC; los de sucursales, no.
+    if (/^(execute )?ping /.test(command)) {
+      const job = `job-${nextId++}`;
+      const host = connSessions.get(conn)?.host ?? "";
+      const ok = !host.startsWith("203.0.113.");
+      const ip = command.split(" ").find((x) => /^\d+\.\d+\.\d+\.\d+$/.test(x));
+      setTimeout(() => {
+        const output = `${command}\r\nType escape sequence to abort.\r\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\r\n${ok ? "!!!!!\r\nSuccess rate is 100 percent (5/5)" : ".....\r\nSuccess rate is 0 percent (0/5)"}\r\n#`;
+        emit("tool-job", { job, kind: "result", text: "", data: { ok: true, output } });
+        emit("tool-job", { job, kind: "done", text: "" });
+      }, 500);
+      return job;
+    }
     // ?scpbusy: la sesión está tomada por un script en las dos primeras verificaciones.
     if (/^verify \/md5/.test(command) && location.search.includes("scpbusy") && busyVerifies++ < 2)
       throw "Un script está usando esta sesión. Espera a que termine o usa Detener script.";
@@ -1774,6 +1788,26 @@ const scenes = {
     document.querySelector("[aria-label='Iniciar TFTP']")?.click();
     await wait(300);
     demoTransfers();
+  },
+  // Asistente con la sesión de una sucursal (por VPN): aviso de alcance, Probar alcance y Respaldos.
+  "transfer-reach": async () => {
+    await open("sw-acceso-norte");
+    await wait(300);
+    await click("Herramientas: monitoreo, diagnóstico, TFTP, syslog, plugins");
+    await click("Transferencias");
+    await wait(400);
+    const sel = [...document.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.textContent.startsWith("sw-acceso-norte")));
+    const opt = [...(sel?.options ?? [])].find((o) => o.textContent.startsWith("sw-acceso-norte"));
+    if (sel && opt) {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(sel, opt.value);
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await wait(200);
+    [...document.querySelectorAll("[role=radio]")].find((b) => b.textContent.startsWith("Respaldar"))?.click();
+    await wait(300);
+    if (location.search.includes("ping")) [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Probar alcance"))?.click();
+    await wait(900);
+    document.querySelector("[aria-label='Lista de verificación']")?.scrollIntoView({ block: "start" });
   },
   // ---- Escenas de QA visual del contenedor de la app ----
   empty: async () => {},

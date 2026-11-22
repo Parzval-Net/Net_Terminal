@@ -6,6 +6,8 @@ export interface LocalIf {
   ip: string;
   /** Interfaz de la ruta por defecto del sistema. */
   default?: boolean;
+  /** Máscara de la red de la interfaz (vacía o ausente si el sistema no la informa). */
+  mask?: string;
 }
 
 const KEY = "localIp";

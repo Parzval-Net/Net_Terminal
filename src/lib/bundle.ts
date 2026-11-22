@@ -7,7 +7,7 @@
 import { type Settings, type Macro, type ModuleId, defaultSettings } from "./settings";
 import type { Session, Tunnel } from "../types";
 import type { HlRule } from "./highlight";
-import { regexError, riskyRegex, schemes } from "./highlight";
+import { regexError, riskyRegex, schemes, uniqueRules } from "./highlight";
 import { type Pack, type Risk, buildCatalog, computeRisk } from "./packs";
 import { GHOST_COLORS, GHOST_STYLES, LIST_KEYS } from "./suggest";
 import { type AlertRule, alertError } from "./alerts";
@@ -470,11 +470,12 @@ export function planMacros(current: Macro[], incoming: Macro[]): Macro[] {
   return incoming.map((m) => ({ ...m, id: freshId(ids, "imp-"), label: freshLabel(labels, m.label) }));
 }
 
-/** Reglas de resaltado del archivo como reglas nuevas (mismo criterio que los botones). */
+/** Reglas de resaltado del archivo como reglas nuevas (mismo criterio que los botones), sin repetir las que ya están. */
 export function planRules(current: HlRule[], incoming: HlRule[]): HlRule[] {
   const ids = new Set(current.map((r) => r.id));
   const names = new Set(current.map((r) => r.name.toLowerCase()));
-  return incoming.map((r) => ({ ...r, id: freshId(ids, "c"), name: freshLabel(names, r.name || r.pattern) }));
+  // Una regla idéntica a una que ya está (misma expresión, flags y estilo) no se agrega.
+  return uniqueRules(incoming, current).map((r) => ({ ...r, id: freshId(ids, "c"), name: freshLabel(names, r.name || r.pattern) }));
 }
 
 /**

@@ -367,3 +367,50 @@ export function ipAllowed(ip: string, entries: string[]): boolean {
     return ((n & m) >>> 0) === ((b & m) >>> 0);
   });
 }
+
+/**
+ * Ping del equipo hacia este PC, para probar que llega al servidor antes del copy. NX-OS usa la VRF
+ * de gestión, igual que sus comandos de copia; Junos limita a 3 envíos (sin count no termina).
+ */
+export function pingCommand(vendor: Vendor, ip: string): string {
+  switch (vendor) {
+    case "fortigate":
+      return `execute ping ${ip}`;
+    case "nxos":
+      return `ping ${ip} vrf management`;
+    case "juniper":
+      return `ping ${ip} count 3`;
+    default:
+      return `ping ${ip}`;
+  }
+}
+
+/**
+ * Resultado de un ping leído de la salida del equipo: "ok" si respondió al menos una vez (Cisco "!!"
+ * o tasa de éxito mayor a 0, "bytes from" o "Reply from" con bytes, pérdida menor a 100%), "fail" si
+ * no hubo respuesta, "unknown" si la salida no se reconoce (comando rechazado, salida cortada).
+ */
+export function pingResult(output: string): "ok" | "fail" | "unknown" {
+  const rate = output.match(/Success rate is (\d+) percent/i);
+  if (rate) return Number(rate[1]) > 0 ? "ok" : "fail";
+  if (/!{2,}/.test(output) || /\bbytes from\b/i.test(output) || /Reply from [\d.]+:? bytes=/i.test(output)) return "ok";
+  const loss = output.match(/([\d.]+)% packet loss/i);
+  if (loss) return Number(loss[1]) < 100 ? "ok" : "fail";
+  if (/\.{5}|Request time ?out|timed out|unreachable|no route/i.test(output)) return "fail";
+  return "unknown";
+}
+
+/**
+ * Por qué el equipo podría no llegar a este PC aunque la sesión funcione: la sesión pasa por un salto
+ * ("jump") o el host no está en ninguna red local de este PC ("routed": se llega por un router, VPN o
+ * NAT y el equipo puede no tener ruta a la IP privada del PC). null si está en una red local o no se
+ * puede saber (host con nombre, interfaces sin máscara).
+ */
+export function reachRisk(o: { host?: string; jump?: string; ifs: { ip: string; mask?: string }[] }): "jump" | "routed" | null {
+  if (o.jump?.trim()) return "jump";
+  const host = o.host?.trim() ?? "";
+  if (ipNum(host) === null) return null;
+  const known = o.ifs.filter((i) => i.mask && ipNum(i.mask) !== null);
+  if (!known.length) return null;
+  return known.some((i) => sameSubnet(host, i.ip, i.mask!)) ? null : "routed";
+}
